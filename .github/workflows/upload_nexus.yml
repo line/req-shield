@@ -1,0 +1,49 @@
+name: Publish to Nexus
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        description: 'profileInfo'
+        required: true
+        default: 'beta'
+        options:
+          - 'beta'
+          - 'real'
+      module:
+        type: choice
+        description: 'Select a submodule to publish'
+        required: true
+        options:
+          - 'support'
+          - 'core'
+          - 'core-kotlin-coroutine'
+          - 'core-reactor'
+          - 'core-spring'
+          - 'core-spring-webflux'
+          - 'core-spring-webflux-kotlin-coroutine'
+
+jobs:
+  publish:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v1
+        with:
+          java-version: 17
+
+      - name: Build and publish
+        env:
+          MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.OSSRH_TOKEN }}
+          ORG_GRADLE_PROJECT_signingKeyId: ${{ secrets.GPG_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_PASSWORD }}
+          PROFILE: ${{ github.event.inputs.profile }}
+          MODULE: ${{ github.event.inputs.module }}
+        run: |
+          ./gradlew :$MODULE:publish
