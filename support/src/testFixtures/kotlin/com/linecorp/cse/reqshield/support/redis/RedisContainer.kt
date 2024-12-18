@@ -20,12 +20,11 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.utility.DockerImageName
 
 object RedisContainer {
-
-    val instance = GenericContainer(
-        DockerImageName.parse("docker-hub-mirror.linecorp.com/redis:6.2.7-alpine")
-    ).apply {
-        portBindings = listOf("6379:6379")
-        withReuse(true)
-    }
-
+    val instance =
+        GenericContainer(
+            DockerImageName.parse("redis:6.2.7-alpine"),
+        ).apply {
+            portBindings = listOf("6379:6379")
+            withReuse(true)
+        }
 }

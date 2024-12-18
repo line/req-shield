@@ -14,10 +14,10 @@
  *  under the License.
  */
 
-version = "1.3.1"
+version = "1.0.0"
 
 plugins {
-    kotlin("jvm") version "1.6.21"
+    kotlin("jvm")
 }
 
 dependencies {
@@ -26,7 +26,7 @@ dependencies {
     testImplementation("io.lettuce:lettuce-core:6.1.10.RELEASE")
 }
 
-tasks.compileKotlin {
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     kotlinOptions {
         freeCompilerArgs = listOf("-Xjsr305=strict")
         jvmTarget = JavaVersion.VERSION_1_8.toString()

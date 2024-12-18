@@ -15,19 +15,21 @@
  */
 
 version = "1.0.0"
-
-plugins {
-    application
-    `maven-publish`
-    `java-library`
-    id("jacoco")
-}
-
 val kotlinVer: String by project
 val slf4jApi: String by project
 val logbackClassic: String by project
 val mockk: String by project
 val awaitility: String by project
+
+plugins {
+    kotlin("jvm") version "1.8.20"
+    kotlin("plugin.spring") version "1.8.20"
+    application
+    `maven-publish`
+    `java-library`
+    id("jacoco")
+    id("org.jlleitschuh.gradle.ktlint") version "12.1.0"
+}
 
 allprojects {
 
@@ -42,9 +44,6 @@ allprojects {
 
     repositories {
         mavenCentral()
-        maven(url = "https://registry.navercorp.com/maven2")
-        maven(url = "https://registry.linecorp.com/content/repositories/central/")
-        maven(url = "https://repo.linecorp.com/content/repositories/releases/")
     }
 
     dependencies {
@@ -81,6 +80,9 @@ val springBoot3ProjectNames =
     )
 
 subprojects {
+    apply {
+        plugin("org.jlleitschuh.gradle.ktlint")
+    }
     java {
         sourceCompatibility =
             when (project.name) {

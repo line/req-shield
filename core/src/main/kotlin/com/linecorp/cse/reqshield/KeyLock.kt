@@ -17,12 +17,18 @@
 package com.linecorp.cse.reqshield
 
 interface KeyLock {
+    fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean
 
-    fun tryLock(key: String, lockType: LockType): Boolean
-
-    fun unLock(key: String, lockType: LockType): Boolean
+    fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean
 }
 
 enum class LockType {
-    CREATE, UPDATE
+    CREATE,
+    UPDATE,
 }

@@ -2,7 +2,7 @@ version: "3.1"
 
 services:
   redis:
-    image: docker-hub-mirror.linecorp.com/redis:6.2.7-alpine
+    image: redis:6.2.7-alpine
     ports:
       - 6379:6379
     restart: always

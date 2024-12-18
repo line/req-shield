@@ -28,8 +28,9 @@ import java.util.concurrent.Semaphore
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
-class KeyLocalLock(private val lockTimeoutMillis: Long): KeyLock {
+class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
     private data class LockInfo(val semaphore: Semaphore, val createdAt: Long)
+
     private val lockMap = ConcurrentHashMap<String, LockInfo>()
 
     init {
@@ -43,7 +44,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long): KeyLock {
             .subscribe()
     }
 
-    override fun tryLock(key: String, lockType: LockType): Mono<Boolean> {
+    override fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean> {
         return Mono.fromCallable {
             val completeKey = "${key}_${lockType.name}"
             val lockInfo = lockMap.computeIfAbsent(completeKey) { LockInfo(Semaphore(1), nowToEpochTime()) }
@@ -51,10 +55,13 @@ class KeyLocalLock(private val lockTimeoutMillis: Long): KeyLock {
         }
     }
 
-    override fun unLock(key: String, lockType: LockType): Mono<Boolean> {
+    override fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean> {
         return Mono.fromCallable {
             val completeKey = "${key}_${lockType.name}"
-            val lockInfo  = lockMap[completeKey]
+            val lockInfo = lockMap[completeKey]
             lockInfo?.let {
                 it.semaphore.release()
                 lockMap.remove(completeKey)

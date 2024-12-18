@@ -7,7 +7,7 @@ import org.springframework.stereotype.Service
 import java.time.Duration
 
 @Service
-class `ReqShieldCacheImpl `<T>(
+class ReqShieldCacheImpl<T>(
     private val redisTemplate: RedisTemplate<String, ReqShieldData<T>>,
     private val redisTemplateForGlobalLock: RedisTemplate<String, String>,
 ) : ReqShieldCache<T> {

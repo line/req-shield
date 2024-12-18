@@ -19,15 +19,20 @@ package com.linecorp.cse.reqshield
 class KeyGlobalLock(
     private val globalLockFunction: (String, Long) -> Boolean,
     private val globalUnLockFunction: (String) -> Boolean,
-    private val lockTimeoutMillis: Long
-): KeyLock {
-
-    override fun tryLock(key: String, lockType: LockType): Boolean {
+    private val lockTimeoutMillis: Long,
+) : KeyLock {
+    override fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean {
         val completeKey = "${key}_${lockType.name}"
         return globalLockFunction(completeKey, lockTimeoutMillis)
     }
 
-    override fun unLock(key: String, lockType: LockType): Boolean {
+    override fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean {
         val completeKey = "${key}_${lockType.name}"
         return globalUnLockFunction(completeKey)
     }

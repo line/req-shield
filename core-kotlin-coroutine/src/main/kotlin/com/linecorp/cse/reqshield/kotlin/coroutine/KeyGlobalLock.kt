@@ -19,15 +19,20 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 class KeyGlobalLock(
     private val globalLockFunction: suspend (String, Long) -> Boolean,
     private val globalUnLockFunction: suspend (String) -> Boolean,
-    private val lockTimeoutMillis: Long
-): KeyLock {
-
-    override suspend fun tryLock(key: String, lockType: LockType): Boolean {
+    private val lockTimeoutMillis: Long,
+) : KeyLock {
+    override suspend fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean {
         val completeKey = "${key}_${lockType.name}"
         return globalLockFunction(completeKey, lockTimeoutMillis)
     }
 
-    override suspend fun unLock(key: String, lockType: LockType): Boolean {
+    override suspend fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean {
         val completeKey = "${key}_${lockType.name}"
         return globalUnLockFunction(completeKey)
     }

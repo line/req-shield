@@ -21,15 +21,20 @@ import reactor.core.publisher.Mono
 class KeyGlobalLock(
     private val globalLockFunction: (String, Long) -> Mono<Boolean>,
     private val globalUnLockFunction: (String) -> Mono<Boolean>,
-    private val lockTimeoutMillis: Long
-): KeyLock {
-
-    override fun tryLock(key: String, lockType: LockType): Mono<Boolean> {
+    private val lockTimeoutMillis: Long,
+) : KeyLock {
+    override fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean> {
         val completeKey = "${key}_${lockType.name}"
         return globalLockFunction(completeKey, lockTimeoutMillis)
     }
 
-    override fun unLock(key: String, lockType: LockType): Mono<Boolean> {
+    override fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean> {
         val completeKey = "${key}_${lockType.name}"
         return globalUnLockFunction(completeKey)
     }

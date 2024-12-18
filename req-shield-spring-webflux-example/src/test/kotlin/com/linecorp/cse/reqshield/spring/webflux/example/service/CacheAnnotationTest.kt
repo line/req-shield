@@ -20,7 +20,9 @@ import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import org.awaitility.Awaitility.await
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -30,7 +32,7 @@ import org.springframework.test.context.junit.jupiter.SpringExtension
 import reactor.core.publisher.Flux
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
-import java.util.*
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertNotNull
 
@@ -53,18 +55,19 @@ class CacheAnnotationTest : AbstractRedisTest() {
         val testProductId: String = UUID.randomUUID().toString()
 
         val flux =
-            Flux.range(1, 20)
+            Flux
+                .range(1, 20)
                 .flatMap {
-                    sampleService.getProduct(testProductId)
+                    sampleService
+                        .getProduct(testProductId)
                         .subscribeOn(Schedulers.boundedElastic())
-                }
-                .collectList()
+                }.collectList()
 
-        StepVerifier.create(flux)
+        StepVerifier
+            .create(flux)
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
-            }
-            .verifyComplete()
+            }.verifyComplete()
     }
 
     @Test
@@ -72,18 +75,19 @@ class CacheAnnotationTest : AbstractRedisTest() {
         val testProductId: String = UUID.randomUUID().toString()
 
         val flux =
-            Flux.range(1, 20)
+            Flux
+                .range(1, 20)
                 .flatMap {
-                    sampleService.getProductForGlobalLock(testProductId)
+                    sampleService
+                        .getProductForGlobalLock(testProductId)
                         .subscribeOn(Schedulers.boundedElastic())
-                }
-                .collectList()
+                }.collectList()
 
-        StepVerifier.create(flux)
+        StepVerifier
+            .create(flux)
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
-            }
-            .verifyComplete()
+            }.verifyComplete()
     }
 
     @Test
@@ -92,12 +96,12 @@ class CacheAnnotationTest : AbstractRedisTest() {
         val testProductId: String = UUID.randomUUID().toString()
         val productMono = sampleService.getProduct(testProductId).subscribeOn(Schedulers.boundedElastic())
 
-        StepVerifier.create(productMono)
+        StepVerifier
+            .create(productMono)
             .expectNextMatches { product ->
                 assertNotNull(product)
                 true
-            }
-            .expectComplete()
+            }.expectComplete()
             .verify()
 
         // then
@@ -110,12 +114,12 @@ class CacheAnnotationTest : AbstractRedisTest() {
         // when
         val removeProductMono = sampleService.removeProduct(testProductId).subscribeOn(Schedulers.boundedElastic())
 
-        StepVerifier.create(removeProductMono)
+        StepVerifier
+            .create(removeProductMono)
             .expectNextMatches { boolean ->
                 assertTrue(boolean)
                 true
-            }
-            .expectComplete()
+            }.expectComplete()
             .verify()
 
         // then

@@ -14,10 +14,10 @@
  *  under the License.
  */
 
-version = "1.3.1"
+version = "1.0.0"
 
 plugins {
-    kotlin("jvm") version "1.6.21"
+    kotlin("jvm")
     `java-test-fixtures`
 }
 
@@ -33,7 +33,7 @@ dependencies {
     testFixturesImplementation("org.springframework.boot:spring-boot-test:$springBoot")
 }
 
-tasks.compileKotlin {
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     kotlinOptions {
         freeCompilerArgs = listOf("-Xjsr305=strict")
         jvmTarget = JavaVersion.VERSION_1_8.toString()

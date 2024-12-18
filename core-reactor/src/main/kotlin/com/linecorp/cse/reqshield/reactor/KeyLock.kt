@@ -19,12 +19,18 @@ package com.linecorp.cse.reqshield.reactor
 import reactor.core.publisher.Mono
 
 interface KeyLock {
+    fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean>
 
-    fun tryLock(key: String, lockType: LockType): Mono<Boolean>
-
-    fun unLock(key: String, lockType: LockType): Mono<Boolean>
+    fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Mono<Boolean>
 }
 
 enum class LockType {
-    CREATE, UPDATE
+    CREATE,
+    UPDATE,
 }

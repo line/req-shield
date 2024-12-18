@@ -17,12 +17,18 @@
 package com.linecorp.cse.reqshield.kotlin.coroutine
 
 interface KeyLock {
+    suspend fun tryLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean
 
-    suspend fun tryLock(key: String, lockType: LockType): Boolean
-
-    suspend fun unLock(key: String, lockType: LockType): Boolean
+    suspend fun unLock(
+        key: String,
+        lockType: LockType,
+    ): Boolean
 }
 
 enum class LockType {
-    CREATE, UPDATE
+    CREATE,
+    UPDATE,
 }
