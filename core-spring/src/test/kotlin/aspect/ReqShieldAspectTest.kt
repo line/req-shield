@@ -30,7 +30,9 @@ import io.mockk.spyk
 import io.mockk.verify
 import org.aspectj.lang.ProceedingJoinPoint
 import org.awaitility.Awaitility
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
@@ -62,7 +64,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                 TestBean::class.java,
                 TestBean::cacheableWithSingleArgument.name,
                 String::class.java,
-            )
+            )!!
 
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
@@ -144,7 +146,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                 TestBean::class.java,
                 TestBean::cacheableWithSingleArgument.name,
                 String::class.java,
-            )
+            )!!
 
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(

@@ -14,26 +14,21 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
 }
-
-val spring: String by project
-val aspectj: String by project
 
 dependencies {
     api(project(":core"))
-    compileOnly("org.springframework:spring-context:$spring")
-    compileOnly("org.aspectj:aspectjweaver:$aspectj")
+    compileOnly(rootProject.libs.spring.context)
+    compileOnly(rootProject.libs.aspectj)
 
     testImplementation(testFixtures(project(":support")))
     testImplementation(project(":core"))
-    testImplementation(platform("org.junit:junit-bom:5.9.1"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("org.springframework:spring-context:$spring")
-    testImplementation("org.aspectj:aspectjweaver:$aspectj")
+    testImplementation(platform(rootProject.libs.junit.bom))
+    testImplementation(rootProject.libs.junit)
+    testImplementation(rootProject.libs.spring.context)
+    testImplementation(rootProject.libs.aspectj)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

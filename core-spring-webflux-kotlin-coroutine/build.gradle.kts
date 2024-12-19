@@ -14,34 +14,27 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
 }
-
-val spring: String by project
-val springTest: String by project
-val aspectj: String by project
-val kotlinCoroutine: String by project
 
 dependencies {
     api(project(":core-kotlin-coroutine"))
-    compileOnly("org.springframework:spring-context:$spring")
-    compileOnly("org.aspectj:aspectjweaver:$aspectj")
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core:$kotlinCoroutine")
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$kotlinCoroutine")
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:$kotlinCoroutine")
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-reactor:$kotlinCoroutine")
+    compileOnly(rootProject.libs.spring.context)
+    compileOnly(rootProject.libs.aspectj)
+    compileOnly(rootProject.libs.kotlin.coroutine)
+    compileOnly(rootProject.libs.kotlin.coroutine.jvm)
+    compileOnly(rootProject.libs.kotlin.coroutine.jdk8)
+    compileOnly(rootProject.libs.kotlin.coroutine.reactor)
 
     testImplementation(testFixtures(project(":support")))
     testImplementation(project(":core-kotlin-coroutine"))
-    testImplementation(platform("org.junit:junit-bom:5.9.1"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$kotlinCoroutine")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$kotlinCoroutine")
-    testImplementation("org.springframework:spring-context:$spring")
-    testImplementation("org.aspectj:aspectjweaver:$aspectj")
+    testImplementation(platform(rootProject.libs.junit.bom))
+    testImplementation(rootProject.libs.junit)
+    testImplementation(rootProject.libs.kotlin.coroutine.test)
+    testImplementation(rootProject.libs.kotlin.coroutine.jvm)
+    testImplementation(rootProject.libs.spring.context)
+    testImplementation(rootProject.libs.aspectj)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

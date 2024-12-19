@@ -14,23 +14,20 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.spring)
+    alias(libs.plugins.spring.boot2)
+    alias(libs.plugins.spring.dependency.management)
     `java-test-fixtures`
 }
 
-val testContainerVer: String by project
-val spring: String by project
-val springBoot: String by project
-
 dependencies {
-    testFixturesImplementation("org.testcontainers:testcontainers:$testContainerVer")
-    testFixturesImplementation("org.testcontainers:junit-jupiter:$testContainerVer")
-    testFixturesImplementation("org.springframework:spring-context:$spring")
-    testFixturesImplementation("org.springframework:spring-test:$spring")
-    testFixturesImplementation("org.springframework.boot:spring-boot-test:$springBoot")
+    testFixturesImplementation(rootProject.libs.testcontainers)
+    testFixturesImplementation(rootProject.libs.junit.jupiter.testcontainers)
+    testFixturesImplementation(rootProject.libs.spring.context)
+    testFixturesImplementation(rootProject.libs.spring.test)
+    testFixturesImplementation(rootProject.libs.spring.boot.test)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

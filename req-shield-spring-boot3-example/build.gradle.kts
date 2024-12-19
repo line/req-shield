@@ -1,29 +1,26 @@
 plugins {
-    kotlin("jvm")
-    kotlin("plugin.spring")
-    id("org.springframework.boot") version "3.2.5"
-    id("io.spring.dependency-management") version "1.1.5"
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.spring)
+    alias(libs.plugins.spring.boot3)
+    alias(libs.plugins.spring.dependency.management)
 }
-
-group = "com.linecorp.cse.reqshield"
-version = "1.0.0"
 
 dependencies {
     implementation(project(":core-spring"))
 
-    implementation("org.slf4j:slf4j-api:2.0.13") {
+    implementation(rootProject.libs.slf4j.spring.boot3) {
         because("spring-boot3 depends on slf4j-api 2.0.13")
     }
 
-    implementation("org.springframework.boot:spring-boot-starter-web")
-    implementation("org.springframework.boot:spring-boot-starter-cache")
-    implementation("org.springframework.boot:spring-boot-starter-data-redis")
-    implementation("org.springframework.boot:spring-boot-starter-aop")
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    implementation(rootProject.libs.spring.boot.starter.web)
+    implementation(rootProject.libs.spring.boot.starter.cache)
+    implementation(rootProject.libs.spring.boot.starter.data.redis)
+    implementation(rootProject.libs.spring.boot.starter.aop)
+    implementation(rootProject.libs.jackson.module.kotlin)
 
     testImplementation(testFixtures(project(":support")))
-    testImplementation("org.springframework.boot:spring-boot-starter-test")
-    testImplementation("ch.qos.logback:logback-classic:1.4.14") {
+    testImplementation(rootProject.libs.spring.boot.starter.test)
+    testImplementation(rootProject.libs.logback.spring.boot3) {
         because("spring-boot3 depends on logback-classic 1.4.14")
     }
 }

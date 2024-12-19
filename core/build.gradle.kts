@@ -14,16 +14,14 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
 }
 
 dependencies {
     api(project(":support"))
     testImplementation(testFixtures(project(":support")))
-    testImplementation("io.lettuce:lettuce-core:6.1.10.RELEASE")
+    testImplementation(rootProject.libs.lettuce)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

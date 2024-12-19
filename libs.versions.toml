@@ -1,0 +1,70 @@
+[versions]
+kotlin = "1.8.20"
+kotlinCoroutine = "1.7.3"
+reactor = "3.4.23"
+spring = "5.3.30"
+springBoot3 = "3.3.1"
+springBoot2 = "2.7.17"
+springDependency = "1.1.5"
+junit = "5.9.1"
+testcontainers = "1.18.1"
+
+[libraries]
+# kotlin
+kotlin = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+jackson-module-kotlin = { module = "com.fasterxml.jackson.module:jackson-module-kotlin" }
+reactor-kotlin-extensions = { module = "io.projectreactor.kotlin:reactor-kotlin-extensions" }
+kotlin-stdlib-jdk8 = { module = "org.jetbrains.kotlin:kotlin-stdlib-jdk8", version.ref = "kotlin" }
+
+# coroutines
+kotlin-coroutine = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinCoroutine" }
+kotlin-coroutine-jvm = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm", version.ref = "kotlinCoroutine" }
+kotlin-coroutine-jdk8 = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-jdk8", version.ref = "kotlinCoroutine" }
+kotlin-coroutine-reactor = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-reactor", version.ref = "kotlinCoroutine" }
+kotlin-coroutine-reactive = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-reactive", version.ref = "kotlinCoroutine" }
+
+# log
+slf4j = { module = "org.slf4j:slf4j-api", version = "1.7.36" }
+slf4j-spring-boot3 = { module = "org.slf4j:slf4j-api", version = "2.0.13" }
+logback = { module = "ch.qos.logback:logback-classic", version = "1.2.11" }
+logback-spring-boot3 = { module = "ch.qos.logback:logback-classic", version = "1.4.14" }
+
+# redis
+lettuce = { module = "io.lettuce:lettuce-core", version = "6.1.10.RELEASE" }
+
+# spring
+spring-context = { module = "org.springframework:spring-context", version.ref = "spring" }
+aspectj = { module = "org.aspectj:aspectjweaver", version = "1.9.7" }
+spring-test = { module = "org.springframework:spring-test", version.ref = "spring" }
+spring-boot-test = { module = "org.springframework.boot:spring-boot-test", version.ref = "springBoot2" }
+spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux" }
+spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web" }
+spring-boot-starter-cache = { module = "org.springframework.boot:spring-boot-starter-cache" }
+spring-boot-starter-data-redis = { module = "org.springframework.boot:spring-boot-starter-data-redis" }
+spring-boot-starter-data-redis-reactive = { module = "org.springframework.boot:spring-boot-starter-data-redis-reactive" }
+spring-boot-starter-aop = { module = "org.springframework.boot:spring-boot-starter-aop" }
+spring-boot-configuration-processor = { module = "org.springframework.boot:spring-boot-configuration-processor" }
+
+# reactor
+reactor = { module = "io.projectreactor:reactor-core", version.ref = "reactor" }
+
+# test
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
+junit-jupiter-testcontainers = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
+mockk = { module = "io.mockk:mockk", version = "1.12.3" }
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+kotlin-coroutine-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinCoroutine" }
+awaitility = { module = "org.awaitility:awaitility", version = "4.1.0" }
+reactor-test = { module = "io.projectreactor:reactor-test", version.ref = "reactor" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-spring = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlin" }
+spring-boot2 = { id = "org.springframework.boot", version.ref = "springBoot2" }
+spring-boot3 = { id = "org.springframework.boot", version.ref = "springBoot3" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependency" }
+ktlint = { id = "org.jlleitschuh.gradle.ktlint", version = "12.1.0" }

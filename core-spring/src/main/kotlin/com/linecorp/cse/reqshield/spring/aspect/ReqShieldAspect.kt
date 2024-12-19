@@ -96,9 +96,11 @@ class ReqShieldAspect<T>(
 
     internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
         AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheable::class.java)
+            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
 
     internal fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
         AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheEvict::class.java)
+            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
 
     internal fun getCacheableCacheKey(joinPoint: ProceedingJoinPoint): String {
         val annotation = getCacheableAnnotation(joinPoint)

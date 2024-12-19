@@ -14,19 +14,15 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
 }
-
-val reactor: String by project
 
 dependencies {
     api(project(":support"))
-    compileOnly("io.projectreactor:reactor-core:$reactor")
-    testImplementation("io.projectreactor:reactor-test:$reactor")
-    testImplementation("io.lettuce:lettuce-core:6.1.10.RELEASE")
+    compileOnly(rootProject.libs.reactor)
+    testImplementation(rootProject.libs.reactor.test)
+    testImplementation(rootProject.libs.lettuce)
     testImplementation(testFixtures(project(":support")))
 }
 

@@ -43,3 +43,11 @@ include("core-spring-webflux-kotlin-coroutine")
 include("req-shield-spring-webflux-kotlin-coroutine-example")
 include("req-shield-spring-boot3-webflux-kotlin-coroutine-example")
 include("support")
+
+dependencyResolutionManagement {
+    versionCatalogs {
+        create("libs") {
+            from(files("libs.versions.toml"))
+        }
+    }
+}

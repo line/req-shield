@@ -15,28 +15,27 @@
  */
 
 plugins {
-    id("org.springframework.boot") version "2.7.17"
-    id("io.spring.dependency-management") version "1.0.15.RELEASE"
-    kotlin("jvm")
-    kotlin("plugin.spring")
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.spring)
+    alias(libs.plugins.spring.boot2)
+    alias(libs.plugins.spring.dependency.management)
 }
 
 group = "com.linecorp.cse.reqshield"
-version = "1.0.0"
 
 dependencies {
     implementation(project(":core-spring-webflux"))
-    implementation("org.springframework.boot:spring-boot-starter-webflux")
-    implementation("org.springframework.boot:spring-boot-starter-cache")
-    implementation("org.springframework.boot:spring-boot-starter-data-redis")
-    implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
-    implementation("org.springframework.boot:spring-boot-starter-aop")
-    annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
+    implementation(rootProject.libs.spring.boot.starter.webflux)
+    implementation(rootProject.libs.spring.boot.starter.cache)
+    implementation(rootProject.libs.spring.boot.starter.data.redis)
+    implementation(rootProject.libs.spring.boot.starter.data.redis.reactive)
+    implementation(rootProject.libs.spring.boot.starter.aop)
+    implementation(rootProject.libs.jackson.module.kotlin)
+    annotationProcessor(rootProject.libs.spring.boot.configuration.processor)
 
     testImplementation(testFixtures(project(":support")))
-    testImplementation("org.springframework.boot:spring-boot-starter-test")
-    testImplementation("io.projectreactor:reactor-test:3.4.10")
+    testImplementation(rootProject.libs.spring.boot.starter.test)
+    testImplementation(rootProject.libs.reactor.test)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
