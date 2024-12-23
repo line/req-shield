@@ -18,7 +18,6 @@ package com.linecorp.cse.reqshield.reactor
 
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -159,7 +158,7 @@ class ReqShield<T>(
             .getCacheFunction(key)
             .repeatWhenEmpty {
                 Flux
-                    .range(1, MAX_ATTEMPT_GET_CACHE)
+                    .range(1, reqShieldConfig.maxAttemptGetCache)
                     .delayElements(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
             }.flatMap { reqShieldData ->
                 if (reqShieldData != null) {

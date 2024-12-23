@@ -18,7 +18,6 @@ package com.linecorp.cse.reqshield
 
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -159,7 +158,7 @@ class ReqShield<T>(
                     val funcResult = executeGetCacheFunction(cacheGetter, key)
                     if (funcResult != null) {
                         future.complete(funcResult.value)
-                    } else if (counter.incrementAndGet() >= MAX_ATTEMPT_GET_CACHE) {
+                    } else if (counter.incrementAndGet() >= reqShieldConfiguration.maxAttemptGetCache) {
                         future.complete(
                             executeCallable({ callable.call() }, false),
                         )

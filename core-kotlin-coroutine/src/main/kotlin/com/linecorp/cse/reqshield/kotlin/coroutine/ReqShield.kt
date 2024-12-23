@@ -18,7 +18,6 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -147,7 +146,7 @@ class ReqShield<T>(
         key: String,
     ): Deferred<T?> =
         CoroutineScope(Dispatchers.IO).async {
-            while (counter.incrementAndGet() <= MAX_ATTEMPT_GET_CACHE) {
+            while (counter.incrementAndGet() <= reqShieldConfig.maxAttemptGetCache) {
                 executeGetCacheFunction(cacheGetter, key)?.let {
                     return@async it.value
                 }

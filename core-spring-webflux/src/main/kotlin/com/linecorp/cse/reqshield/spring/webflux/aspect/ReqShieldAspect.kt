@@ -125,6 +125,7 @@ class ReqShieldAspect<T>(
                 isLocalLock = annotation.isLocalLock,
                 lockTimeoutMillis = annotation.lockTimeoutMillis,
                 decisionForUpdate = annotation.decisionForUpdate,
+                maxAttemptGetCache = annotation.maxAttemptGetCache,
             )
 
         return ReqShield(reqShieldConfiguration)

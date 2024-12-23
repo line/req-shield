@@ -21,6 +21,7 @@ import com.linecorp.cse.reqshield.reactor.KeyLocalLock
 import com.linecorp.cse.reqshield.reactor.KeyLock
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_DECISION_FOR_UPDATE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIMEOUT_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import reactor.core.publisher.Mono
@@ -42,6 +43,7 @@ data class ReqShieldConfiguration<T>(
         } else {
             KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
         },
+    val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
 ) {
     init {
         if (!isLocalLock) {
