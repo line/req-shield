@@ -157,15 +157,39 @@ subprojects {
 tasks.register<JacocoReport>("jacocoAggregateReport") {
     dependsOn(subprojects.map { it.tasks.named("test") })
 
-    additionalSourceDirs.setFrom(files(subprojects.map { it.sourceSets.main.get().allSource.srcDirs }))
-    sourceDirectories.setFrom(files(subprojects.map { it.sourceSets.main.get().allSource.srcDirs }))
-    classDirectories.setFrom(files(subprojects.map { it.sourceSets.main.get().output }))
-    executionData.setFrom(files(subprojects.map { it.buildDir.resolve("jacoco/test.exec") }))
+    additionalSourceDirs.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().allSource.srcDirs
+            }
+        )
+    )
+    sourceDirectories.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().allSource.srcDirs
+            }
+        )
+    )
+    classDirectories.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().output
+            }
+        )
+    )
+    executionData.setFrom(
+        files(
+            subprojects.map {
+                it.buildDir.resolve("jacoco/test.exec")
+            }
+        )
+    )
 
     reports {
         xml.required.set(true)
-        xml.outputLocation.set(file("${buildDir}/reports/jacoco/test/jacocoTestReport.xml"))
+        xml.outputLocation.set(file("$buildDir/reports/jacoco/test/jacocoTestReport.xml"))
         html.required.set(true)
-        html.outputLocation.set(file("${buildDir}/reports/jacoco/test/html"))
+        html.outputLocation.set(file("$buildDir/reports/jacoco/test/html"))
     }
 }
