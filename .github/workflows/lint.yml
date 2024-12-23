@@ -7,8 +7,7 @@ on:
       - ".github/**"
 
 concurrency:
-  group: publish-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  group: lint-${{ github.event.pull_request.number || github.sha }}
 
 permissions:
   contents: read

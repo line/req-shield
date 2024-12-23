@@ -15,25 +15,21 @@
  */
 
 version = "1.0.0"
-val kotlinVer: String by project
-val slf4jApi: String by project
-val logbackClassic: String by project
-val mockk: String by project
-val awaitility: String by project
 
 plugins {
-    kotlin("jvm") version "1.8.20"
-    kotlin("plugin.spring") version "1.8.20"
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.spring)
+    alias(libs.plugins.ktlint)
+    id("jacoco")
     application
     `maven-publish`
     `java-library`
-    id("jacoco")
-    id("org.jlleitschuh.gradle.ktlint") version "12.1.0"
 }
 
 allprojects {
 
     group = "com.linecorp.cse.reqshield"
+    version = "1.0.0"
 
     apply {
         plugin("java-test-fixtures")
@@ -47,13 +43,13 @@ allprojects {
     }
 
     dependencies {
-        implementation("org.jetbrains.kotlin:kotlin-reflect:$kotlinVer")
-        implementation("org.slf4j:slf4j-api:$slf4jApi")
-        testImplementation("ch.qos.logback:logback-classic:$logbackClassic")
+        implementation(rootProject.libs.kotlin.reflect)
+        implementation(rootProject.libs.slf4j)
+        testImplementation(rootProject.libs.logback)
 
-        testImplementation("org.jetbrains.kotlin:kotlin-test:$kotlinVer")
-        testImplementation("io.mockk:mockk:$mockk")
-        testImplementation("org.awaitility:awaitility:$awaitility")
+        testImplementation(rootProject.libs.kotlin.test)
+        testImplementation(rootProject.libs.mockk)
+        testImplementation(rootProject.libs.awaitility)
     }
 
     tasks.test {

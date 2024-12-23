@@ -8,7 +8,7 @@ A lib that regulates the cache-based requests an application receives in terms o
 
 - Java 8 or later if you are a user.
 - Kotlin 1.8 or later if you are a user.
-- (If link this lib with Spring) Spring Boot 1.4.0 (Spring Framework 4.3.0.RELEASE) or later if you are a user.
+- (If link this lib with Spring) Spring Boot 2.7 (Spring Framework 5.3) or later if you are a user.
 
 ## Usage
 - Choose from the following based on your platform (There is a detailed explanation in the wiki.)

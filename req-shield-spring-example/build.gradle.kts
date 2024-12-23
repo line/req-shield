@@ -15,10 +15,10 @@
  */
 
 plugins {
-    id("org.springframework.boot") version "2.7.17"
-    id("io.spring.dependency-management") version "1.0.15.RELEASE"
-    kotlin("jvm")
-    kotlin("plugin.spring")
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.spring)
+    alias(libs.plugins.spring.boot2)
+    alias(libs.plugins.spring.dependency.management)
 }
 
 group = "com.linecorp.cse.reqshield"
@@ -27,14 +27,14 @@ version = "1.0.0"
 dependencies {
     implementation(project(":core-spring"))
 
-    implementation("org.springframework.boot:spring-boot-starter-web")
-    implementation("org.springframework.boot:spring-boot-starter-cache")
-    implementation("org.springframework.boot:spring-boot-starter-data-redis")
-    implementation("org.springframework.boot:spring-boot-starter-aop")
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    implementation(rootProject.libs.spring.boot.starter.web)
+    implementation(rootProject.libs.spring.boot.starter.cache)
+    implementation(rootProject.libs.spring.boot.starter.data.redis)
+    implementation(rootProject.libs.spring.boot.starter.aop)
+    implementation(rootProject.libs.jackson.module.kotlin)
 
     testImplementation(testFixtures(project(":support")))
-    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation(rootProject.libs.spring.boot.starter.test)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

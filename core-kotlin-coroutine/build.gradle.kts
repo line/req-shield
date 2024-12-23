@@ -14,20 +14,16 @@
  *  under the License.
  */
 
-version = "1.0.0"
-
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
 }
-
-val kotlinCoroutine: String by project
 
 dependencies {
     api(project(":support"))
-    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core:$kotlinCoroutine")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$kotlinCoroutine")
-    testImplementation("io.lettuce:lettuce-core:6.1.10.RELEASE")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:$kotlinCoroutine")
+    compileOnly(rootProject.libs.kotlin.coroutine)
+    testImplementation(rootProject.libs.kotlin.coroutine.test)
+    testImplementation(rootProject.libs.lettuce)
+    testImplementation(rootProject.libs.kotlin.coroutine.jdk8)
     testImplementation(testFixtures(project(":support")))
 }
 
