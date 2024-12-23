@@ -1,6 +1,6 @@
 # https://docs.codecov.com/docs/pull-request-comments
 comment:
-  layout: " diff, flags, files"
+  layout: "diff, flags, files"
   behavior: default
   require_changes: false
   require_base: false

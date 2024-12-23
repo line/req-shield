@@ -161,29 +161,29 @@ tasks.register<JacocoReport>("jacocoAggregateReport") {
         files(
             subprojects.map {
                 it.sourceSets.main.get().allSource.srcDirs
-            }
-        )
+            },
+        ),
     )
     sourceDirectories.setFrom(
         files(
             subprojects.map {
                 it.sourceSets.main.get().allSource.srcDirs
-            }
-        )
+            },
+        ),
     )
     classDirectories.setFrom(
         files(
             subprojects.map {
                 it.sourceSets.main.get().output
-            }
-        )
+            },
+        ),
     )
     executionData.setFrom(
         files(
             subprojects.map {
                 it.buildDir.resolve("jacoco/test.exec")
-            }
-        )
+            },
+        ),
     )
 
     reports {
