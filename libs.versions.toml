@@ -54,7 +54,7 @@ junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
 junit-jupiter-testcontainers = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
-mockk = { module = "io.mockk:mockk", version = "1.12.3" }
+mockk = { module = "io.mockk:mockk", version = "1.13.14" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 kotlin-coroutine-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinCoroutine" }
 awaitility = { module = "org.awaitility:awaitility", version = "4.1.0" }
