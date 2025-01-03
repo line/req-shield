@@ -97,7 +97,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - verify reqShield and cache creation`() =
+    override fun testAspectOperationVerifyReqShieldAndCacheCreation() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
@@ -113,7 +113,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         }
 
     @Test
-    override fun `test aspect operation - reqShieldObject should be created once`() =
+    override fun testAspectOperationReqShieldObjectShouldBeCreatedOnce() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
@@ -134,7 +134,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         }
 
     @Test
-    override fun `test aspect operation - cache eviction`() =
+    override fun testAspectOperationCacheEviction() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
@@ -161,7 +161,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         }
 
     @Test
-    override fun `test cache key generation - use generated key`() =
+    override fun testCacheKeyGenerationUseGeneratedKey() =
         runTest {
             val reqShieldData = ReqShieldData(methodReturn, 1000)
             coEvery { asyncCache.get(any()) } returns reqShieldData
@@ -173,7 +173,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         }
 
     @Test
-    override fun `test cache key generation - cacheKey should be supplied key`() {
+    override fun testCacheKeyGenerationCacheKeyShouldBeSuppliedKey() {
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
                 cacheName = cacheName,

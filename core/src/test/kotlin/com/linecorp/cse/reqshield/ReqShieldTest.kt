@@ -105,7 +105,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And local lock acquired)`() {
+    override fun testSetMethodCacheNotExistsAndLocalLockAcquired() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
@@ -124,7 +124,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock acquired)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockAcquired() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
 
@@ -146,7 +146,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock acquired And Does not exist global lock function)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndDoesNotExistGlobalLockFunction() {
         val result =
             assertThrows<IllegalArgumentException> {
                 reqShieldForGlobalLockForError =
@@ -164,7 +164,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And local lock acquired And callable return null)`() {
+    override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndCallableReturnNull() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
@@ -186,7 +186,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock acquired And callable return null)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndCallableReturnNull() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
 
@@ -212,7 +212,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And local lock acquired And Throw callable ClientException)`() {
+    override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowCallableClientException() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
@@ -232,7 +232,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock acquired And Throw callable ClientException)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowCallableClientException() {
         every { cacheGetter.invoke(key) } returns null
         every { cacheSetter.invoke(key, any(), any()) } returns true
 
@@ -256,7 +256,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And local lock acquired And Throw get cache ClientException)`() {
+    override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowGetCacheClientException() {
         every { cacheGetter.invoke(key) } throws Exception("get cache error")
         every { cacheSetter.invoke(key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
@@ -275,7 +275,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock acquired And Throw get cache ClientException)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowGetCacheClientException() {
         every { cacheGetter.invoke(key) } throws Exception("get cache error")
         every { cacheSetter.invoke(key, any(), any()) } returns true
 
@@ -297,7 +297,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And local lock not acquired)`() {
+    override fun testSetMethodCacheNotExistsAndLocalLockNotAcquired() {
         every { cacheGetter.invoke(key) } returns null
         every { keyLock.tryLock(key, LockType.CREATE) } returns false
 
@@ -313,7 +313,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache not exists And global lock not acquired)`() {
+    override fun testSetMethodCacheNotExistsAndGlobalLockNotAcquired() {
         every { cacheGetter.invoke(key) } returns null
         every { globalLockFunc(any(), any()) } returns false
 
@@ -329,7 +329,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache exists, but not targeted for update)`() {
+    override fun testSetMethodCacheExistsButNotTargetedForUpdate() {
         val reqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
 
         every { cacheGetter.invoke(key) } returns reqShieldData
@@ -346,7 +346,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache exists and the update target)`() {
+    override fun testSetMethodCacheExistsAndTheUpdateTarget() {
         timeToLiveMillis = 1000
         val reqShieldData = ReqShieldData<Product>(oldValue, timeToLiveMillis)
         val newReqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
@@ -369,7 +369,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `test set method (Cache exists and the update target and callable return null)`() {
+    override fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull() {
         timeToLiveMillis = 1000
         val reqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
         val reqShieldDataNull = ReqShieldData<Product>(null, timeToLiveMillis)
@@ -393,7 +393,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    override fun `executeSetCacheFunction should handle exception from cacheSetter`() {
+    override fun executeSetCacheFunctionShouldHandleExceptionFromCacheSetter() {
         every { keyLock.tryLock(any(), any()) } returns true
         every { keyLock.unLock(any(), any()) } returns true
 

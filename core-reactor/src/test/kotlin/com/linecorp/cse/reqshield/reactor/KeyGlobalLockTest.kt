@@ -31,7 +31,9 @@ import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Ignore
 
-class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
+class KeyGlobalLockTest :
+    AbstractRedisTest(),
+    BaseKeyLockTest {
     private lateinit var redisCommands: RedisAsyncCommands<String, String>
     private lateinit var globalLockFunc: (String, Long) -> Mono<Boolean>
     private lateinit var globalUnLockFunc: (String) -> Mono<Boolean>
@@ -53,7 +55,7 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
     }
 
     @Test
-    override fun `test concurrency with one key`() {
+    override fun testConcurrencyWithOneKey() {
         val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
         val key = "myKey"
         val lockType = LockType.CREATE
@@ -63,7 +65,8 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
         val tasks =
             (0 until 20).map {
                 tasksCompletedCount.incrementAndGet()
-                keyLock.tryLock(key, lockType)
+                keyLock
+                    .tryLock(key, lockType)
                     .filter { it }
                     .flatMap {
                         lockAcquiredCount.incrementAndGet()
@@ -75,7 +78,8 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
                     }.onErrorResume { Mono.just(Unit) }
             }
 
-        StepVerifier.create(Mono.whenDelayError(tasks))
+        StepVerifier
+            .create(Mono.whenDelayError(tasks))
             .expectComplete()
             .verify()
 
@@ -83,16 +87,17 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
 
         assertEquals(1, lockAcquiredCount.get())
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock(key, lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock(key, lockType)),
+            ).expectNext(true)
             .verifyComplete()
     }
 
     @Test
-    override fun `test concurrency with two key`() {
+    override fun testConcurrencyWithTwoKey() {
         val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
         val lockType = LockType.CREATE
         val lockAcquiredCount = AtomicInteger(0)
@@ -102,7 +107,8 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
             (0 until 20).map { i ->
                 tasksCompletedCount.incrementAndGet()
                 val key = if (i % 2 == 0) "myKey1" else "myKey2"
-                keyLock.tryLock(key, lockType)
+                keyLock
+                    .tryLock(key, lockType)
                     .filter { it }
                     .flatMap {
                         lockAcquiredCount.incrementAndGet()
@@ -114,7 +120,8 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
                     }.onErrorResume { Mono.just(Unit) }
             }
 
-        StepVerifier.create(Mono.whenDelayError(tasks))
+        StepVerifier
+            .create(Mono.whenDelayError(tasks))
             .expectComplete()
             .verify()
 
@@ -122,29 +129,32 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
 
         assertTrue(lockAcquiredCount.get() <= 4)
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock("myKey1", lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock("myKey1", lockType)),
+            ).expectNext(true)
             .verifyComplete()
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock("myKey2", lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock("myKey2", lockType)),
+            ).expectNext(true)
             .verifyComplete()
     }
 
     @Test
     @Ignore
-    override fun `test lock expiration`() {
+    override fun testLockExpiration() {
         // Global locks do not have an expiration
     }
 
     private fun doWork(): Mono<Unit> =
-        Mono.delay(Duration.ofSeconds(1))
+        Mono
+            .delay(Duration.ofSeconds(1))
             .then(Mono.just(Unit))
             .subscribeOn(Schedulers.boundedElastic())
 }

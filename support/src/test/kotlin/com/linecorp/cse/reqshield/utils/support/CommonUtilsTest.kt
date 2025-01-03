@@ -25,7 +25,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CommonUtilsTest {
-
     @Test
     fun decideToUpdateCacheTest() {
         val expireTime = Duration.ofMinutes(1).toMillis()

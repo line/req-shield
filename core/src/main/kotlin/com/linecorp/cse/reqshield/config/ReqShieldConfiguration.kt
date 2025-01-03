@@ -33,12 +33,12 @@ data class ReqShieldConfiguration<T>(
     val globalLockFunction: ((String, Long) -> Boolean)? = null,
     val globalUnLockFunction: ((String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,
-    val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS, // for local and global lock
+    val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val executor: ScheduledExecutorService =
         Executors.newScheduledThreadPool(
             Runtime.getRuntime().availableProcessors() * 10,
         ),
-    val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE, // %
+    val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val keyLock: KeyLock =
         if (isLocalLock) {
             KeyLocalLock(lockTimeoutMillis)

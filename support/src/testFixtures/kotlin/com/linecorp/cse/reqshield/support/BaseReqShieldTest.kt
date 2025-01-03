@@ -17,35 +17,35 @@
 package com.linecorp.cse.reqshield.support
 
 interface BaseReqShieldTest {
-    fun `test set method (Cache not exists And local lock acquired)`()
+    fun testSetMethodCacheNotExistsAndLocalLockAcquired()
 
-    fun `test set method (Cache not exists And global lock acquired)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockAcquired()
 
-    fun `test set method (Cache not exists And global lock acquired And Does not exist global lock function)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndDoesNotExistGlobalLockFunction()
 
-    fun `test set method (Cache not exists And local lock acquired And callable return null)`()
+    fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndCallableReturnNull()
 
-    fun `test set method (Cache not exists And global lock acquired And callable return null)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndCallableReturnNull()
 
-    fun `test set method (Cache not exists And local lock acquired And Throw callable ClientException)`()
+    fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowCallableClientException()
 
-    fun `test set method (Cache not exists And global lock acquired And Throw callable ClientException)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowCallableClientException()
 
-    fun `test set method (Cache not exists And local lock acquired And Throw get cache ClientException)`()
+    fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowGetCacheClientException()
 
-    fun `test set method (Cache not exists And global lock acquired And Throw get cache ClientException)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowGetCacheClientException()
 
-    fun `test set method (Cache not exists And local lock not acquired)`()
+    fun testSetMethodCacheNotExistsAndLocalLockNotAcquired()
 
-    fun `test set method (Cache not exists And global lock not acquired)`()
+    fun testSetMethodCacheNotExistsAndGlobalLockNotAcquired()
 
-    fun `test set method (Cache exists, but not targeted for update)`()
+    fun testSetMethodCacheExistsButNotTargetedForUpdate()
 
-    fun `test set method (Cache exists and the update target)`()
+    fun testSetMethodCacheExistsAndTheUpdateTarget()
 
-    fun `test set method (Cache exists and the update target and callable return null)`()
+    fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull()
 
-    fun `executeSetCacheFunction should handle exception from cacheSetter`()
+    fun executeSetCacheFunctionShouldHandleExceptionFromCacheSetter()
 
     companion object {
         val AWAIT_TIMEOUT = 500L

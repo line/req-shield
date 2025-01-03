@@ -16,8 +16,7 @@
 
 package com.linecorp.cse.reqshield.dto
 
-
 data class Product(
     val productId: String,
-    val productName: String
+    val productName: String,
 )

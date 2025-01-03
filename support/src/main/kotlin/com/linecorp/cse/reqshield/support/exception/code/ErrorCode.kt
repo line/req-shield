@@ -18,7 +18,7 @@ package com.linecorp.cse.reqshield.support.exception.code
 
 enum class ErrorCode(
     val code: String,
-    val message: String
+    val message: String,
 ) {
     SUPPLIER_ERROR("1001", "An error occurred in the supplier function provided by client."),
     GET_CACHE_ERROR("1002", "An error occurred in the get cache function provided by client."),

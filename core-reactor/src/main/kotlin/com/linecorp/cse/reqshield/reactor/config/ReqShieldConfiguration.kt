@@ -36,7 +36,7 @@ data class ReqShieldConfiguration<T>(
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val scheduler: Scheduler = Schedulers.boundedElastic(),
-    val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE, // %
+    val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val keyLock: KeyLock =
         if (isLocalLock) {
             KeyLocalLock(lockTimeoutMillis)

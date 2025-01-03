@@ -22,7 +22,9 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 
 @RestController
-class SampleController(val sampleService: SampleService) {
+class SampleController(
+    val sampleService: SampleService,
+) {
     @GetMapping("/test")
     fun test(
         @RequestParam productId: String,

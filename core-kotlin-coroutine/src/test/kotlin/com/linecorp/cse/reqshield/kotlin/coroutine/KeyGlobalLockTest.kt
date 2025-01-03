@@ -34,7 +34,9 @@ import org.junit.jupiter.api.Test
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Ignore
 
-class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
+class KeyGlobalLockTest :
+    AbstractRedisTest(),
+    BaseKeyLockTest {
     private lateinit var redisCommands: RedisAsyncCommands<String, String>
     private lateinit var globalLockFunc: suspend (String, Long) -> Boolean
     private lateinit var globalUnLockFunc: suspend (String) -> Boolean
@@ -57,7 +59,7 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
     }
 
     @Test
-    override fun `test concurrency with one key`() =
+    override fun testConcurrencyWithOneKey() =
         runBlocking {
             val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
             val key = "myKey"
@@ -98,7 +100,7 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
         }
 
     @Test
-    override fun `test concurrency with two key`() =
+    override fun testConcurrencyWithTwoKey() =
         runBlocking {
             val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
             val lockType = LockType.CREATE
@@ -140,7 +142,7 @@ class KeyGlobalLockTest : BaseKeyLockTest, AbstractRedisTest() {
 
     @Test
     @Ignore
-    override fun `test lock expiration`() =
+    override fun testLockExpiration() =
         runBlocking {
             // Global locks do not have an expiration
         }

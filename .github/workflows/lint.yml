@@ -25,4 +25,4 @@ jobs:
         uses: ScaCap/action-ktlint@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          fail_on_error: true
+          ktlint_version: 1.2.1

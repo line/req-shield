@@ -17,13 +17,13 @@
 package com.linecorp.cse.reqshield.support
 
 interface BaseReqShieldModuleSupportTest {
-    fun `test aspect operation - verify reqShield and cache creation`()
+    fun testAspectOperationVerifyReqShieldAndCacheCreation()
 
-    fun `test aspect operation - reqShieldObject should be created once`()
+    fun testAspectOperationReqShieldObjectShouldBeCreatedOnce()
 
-    fun `test aspect operation - cache eviction`()
+    fun testAspectOperationCacheEviction()
 
-    fun `test cache key generation - use generated key`()
+    fun testCacheKeyGenerationUseGeneratedKey()
 
-    fun `test cache key generation - cacheKey should be supplied key`()
+    fun testCacheKeyGenerationCacheKeyShouldBeSuppliedKey()
 }
