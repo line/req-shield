@@ -178,7 +178,7 @@ class ReqShield<T>(
                             Mono.just(reqShieldData)
                         },
                     ),
-            )
+            ).subscribeOn(Schedulers.boundedElastic())
 
     private fun buildReqShieldData(
         value: T?,
