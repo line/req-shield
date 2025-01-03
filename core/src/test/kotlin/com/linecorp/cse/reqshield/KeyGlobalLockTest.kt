@@ -56,7 +56,7 @@ class KeyGlobalLockTest :
     }
 
     @Test
-    override fun `test concurrency with one key`() {
+    override fun testConcurrencyWithOneKey() {
         val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
         val executorService = Executors.newFixedThreadPool(20)
         val key = "myKey"
@@ -94,7 +94,7 @@ class KeyGlobalLockTest :
     }
 
     @Test
-    override fun `test concurrency with two key`() {
+    override fun testConcurrencyWithTwoKey() {
         val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, lockTimeoutMillis)
         val executorService = Executors.newFixedThreadPool(20)
         val lockType = LockType.CREATE
@@ -134,7 +134,7 @@ class KeyGlobalLockTest :
 
     @Test
     @Ignore
-    override fun `test lock expiration`() {
+    override fun testLockExpiration() {
         // Global locks do not have an expiration
     }
 

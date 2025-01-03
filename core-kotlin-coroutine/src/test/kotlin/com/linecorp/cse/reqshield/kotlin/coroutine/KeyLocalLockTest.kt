@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class KeyLocalLockTest : BaseKeyLockTest {
     @Test
-    override fun `test concurrency with one key`() =
+    override fun testConcurrencyWithOneKey() =
         runBlocking {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
             val key = "myKey"
@@ -72,7 +72,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
         }
 
     @Test
-    override fun `test concurrency with two key`() =
+    override fun testConcurrencyWithTwoKey() =
         runBlocking {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
             val lockType = LockType.CREATE
@@ -109,7 +109,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
         }
 
     @Test
-    override fun `test lock expiration`() =
+    override fun testLockExpiration() =
         runBlocking {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
             val key = "myKey"

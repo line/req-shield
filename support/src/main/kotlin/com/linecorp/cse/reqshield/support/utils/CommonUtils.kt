@@ -16,7 +16,11 @@
 
 package com.linecorp.cse.reqshield.support.utils
 
-fun decideToUpdateCache(createdAt: Long, timeToLiveMillis: Long, decisionForUpdate: Int): Boolean {
+fun decideToUpdateCache(
+    createdAt: Long,
+    timeToLiveMillis: Long,
+    decisionForUpdate: Int,
+): Boolean {
     val currentTime = System.currentTimeMillis()
     val passedDuration = currentTime - createdAt
 

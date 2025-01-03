@@ -18,5 +18,5 @@ package com.linecorp.cse.reqshield.spring.webflux.example.dto
 
 data class Product(
     val productId: String,
-    val productName: String
+    val productName: String,
 )

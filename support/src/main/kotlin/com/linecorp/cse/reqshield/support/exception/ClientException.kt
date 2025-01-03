@@ -24,9 +24,8 @@ private val log = LoggerFactory.getLogger(ClientException::class.java)
 class ClientException(
     val errorCode: ErrorCode,
     override val message: String = errorCode.message,
-    originErrorMessage: String? = null
-): RuntimeException(message) {
-
+    originErrorMessage: String? = null,
+) : RuntimeException(message) {
     init {
         log.error("[Req-Shield] errorCode : {}, message : {}, originErrorMessage : {}", errorCode.code, message, originErrorMessage)
     }

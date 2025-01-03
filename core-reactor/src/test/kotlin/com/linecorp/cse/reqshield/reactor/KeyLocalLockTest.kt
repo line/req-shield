@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class KeyLocalLockTest : BaseKeyLockTest {
     @Test
-    override fun `test concurrency with one key`() {
+    override fun testConcurrencyWithOneKey() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
         val key = "myKey"
         val lockType = LockType.CREATE
@@ -39,7 +39,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
         val tasks =
             (0 until 20).map {
                 tasksCompletedCount.incrementAndGet()
-                keyLock.tryLock(key, lockType)
+                keyLock
+                    .tryLock(key, lockType)
                     .filter { it }
                     .flatMap {
                         lockAcquiredCount.incrementAndGet()
@@ -51,7 +52,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
                     }.onErrorResume { Mono.just(Unit) }
             }
 
-        StepVerifier.create(Mono.whenDelayError(tasks))
+        StepVerifier
+            .create(Mono.whenDelayError(tasks))
             .expectComplete()
             .verify()
 
@@ -59,16 +61,17 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         assertEquals(1, lockAcquiredCount.get())
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock(key, lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock(key, lockType)),
+            ).expectNext(true)
             .verifyComplete()
     }
 
     @Test
-    override fun `test concurrency with two key`() {
+    override fun testConcurrencyWithTwoKey() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
         val lockType = LockType.CREATE
         val lockAcquiredCount = AtomicInteger(0)
@@ -78,7 +81,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
             (0 until 20).map { i ->
                 tasksCompletedCount.incrementAndGet()
                 val key = if (i % 2 == 0) "myKey1" else "myKey2"
-                keyLock.tryLock(key, lockType)
+                keyLock
+                    .tryLock(key, lockType)
                     .filter { it }
                     .flatMap {
                         lockAcquiredCount.incrementAndGet()
@@ -90,7 +94,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
                     }.onErrorResume { Mono.just(Unit) }
             }
 
-        StepVerifier.create(Mono.whenDelayError(tasks))
+        StepVerifier
+            .create(Mono.whenDelayError(tasks))
             .expectComplete()
             .verify()
 
@@ -98,50 +103,53 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         assertTrue(lockAcquiredCount.get() <= 4)
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock("myKey1", lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock("myKey1", lockType)),
+            ).expectNext(true)
             .verifyComplete()
 
-        StepVerifier.create(
-            Mono.delay(Duration.ofMillis(100))
-                .then(keyLock.tryLock("myKey2", lockType)),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                Mono
+                    .delay(Duration.ofMillis(100))
+                    .then(keyLock.tryLock("myKey2", lockType)),
+            ).expectNext(true)
             .verifyComplete()
     }
 
     @Test
-    override fun `test lock expiration`() {
+    override fun testLockExpiration() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
         val key = "myKey"
         val lockType = LockType.CREATE
 
-        StepVerifier.create(
-            keyLock.tryLock(key, lockType),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                keyLock.tryLock(key, lockType),
+            ).expectNext(true)
             .verifyComplete()
 
         Thread.sleep(TimeUnit.SECONDS.toMillis(3) + 100)
 
-        StepVerifier.create(
-            keyLock.tryLock(key, lockType),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                keyLock.tryLock(key, lockType),
+            ).expectNext(true)
             .verifyComplete()
 
-        StepVerifier.create(
-            keyLock.unLock(key, lockType),
-        )
-            .expectNext(true)
+        StepVerifier
+            .create(
+                keyLock.unLock(key, lockType),
+            ).expectNext(true)
             .verifyComplete()
     }
 
     private fun doWork(): Mono<Unit> =
-        Mono.delay(Duration.ofSeconds(1))
+        Mono
+            .delay(Duration.ofSeconds(1))
             .then(Mono.just(Unit))
             .subscribeOn(Schedulers.boundedElastic())
 }

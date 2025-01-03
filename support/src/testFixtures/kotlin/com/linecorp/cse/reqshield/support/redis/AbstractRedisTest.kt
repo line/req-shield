@@ -23,7 +23,6 @@ import org.springframework.test.context.ContextConfiguration
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 
-
 @Testcontainers
 @ContextConfiguration(initializers = [AbstractRedisTest.Companion.Initializer::class])
 abstract class AbstractRedisTest {
@@ -32,7 +31,6 @@ abstract class AbstractRedisTest {
         private val redisContainer = RedisContainer.instance
 
         internal class Initializer : ApplicationContextInitializer<ConfigurableApplicationContext> {
-
             override fun initialize(context: ConfigurableApplicationContext) {
                 val env = context.environment
 

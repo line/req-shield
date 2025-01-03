@@ -28,44 +28,48 @@ import java.util.concurrent.Semaphore
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
-class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
-    private data class LockInfo(val semaphore: Semaphore, val createdAt: Long)
+class KeyLocalLock(
+    private val lockTimeoutMillis: Long,
+) : KeyLock {
+    private data class LockInfo(
+        val semaphore: Semaphore,
+        val createdAt: Long,
+    )
 
     private val lockMap = ConcurrentHashMap<String, LockInfo>()
 
     init {
-        Flux.interval(Duration.ofMillis(LOCK_MONITOR_INTERVAL_MILLIS), Schedulers.single())
+        Flux
+            .interval(Duration.ofMillis(LOCK_MONITOR_INTERVAL_MILLIS), Schedulers.single())
             .doOnNext {
                 val now = System.currentTimeMillis()
                 lockMap.entries.removeIf { now - it.value.createdAt > lockTimeoutMillis }
             }.doOnError { e ->
                 log.error("Error in lock lifecycle monitoring : {}", e.message)
-            }
-            .subscribe()
+            }.subscribe()
     }
 
     override fun tryLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean> {
-        return Mono.fromCallable {
+    ): Mono<Boolean> =
+        Mono.fromCallable {
             val completeKey = "${key}_${lockType.name}"
             val lockInfo = lockMap.computeIfAbsent(completeKey) { LockInfo(Semaphore(1), nowToEpochTime()) }
             lockInfo.semaphore.tryAcquire()
         }
-    }
 
     override fun unLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean> {
-        return Mono.fromCallable {
-            val completeKey = "${key}_${lockType.name}"
-            val lockInfo = lockMap[completeKey]
-            lockInfo?.let {
-                it.semaphore.release()
-                lockMap.remove(completeKey)
-            }
-        }.thenReturn(true)
-    }
+    ): Mono<Boolean> =
+        Mono
+            .fromCallable {
+                val completeKey = "${key}_${lockType.name}"
+                val lockInfo = lockMap[completeKey]
+                lockInfo?.let {
+                    it.semaphore.release()
+                    lockMap.remove(completeKey)
+                }
+            }.thenReturn(true)
 }

@@ -88,7 +88,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - verify reqShield and cache creation`() {
+    override fun testAspectOperationVerifyReqShieldAndCacheCreation() {
         // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
         every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
@@ -108,7 +108,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - reqShieldObject should be created once`() {
+    override fun testAspectOperationReqShieldObjectShouldBeCreatedOnce() {
         // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
         every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
@@ -133,7 +133,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - cache eviction`() {
+    override fun testAspectOperationCacheEviction() {
         // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
         every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
@@ -160,7 +160,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test cache key generation - use generated key`() {
+    override fun testCacheKeyGenerationUseGeneratedKey() {
         // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
         every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
@@ -181,7 +181,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test cache key generation - cacheKey should be supplied key`() {
+    override fun testCacheKeyGenerationCacheKeyShouldBeSuppliedKey() {
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
                 cacheName = cacheName,

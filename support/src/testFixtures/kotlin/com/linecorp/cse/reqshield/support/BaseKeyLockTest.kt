@@ -17,13 +17,12 @@
 package com.linecorp.cse.reqshield.support
 
 interface BaseKeyLockTest {
-
     val lockTimeoutMillis: Long
         get() = 3000L
 
-    fun `test concurrency with one key`()
-    
-    fun `test concurrency with two key`()
+    fun testConcurrencyWithOneKey()
 
-    fun `test lock expiration`()
+    fun testConcurrencyWithTwoKey()
+
+    fun testLockExpiration()
 }

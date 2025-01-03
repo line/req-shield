@@ -82,7 +82,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - verify reqShield and cache creation`() {
+    override fun testAspectOperationVerifyReqShieldAndCacheCreation() {
         // given
         every { reqShieldCache.get(any()) } returns ReqShieldData(methodReturn, 1000)
         every { joinPoint.proceed() } answers { targetObject.cacheableWithSingleArgument(argument) }
@@ -98,7 +98,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - reqShieldObject should be created once`() {
+    override fun testAspectOperationReqShieldObjectShouldBeCreatedOnce() {
         // given
         every { reqShieldCache.get(any()) } returns ReqShieldData(methodReturn, 1000)
         every { joinPoint.proceed() } answers { targetObject.cacheableWithSingleArgument(argument) }
@@ -119,7 +119,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test aspect operation - cache eviction`() {
+    override fun testAspectOperationCacheEviction() {
         // given
         val reqShieldData = ReqShieldData(methodReturn, 10000)
         every { reqShieldCache.get(any()) } returns reqShieldData
@@ -138,7 +138,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test cache key generation - use generated key`() {
+    override fun testCacheKeyGenerationUseGeneratedKey() {
         every { joinPoint.target } returns targetObject
         every { joinPoint.args } returns arrayOf(argument)
         every { reqShieldAspect.getTargetMethod(joinPoint) } returns
@@ -160,7 +160,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     }
 
     @Test
-    override fun `test cache key generation - cacheKey should be supplied key`() {
+    override fun testCacheKeyGenerationCacheKeyShouldBeSuppliedKey() {
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
                 cacheName = cacheName,

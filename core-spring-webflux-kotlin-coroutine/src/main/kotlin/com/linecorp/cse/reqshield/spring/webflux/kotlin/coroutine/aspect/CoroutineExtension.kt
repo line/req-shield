@@ -32,14 +32,10 @@ val ProceedingJoinPoint.coroutineContinuation: Continuation<Any?>
 val ProceedingJoinPoint.coroutineArgs: Array<Any?>
     get() = this.args.sliceArray(0 until this.args.size - 1)
 
-suspend fun ProceedingJoinPoint.proceedCoroutine(
-    args: Array<Any?> = this.coroutineArgs,
-): Any? =
+suspend fun ProceedingJoinPoint.proceedCoroutine(args: Array<Any?> = this.coroutineArgs): Any? =
     suspendCoroutineUninterceptedOrReturn { continuation ->
         this.proceed(args + continuation)
     }
 
-fun ProceedingJoinPoint.runCoroutine(
-    block: suspend () -> Any?,
-): Any? =
+fun ProceedingJoinPoint.runCoroutine(block: suspend () -> Any?): Any? =
     block.startCoroutineUninterceptedOrReturn(this.coroutineContinuation)
