@@ -1,3 +1,7 @@
+req-shield has not yet been published to the maven repository, please be patient.
+
+---
+
 Visit [the github wiki](https://github.com/line/req-shield/wiki/What-is-Req-Shield) for more information.
 
 # Req-Shield
