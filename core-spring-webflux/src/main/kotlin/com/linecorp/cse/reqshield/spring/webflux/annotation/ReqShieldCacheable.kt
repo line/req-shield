@@ -19,7 +19,7 @@ package com.linecorp.cse.reqshield.spring.webflux.annotation
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import java.lang.annotation.Inherited
 
-@Target(AnnotationTarget.FUNCTION)
+@Target(AnnotationTarget.FUNCTION, AnnotationTarget.ANNOTATION_CLASS)
 @Retention(AnnotationRetention.RUNTIME)
 @Inherited
 annotation class ReqShieldCacheable(
