@@ -71,6 +71,26 @@ class CacheAnnotationTest : AbstractRedisTest() {
     }
 
     @Test
+    fun `ReqShieldCacheable test - request to 'sampleService' should be request count times(only update cache mode)`() {
+        val testProductId: String = UUID.randomUUID().toString()
+
+        val flux =
+            Flux
+                .range(1, 20)
+                .flatMap {
+                    sampleService
+                        .getProductOnlyUpdateCache(testProductId)
+                        .subscribeOn(Schedulers.boundedElastic())
+                }.collectList()
+
+        StepVerifier
+            .create(flux)
+            .assertNext { productList ->
+                assertEquals(19, sampleService.getRequestCount(), "Request count should be 19")
+            }.verifyComplete()
+    }
+
+    @Test
     fun `ReqShieldCacheable test - request to 'sampleService' should be only one times For Global Lock`() {
         val testProductId: String = UUID.randomUUID().toString()
 

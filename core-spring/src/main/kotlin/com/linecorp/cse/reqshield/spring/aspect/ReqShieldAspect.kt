@@ -88,6 +88,7 @@ class ReqShieldAspect<T>(
                 lockTimeoutMillis = annotation.lockTimeoutMillis,
                 decisionForUpdate = annotation.decisionForUpdate,
                 maxAttemptGetCache = annotation.maxAttemptGetCache,
+                reqShieldWorkMode = annotation.reqShieldWorkMode,
             )
 
         return ReqShield(reqShieldConfiguration)

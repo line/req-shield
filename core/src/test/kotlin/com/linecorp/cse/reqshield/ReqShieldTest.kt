@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield
 
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -46,6 +47,8 @@ import kotlin.test.assertNull
 
 class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShield: ReqShield<Product>
+    private lateinit var reqShieldOnlyUpdateCache: ReqShield<Product>
+    private lateinit var reqShieldOnlyCreateCache: ReqShield<Product>
     private lateinit var reqShieldForGlobalLock: ReqShield<Product>
     private lateinit var reqShieldForGlobalLockForError: ReqShield<Product>
     private lateinit var cacheSetter: (String, ReqShieldData<Product>, Long) -> Boolean
@@ -80,6 +83,26 @@ class ReqShieldTest : BaseReqShieldTest {
                     cacheSetter,
                     cacheGetter,
                     keyLock = keyLock,
+                ),
+            )
+
+        reqShieldOnlyUpdateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,
+                ),
+            )
+
+        reqShieldOnlyCreateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_CREATE_CACHE,
                 ),
             )
 
@@ -119,6 +142,23 @@ class ReqShieldTest : BaseReqShieldTest {
             verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.CREATE) }
             verify { keyLock.unLock(key, LockType.CREATE) }
+            verify { callable.call() }
+        }
+    }
+
+    @Test
+    override fun testSetMethodCacheNotExistsAndOnlyUpdateCache() {
+        every { cacheGetter.invoke(key) } returns null
+        every { cacheSetter.invoke(key, any(), any()) } returns true
+
+        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
+            assertNotNull(result)
+            verify { cacheGetter.invoke(key) }
+            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
+            verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
             verify { callable.call() }
         }
     }
@@ -364,6 +404,27 @@ class ReqShieldTest : BaseReqShieldTest {
             verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.UPDATE) }
             verify { keyLock.unLock(key, LockType.UPDATE) }
+            verify { callable.call() }
+        }
+    }
+
+    @Test
+    override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() {
+        timeToLiveMillis = 1000
+        val reqShieldData = ReqShieldData<Product>(oldValue, timeToLiveMillis)
+        val newReqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
+
+        every { cacheGetter.invoke(key) } returns reqShieldData
+        every { cacheSetter.invoke(key, any(), any()) } answers { true }
+
+        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
+            assertEquals(reqShieldData, result)
+            verify { cacheGetter.invoke(key) }
+            verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+            verify(inverse = true) { keyLock.tryLock(key, LockType.UPDATE) }
+            verify(inverse = true) { keyLock.unLock(key, LockType.UPDATE) }
             verify { callable.call() }
         }
     }

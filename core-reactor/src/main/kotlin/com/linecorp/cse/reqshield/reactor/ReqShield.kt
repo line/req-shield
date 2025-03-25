@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.reactor
 
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
@@ -68,35 +69,42 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ) {
         val lockType = LockType.UPDATE
-        reqShieldConfig.keyLock
-            .tryLock(key, lockType)
-            .filter { it }
-            .flatMap {
-                executeCallable({ callable.call() }, true, key, lockType)
-                    .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                    .doOnNext { reqShieldData ->
+
+        fun processMono(): Mono<ReqShieldData<T>> =
+            executeCallable({ callable.call() }, true, key, lockType)
+                .map { data -> buildReqShieldData(data, timeToLiveMillis) }
+                .doOnNext { reqShieldData ->
+                    setReqShieldData(
+                        reqShieldConfig.setCacheFunction,
+                        key,
+                        reqShieldData,
+                        lockType,
+                    )
+                }.switchIfEmpty(
+                    Mono.defer {
+                        val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
                         setReqShieldData(
                             reqShieldConfig.setCacheFunction,
                             key,
                             reqShieldData,
                             lockType,
                         )
-                    }.switchIfEmpty(
-                        Mono.defer {
-                            val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
+                        Mono.just(reqShieldData)
+                    },
+                )
 
-                            setReqShieldData(
-                                reqShieldConfig.setCacheFunction,
-                                key,
-                                reqShieldData,
-                                lockType,
-                            )
-
-                            Mono.just(reqShieldData)
-                        },
-                    )
-            }.subscribeOn(Schedulers.boundedElastic())
-            .subscribe()
+        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
+            processMono()
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe()
+        } else {
+            reqShieldConfig.keyLock
+                .tryLock(key, lockType)
+                .filter { it }
+                .flatMap { processMono() }
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe()
+        }
     }
 
     private fun handleLockForCacheCreation(
@@ -105,6 +113,11 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): Mono<ReqShieldData<T>> {
         val lockType = LockType.CREATE
+
+        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE) {
+            return createReqShieldData(key, callable, timeToLiveMillis, lockType)
+        }
+
         return reqShieldConfig.keyLock
             .tryLock(key, lockType)
             .flatMap { acquired ->
@@ -217,14 +230,16 @@ class ReqShield<T>(
             .doOnError { e ->
                 throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
             }.doFinally {
-                reqShieldConfig.keyLock
-                    .unLock(key, lockType)
-                    .retryWhen(
-                        Retry.fixedDelay(
-                            MAX_ATTEMPT_SET_CACHE - 1L,
-                            Duration.ofMillis(SET_CACHE_RETRY_INTERVAL_MILLIS),
-                        ),
-                    ).subscribe()
+                if (shouldAttemptUnlock(lockType)) {
+                    reqShieldConfig.keyLock
+                        .unLock(key, lockType)
+                        .retryWhen(
+                            Retry.fixedDelay(
+                                MAX_ATTEMPT_SET_CACHE - 1L,
+                                Duration.ofMillis(SET_CACHE_RETRY_INTERVAL_MILLIS),
+                            ),
+                        ).subscribe()
+                }
             }.subscribeOn(Schedulers.boundedElastic())
 
     private fun executeCallable(
@@ -241,4 +256,8 @@ class ReqShield<T>(
                 }
                 throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = e.message)
             }
+
+    private fun shouldAttemptUnlock(lockType: LockType): Boolean =
+        (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) ||
+            (lockType == LockType.CREATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_UPDATE_CACHE)
 }

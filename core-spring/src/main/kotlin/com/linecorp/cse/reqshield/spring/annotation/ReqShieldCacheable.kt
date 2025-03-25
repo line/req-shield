@@ -16,6 +16,7 @@
 
 package com.linecorp.cse.reqshield.spring.annotation
 
+import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import java.lang.annotation.Inherited
 
@@ -30,4 +31,5 @@ annotation class ReqShieldCacheable(
     val decisionForUpdate: Int = 90,
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val timeToLiveMillis: Long = 10 * 60 * 1000,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 )

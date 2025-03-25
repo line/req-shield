@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
@@ -60,7 +61,8 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ) {
         val lockType = LockType.UPDATE
-        if (reqShieldConfig.keyLock.tryLock(key, lockType)) {
+
+        fun executeAsyncTask() {
             CoroutineScope(Dispatchers.IO).launch {
                 val reqShieldData =
                     buildReqShieldData(
@@ -75,6 +77,12 @@ class ReqShield<T>(
                 )
             }
         }
+
+        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE ||
+            reqShieldConfig.keyLock.tryLock(key, lockType)
+        ) {
+            return executeAsyncTask()
+        }
     }
 
     private suspend fun handleLockForCacheCreation(
@@ -83,7 +91,10 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
         val lockType = LockType.CREATE
-        return if (reqShieldConfig.keyLock.tryLock(key, lockType)) {
+
+        return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
+            reqShieldConfig.keyLock.tryLock(key, lockType)
+        ) {
             createReqShieldData(key, callable, timeToLiveMillis, lockType)
         } else {
             handleLockFailure(key, callable, timeToLiveMillis)
@@ -177,7 +188,9 @@ class ReqShield<T>(
         } catch (e: Exception) {
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {
-            unlockWithRetry(key, lockType)
+            if (shouldAttemptUnlock(lockType)) {
+                unlockWithRetry(key, lockType)
+            }
         }
     }
 
@@ -208,4 +221,8 @@ class ReqShield<T>(
             }
             throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = it.message)
         }
+
+    private fun shouldAttemptUnlock(lockType: LockType): Boolean =
+        (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) ||
+            (lockType == LockType.CREATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_UPDATE_CACHE)
 }
