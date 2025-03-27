@@ -88,9 +88,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-[$testProductId]").block() != null
+            asyncCache.get("product-$testProductId").block() != null
         }
-        val cacheMono = asyncCache.get("product-[$testProductId]").block()
+        val cacheMono = asyncCache.get("product-$testProductId").block()
         assertNotNull(cacheMono)
 
         // when
@@ -106,9 +106,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-[$testProductId]").block() == null
+            asyncCache.get("product-$testProductId").block() == null
         }
-        val cacheMonoNull = asyncCache.get("product-[$testProductId]").block()
+        val cacheMonoNull = asyncCache.get("product-$testProductId").block()
         assertNull(cacheMonoNull)
     }
 }

@@ -25,7 +25,13 @@ import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.reflect.MethodSignature
+import org.springframework.cache.interceptor.SimpleKeyGenerator
+import org.springframework.context.expression.MethodBasedEvaluationContext
+import org.springframework.core.DefaultParameterNameDiscoverer
 import org.springframework.core.annotation.AnnotationUtils
+import org.springframework.expression.EvaluationContext
+import org.springframework.expression.Expression
+import org.springframework.expression.spel.standard.SpelExpressionParser
 import org.springframework.stereotype.Component
 import org.springframework.util.StringUtils
 import java.lang.reflect.Method
@@ -36,6 +42,7 @@ import java.util.concurrent.ConcurrentHashMap
 class ReqShieldAspect<T>(
     private val reqShieldCache: ReqShieldCache<T>,
 ) {
+    private val spelParser = SpelExpressionParser()
     internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable)")
@@ -106,28 +113,37 @@ class ReqShieldAspect<T>(
 
     internal fun getCacheableCacheKey(joinPoint: ProceedingJoinPoint): String {
         val annotation = getCacheableAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.cacheName, annotation.key, joinPoint)
+        return getCacheKeyOrDefault(annotation.key, joinPoint)
     }
 
     internal fun getCacheEvictCacheKey(joinPoint: ProceedingJoinPoint): String {
         val annotation = getCacheEvictAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.cacheName, annotation.key, joinPoint)
+        return getCacheKeyOrDefault(annotation.key, joinPoint)
     }
 
     private fun getCacheKeyOrDefault(
-        annotationCacheName: String,
         annotationCacheKey: String,
         joinPoint: ProceedingJoinPoint,
     ): String {
-        return annotationCacheKey.ifBlank {
-            run {
-                val params = StringUtils.arrayToDelimitedString(joinPoint.args, "_")
+        val method = getTargetMethod(joinPoint)
+        val context: EvaluationContext =
+            MethodBasedEvaluationContext(joinPoint.target, method, joinPoint.args, DefaultParameterNameDiscoverer())
 
-                return "$annotationCacheName-[$annotationCacheKey$params]"
+        val key =
+            if (StringUtils.hasText(annotationCacheKey)) {
+                val expression: Expression = spelParser.parseExpression(annotationCacheKey)
+                expression.getValue(context, String::class.java)
+            } else {
+                SimpleKeyGenerator.generateKey(joinPoint.target, method, joinPoint.args).toString()
             }
+
+        if (key.isNullOrBlank()) {
+            throw IllegalArgumentException("Null key returned for cache method : $method")
         }
+
+        return key
     }
 
     private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
-        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableAnnotation(joinPoint).key}"
+        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
 }
