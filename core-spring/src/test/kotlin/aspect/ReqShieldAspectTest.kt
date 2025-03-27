@@ -44,13 +44,20 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val reqShieldCache: ReqShieldCache<Product> = mockk()
-    private val targetObject = spyk(TestBean())
     private val joinPoint = mockk<ProceedingJoinPoint>()
     private val reqShieldAspect = spyk(ReqShieldAspect(reqShieldCache))
+    private val targetObject = spyk(TestBean())
+    private val method =
+        ReflectionUtils.findMethod(
+            TestBean::class.java,
+            TestBean::cacheableWithSingleArgument.name,
+            Map::class.java,
+        )
 
-    private val cacheKey = "testCacheKey"
     private val cacheName = "testCacheName"
-    private val argument = "testArgument"
+    private val cacheKey = "#paramMap['x'] + #paramMap['y']"
+    private val argument = mapOf("x" to "paramX", "y" to "paramY")
+    private val evaluatedKey = "paramXparamY"
     private val methodReturn = Product("testProduct", "testCategory")
 
     @BeforeEach
@@ -59,12 +66,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         every { joinPoint.args } returns arrayOf(argument)
         every { joinPoint.proceed() } answers { targetObject.cacheableWithSingleArgument(argument) }
 
-        every { reqShieldAspect.getTargetMethod(joinPoint) } returns
-            ReflectionUtils.findMethod(
-                TestBean::class.java,
-                TestBean::cacheableWithSingleArgument.name,
-                String::class.java,
-            )!!
+        every { reqShieldAspect.getTargetMethod(joinPoint) } returns method!!
 
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
@@ -93,7 +95,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         Awaitility.await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             // then
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
         }
     }
 
@@ -114,7 +116,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         Awaitility.await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             // then
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
         }
     }
 
@@ -141,20 +143,16 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     override fun testCacheKeyGenerationUseGeneratedKey() {
         every { joinPoint.target } returns targetObject
         every { joinPoint.args } returns arrayOf(argument)
-        every { reqShieldAspect.getTargetMethod(joinPoint) } returns
-            ReflectionUtils.findMethod(
-                TestBean::class.java,
-                TestBean::cacheableWithSingleArgument.name,
-                String::class.java,
-            )!!
+        every { reqShieldAspect.getTargetMethod(joinPoint) } returns method!!
 
         every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
             ReqShieldCacheable(
                 cacheName = cacheName,
+                key = cacheKey,
             )
 
         assertEquals(
-            "$cacheName-[testArgument]",
+            evaluatedKey,
             reqShieldAspect.getCacheableCacheKey(joinPoint),
         )
     }
@@ -167,18 +165,18 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                 key = cacheKey,
             )
 
-        assertEquals(cacheKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
+        assertEquals(evaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
     }
 
     class TestBean {
-        @ReqShieldCacheable(cacheName = "TestCacheName")
-        fun cacheableWithSingleArgument(testArgument: String): String {
+        @ReqShieldCacheable(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
+        fun cacheableWithSingleArgument(paramMap: Map<String, String>): String {
             log.debug("method invoked")
-            return "ReturnValue: $testArgument"
+            return "ReturnValue: $paramMap"
         }
 
-        @ReqShieldCacheEvict(cacheName = "TestCacheName")
-        fun evictWithSingleArgument(testArgument: String) {
+        @ReqShieldCacheEvict(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
+        fun evictWithSingleArgument(paramMap: Map<String, String>) {
             log.debug("cache eviction")
         }
     }

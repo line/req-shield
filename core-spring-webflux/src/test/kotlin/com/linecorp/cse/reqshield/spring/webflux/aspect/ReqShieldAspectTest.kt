@@ -48,12 +48,13 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         ReflectionUtils.findMethod(
             TestBean::class.java,
             TestBean::cacheableWithSingleArgument.name,
-            String::class.java,
+            Map::class.java,
         )
 
     private val cacheName = "testCacheName"
-    private val cacheKey = "testCacheKey"
-    private val argument = "testArgument"
+    private val cacheKey = "#paramMap['x'] + #paramMap['y']"
+    private val argument = mapOf("x" to "paramX", "y" to "paramY")
+    private val evaulatedKey = "paramXparamY"
     private val methodReturn = Product("testProduct", "testCategory")
 
     @BeforeEach
@@ -103,7 +104,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .assertNext { value ->
                 assertEquals(reqShieldData.value, value)
                 Assertions.assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaulatedKey"])
             }.verifyComplete()
     }
 
@@ -128,7 +129,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .assertNext { productList ->
                 Assertions.assertTrue(reqShieldAspect.reqShieldMap.size == 1)
                 println(reqShieldAspect.reqShieldMap.keys().toList())
-                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaulatedKey"])
             }.verifyComplete()
     }
 
@@ -174,7 +175,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .create(result)
             .assertNext { value ->
                 Assertions.assertEquals(
-                    "testCacheKey",
+                    evaulatedKey,
                     reqShieldAspect.getCacheableCacheKey(joinPoint),
                 )
             }.verifyComplete()
@@ -188,14 +189,15 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                 key = cacheKey,
             )
 
-        Assertions.assertEquals(cacheKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
+        Assertions.assertEquals(evaulatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
     }
 
     class TestBean {
-        @ReqShieldCacheable(cacheName = "TestCacheName")
-        fun cacheableWithSingleArgument(testArgument: String): Mono<Product> = Mono.justOrEmpty(Product("testProduct", "testCategory"))
+        @ReqShieldCacheable(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
+        fun cacheableWithSingleArgument(paramMap: Map<String, String>): Mono<Product> =
+            Mono.justOrEmpty(Product("testProduct", "testCategory"))
 
         @ReqShieldCacheEvict(cacheName = "TestCacheName")
-        fun evictWithSingleArgument(testArgument: String): Mono<Boolean> = Mono.just(true)
+        fun evictWithSingleArgument(paramMap: Map<String, String>): Mono<Boolean> = Mono.just(true)
     }
 }

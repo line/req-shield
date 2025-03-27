@@ -82,19 +82,19 @@ class CacheAnnotationTest : AbstractRedisTest() {
         sampleService.getProduct(testProductId)
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-[$testProductId]") != null
+            reqShieldCache.get("product-$testProductId") != null
         }
 
-        assertNotNull(reqShieldCache.get("product-[$testProductId]"))
+        assertNotNull(reqShieldCache.get("product-$testProductId"))
 
         // when
         sampleService.removeProduct(testProductId)
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-[$testProductId]") == null
+            reqShieldCache.get("product-$testProductId") == null
         }
 
-        assertNull(reqShieldCache.get("product-[$testProductId]"))
+        assertNull(reqShieldCache.get("product-$testProductId"))
     }
 }

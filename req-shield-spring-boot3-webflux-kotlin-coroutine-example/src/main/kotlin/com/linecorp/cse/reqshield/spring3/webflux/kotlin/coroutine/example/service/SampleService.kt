@@ -17,7 +17,12 @@ class SampleService(
 ) {
     private val atomicInteger: AtomicInteger = AtomicInteger(0)
 
-    @ReqShieldCacheable(cacheName = "product", decisionForUpdate = 80, timeToLiveMillis = 60 * 1000)
+    @ReqShieldCacheable(
+        cacheName = "product",
+        key = "'product-' + #productId",
+        decisionForUpdate = 80,
+        timeToLiveMillis = 60 * 1000,
+    )
     suspend fun getProduct(productId: String): Product {
         log.info("find product with db request with req-shield local lock (will take 1 second)")
 
@@ -45,7 +50,7 @@ class SampleService(
 
     @ReqShieldCacheable(
         cacheName = "product",
-        key = "global_lock",
+        key = "'product-' + #productId",
         isLocalLock = false,
         decisionForUpdate = 70,
         timeToLiveMillis = 60 * 1000,
@@ -59,7 +64,7 @@ class SampleService(
         return Product(productId, "product_$productId")
     }
 
-    @ReqShieldCacheEvict(cacheName = "product")
+    @ReqShieldCacheEvict(cacheName = "product", key = "'product-' + #productId")
     suspend fun removeProduct(productId: String) {
         log.info("remove product ($productId)")
     }

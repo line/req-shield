@@ -77,7 +77,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
             val maxAttempts = 30
 
             var attempts = 0
-            while (asyncCache.get("product-[$testProductId]") == null) {
+            while (asyncCache.get("product-$testProductId") == null) {
                 if (attempts >= maxAttempts) {
                     break
                 }
@@ -85,13 +85,13 @@ class CacheAnnotationTest : AbstractRedisTest() {
                 delay(100)
             }
 
-            assertNotNull(asyncCache.get("product-[$testProductId]"))
+            assertNotNull(asyncCache.get("product-$testProductId"))
 
             // when
             sampleService.removeProduct(testProductId)
 
             var attemptsSecond = 0
-            while (asyncCache.get("product-[$testProductId]") != null) {
+            while (asyncCache.get("product-$testProductId") != null) {
                 if (attemptsSecond >= maxAttempts) {
                     break
                 }
@@ -99,6 +99,6 @@ class CacheAnnotationTest : AbstractRedisTest() {
                 delay(100)
             }
 
-            assertNull(asyncCache.get("product-[$testProductId]"))
+            assertNull(asyncCache.get("product-$testProductId"))
         }
 }
