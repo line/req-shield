@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
@@ -51,6 +52,8 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShield: ReqShield<Product>
+    private lateinit var reqShieldOnlyUpdateCache: ReqShield<Product>
+    private lateinit var reqShieldOnlyCreateCache: ReqShield<Product>
     private lateinit var reqShieldForGlobalLock: ReqShield<Product>
     private lateinit var reqShieldForGlobalLockForError: ReqShield<Product>
     private lateinit var cacheSetter: suspend (String, ReqShieldData<Product>, Long) -> Boolean
@@ -85,6 +88,26 @@ class ReqShieldTest : BaseReqShieldTest {
                     cacheSetter,
                     cacheGetter,
                     keyLock = keyLock,
+                ),
+            )
+
+        reqShieldOnlyUpdateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,
+                ),
+            )
+
+        reqShieldOnlyCreateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_CREATE_CACHE,
                 ),
             )
 
@@ -127,6 +150,24 @@ class ReqShieldTest : BaseReqShieldTest {
             coVerify { keyLock.unLock(key, LockType.CREATE) }
             coVerify { callable() }
         }
+
+    @Test
+    override fun testSetMethodCacheNotExistsAndOnlyUpdateCache() {
+        runBlocking {
+            coEvery { cacheGetter.invoke(key) } returns null
+            coEvery { cacheSetter.invoke(key, any(), any()) } returns true
+
+            val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+            delay(100)
+
+            assertNotNull(result)
+            coVerify { cacheGetter.invoke(key) }
+            coVerify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            coVerify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
+            coVerify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
+            coVerify { callable() }
+        }
+    }
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquired() =
@@ -393,6 +434,29 @@ class ReqShieldTest : BaseReqShieldTest {
             coVerify { keyLock.unLock(key, LockType.UPDATE) }
             coVerify { callable() }
         }
+
+    @Test
+    override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() {
+        runBlocking {
+            val timeToLiveMillis: Long = 1000
+            val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
+            val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
+
+            coEvery { cacheGetter.invoke(key) } returns reqShieldData
+            coEvery { cacheSetter.invoke(key, any(), any()) } coAnswers { true }
+
+            val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+            delay(100)
+
+            assertEquals(reqShieldData, result)
+            coVerify { cacheGetter.invoke(key) }
+            coVerify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+            coVerify(inverse = true) { keyLock.tryLock(key, LockType.UPDATE) }
+            coVerify(inverse = true) { keyLock.unLock(key, LockType.UPDATE) }
+            coVerify { callable() }
+        }
+    }
 
     @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull() =

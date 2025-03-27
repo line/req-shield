@@ -40,6 +40,7 @@ data class ReqShieldConfiguration<T>(
             KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
         },
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 ) {
     init {
         if (!isLocalLock) {
@@ -51,4 +52,10 @@ data class ReqShieldConfiguration<T>(
             }
         }
     }
+}
+
+enum class ReqShieldWorkMode {
+    CREATE_AND_UPDATE_CACHE,
+    ONLY_CREATE_CACHE,
+    ONLY_UPDATE_CACHE,
 }

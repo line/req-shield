@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.reactor
 
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
@@ -45,6 +46,8 @@ import kotlin.test.assertNull
 
 class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShield: ReqShield<Product>
+    private lateinit var reqShieldOnlyUpdateCache: ReqShield<Product>
+    private lateinit var reqShieldOnlyCreateCache: ReqShield<Product>
     private lateinit var reqShieldForGlobalLock: ReqShield<Product>
     private lateinit var reqShieldForGlobalLockForError: ReqShield<Product>
     private lateinit var cacheSetter: (String, ReqShieldData<Product>, Long) -> Mono<Boolean>
@@ -79,6 +82,26 @@ class ReqShieldTest : BaseReqShieldTest {
                     cacheSetter,
                     cacheGetter,
                     keyLock = keyLock,
+                ),
+            )
+
+        reqShieldOnlyUpdateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,
+                ),
+            )
+
+        reqShieldOnlyCreateCache =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_CREATE_CACHE,
                 ),
             )
 
@@ -129,6 +152,33 @@ class ReqShieldTest : BaseReqShieldTest {
         verify { cacheSetter.invoke(key, any(), any()) }
         verify { keyLock.tryLock(key, LockType.CREATE) }
         verify { keyLock.unLock(key, LockType.CREATE) }
+        verify { callable.call() }
+    }
+
+    @Test
+    override fun testSetMethodCacheNotExistsAndOnlyUpdateCache() {
+        every { cacheGetter.invoke(key) } returns Mono.empty()
+        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+
+        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        StepVerifier
+            .create(result)
+            .assertNext {
+                assertNotNull(it)
+            }.verifyComplete()
+
+        StepVerifier
+            .create(Mono.delay(Duration.ofMillis(100)))
+            .expectSubscription()
+            .thenAwait(Duration.ofMillis(100))
+            .expectNextCount(1)
+            .verifyComplete()
+
+        verify { cacheGetter.invoke(key) }
+        verify { cacheSetter.invoke(key, any(), any()) }
+        verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
+        verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
         verify { callable.call() }
     }
 
@@ -454,6 +504,39 @@ class ReqShieldTest : BaseReqShieldTest {
         verify { cacheGetter.invoke(key) }
         verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
         verify { keyLock.unLock(key, LockType.UPDATE) }
+        verify { callable.call() }
+    }
+
+    @Test
+    override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() {
+        timeToLiveMillis = 1000
+        val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
+        val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
+
+        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
+        every { cacheSetter.invoke(key, any(), any()) } answers { Mono.just(true) }
+
+        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        StepVerifier
+            .create(result)
+            .expectNextMatches {
+                assertEquals(reqShieldData, it)
+                true
+            }.expectComplete()
+            .verify()
+
+        StepVerifier
+            .create(Mono.delay(Duration.ofMillis(100)))
+            .expectSubscription()
+            .thenAwait(Duration.ofMillis(100))
+            .expectNextCount(1)
+            .verifyComplete()
+
+        verify(inverse = true) { keyLock.tryLock(key, LockType.UPDATE) }
+        verify { cacheGetter.invoke(key) }
+        verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+        verify(inverse = true) { keyLock.unLock(key, LockType.UPDATE) }
         verify { callable.call() }
     }
 

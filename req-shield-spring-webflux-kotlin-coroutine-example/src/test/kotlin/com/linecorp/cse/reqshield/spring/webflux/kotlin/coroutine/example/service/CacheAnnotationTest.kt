@@ -67,6 +67,22 @@ class CacheAnnotationTest : AbstractRedisTest() {
         }
 
     @Test
+    fun `ReqShieldCacheable test - request to 'sampleService' should be request count times(only update cache mode)`() =
+        runBlocking {
+            val testProductId: String = UUID.randomUUID().toString()
+
+            List(20) {
+                async {
+                    sampleService.getProductOnlyUpdateCache(testProductId)
+                }
+            }.awaitAll()
+
+            delay(500)
+
+            Assertions.assertEquals(20, sampleService.getRequestCount())
+        }
+
+    @Test
     fun `ReqShieldCacheable test - request to 'sampleService' should be only one times For Global Lock`() =
         runBlocking {
             val testProductId: String = UUID.randomUUID().toString()

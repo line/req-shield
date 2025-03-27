@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield
 
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
@@ -32,14 +33,14 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ReqShield<T>(
-    private val reqShieldConfiguration: ReqShieldConfiguration<T>,
+    private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
     fun getAndSetReqShieldData(
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val currentReqShieldData = executeGetCacheFunction(reqShieldConfiguration.getCacheFunction, key)
+        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
         currentReqShieldData?.let {
             if (shouldUpdateCache(it)) {
                 updateReqShieldData(key, callable, timeToLiveMillis)
@@ -51,7 +52,7 @@ class ReqShield<T>(
     }
 
     private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>): Boolean =
-        decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfiguration.decisionForUpdate)
+        decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
 
     private fun updateReqShieldData(
         key: String,
@@ -59,7 +60,8 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ) {
         val lockType = LockType.UPDATE
-        if (reqShieldConfiguration.keyLock.tryLock(key, lockType)) {
+
+        fun executeAsyncTask() {
             CompletableFuture.runAsync({
                 val reqShieldData =
                     buildReqShieldData(
@@ -67,12 +69,18 @@ class ReqShield<T>(
                         timeToLiveMillis,
                     )
                 setReqShieldData(
-                    reqShieldConfiguration.setCacheFunction,
+                    reqShieldConfig.setCacheFunction,
                     key,
                     reqShieldData,
-                    LockType.UPDATE,
+                    lockType,
                 )
-            }, reqShieldConfiguration.executor)
+            }, reqShieldConfig.executor)
+        }
+
+        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE ||
+            reqShieldConfig.keyLock.tryLock(key, lockType)
+        ) {
+            return executeAsyncTask()
         }
     }
 
@@ -82,7 +90,10 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
         val lockType = LockType.CREATE
-        return if (reqShieldConfiguration.keyLock.tryLock(key, lockType)) {
+
+        return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
+            reqShieldConfig.keyLock.tryLock(key, lockType)
+        ) {
             createReqShieldData(key, callable, timeToLiveMillis, lockType)
         } else {
             handleLockFailure(key, callable, timeToLiveMillis)
@@ -101,8 +112,8 @@ class ReqShield<T>(
                 timeToLiveMillis,
             )
         CompletableFuture.runAsync({
-            setReqShieldData(reqShieldConfiguration.setCacheFunction, key, reqShieldData, lockType)
-        }, reqShieldConfiguration.executor)
+            setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType)
+        }, reqShieldConfig.executor)
 
         return reqShieldData
     }
@@ -115,7 +126,7 @@ class ReqShield<T>(
         val future = createFuture()
         val counter = createCounter()
 
-        scheduleTask(reqShieldConfiguration.executor, future, counter, reqShieldConfiguration.getCacheFunction, callable, key)
+        scheduleTask(reqShieldConfig.executor, future, counter, reqShieldConfig.getCacheFunction, callable, key)
 
         val result = future.get()
 
@@ -158,7 +169,7 @@ class ReqShield<T>(
                     val funcResult = executeGetCacheFunction(cacheGetter, key)
                     if (funcResult != null) {
                         future.complete(funcResult.value)
-                    } else if (counter.incrementAndGet() >= reqShieldConfiguration.maxAttemptGetCache) {
+                    } else if (counter.incrementAndGet() >= reqShieldConfig.maxAttemptGetCache) {
                         future.complete(
                             executeCallable({ callable.call() }, false),
                         )
@@ -198,12 +209,14 @@ class ReqShield<T>(
         } catch (e: Exception) {
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {
-            while (!unlockSuccess && retryCount < MAX_ATTEMPT_SET_CACHE) {
-                if (reqShieldConfiguration.keyLock.unLock(key, lockType)) {
-                    unlockSuccess = true
-                } else {
-                    retryCount++
-                    Thread.sleep(SET_CACHE_RETRY_INTERVAL_MILLIS)
+            if (shouldAttemptUnlock(lockType)) {
+                while (!unlockSuccess && retryCount < MAX_ATTEMPT_SET_CACHE) {
+                    if (reqShieldConfig.keyLock.unLock(key, lockType)) {
+                        unlockSuccess = true
+                    } else {
+                        retryCount++
+                        Thread.sleep(SET_CACHE_RETRY_INTERVAL_MILLIS)
+                    }
                 }
             }
         }
@@ -219,8 +232,12 @@ class ReqShield<T>(
             callable.call()
         }.getOrElse {
             if (isUnlockWhenException && key != null && lockType != null) {
-                reqShieldConfiguration.keyLock.unLock(key, lockType)
+                reqShieldConfig.keyLock.unLock(key, lockType)
             }
             throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = it.message)
         }
+
+    private fun shouldAttemptUnlock(lockType: LockType): Boolean =
+        (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) ||
+            (lockType == LockType.CREATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_UPDATE_CACHE)
 }
