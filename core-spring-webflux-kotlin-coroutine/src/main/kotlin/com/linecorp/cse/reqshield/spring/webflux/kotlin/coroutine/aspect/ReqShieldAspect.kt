@@ -29,6 +29,7 @@ import org.aspectj.lang.reflect.MethodSignature
 import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
 import org.springframework.core.DefaultParameterNameDiscoverer
+import org.springframework.core.SpringVersion
 import org.springframework.core.annotation.AnnotationUtils
 import org.springframework.expression.EvaluationContext
 import org.springframework.expression.Expression
@@ -45,6 +46,7 @@ import kotlin.coroutines.Continuation
 class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
 ) {
+    private val springVersion = SpringVersion.getVersion()
     private val spelParser = SpelExpressionParser()
     internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
 
@@ -107,7 +109,13 @@ class ReqShieldAspect<T>(
         joinPoint: ProceedingJoinPoint,
     ): String {
         val method = getTargetMethod(joinPoint)
-        val args = joinPoint.args.filter { it !is Continuation<*> }.toTypedArray()
+        val args =
+            if (isCoroutineSupportedSpringVersion()) {
+                joinPoint.args
+            } else {
+                joinPoint.args.filter { it !is Continuation<*> }.toTypedArray()
+            }
+
         val context: EvaluationContext =
             MethodBasedEvaluationContext(joinPoint.target, method, args, DefaultParameterNameDiscoverer())
 
@@ -156,6 +164,15 @@ class ReqShieldAspect<T>(
             )
 
         return ReqShield(reqShieldConfiguration)
+    }
+
+    private fun isCoroutineSupportedSpringVersion(): Boolean {
+        val version = springVersion ?: return false
+        val parts = version.split(".")
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: return false
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: return false
+
+        return major > 6 || (major == 6 && minor >= 1)
     }
 
     private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
