@@ -26,6 +26,7 @@ import java.lang.annotation.Inherited
 annotation class ReqShieldCacheable(
     val cacheName: String,
     val key: String = "",
+    val keyGenerator: String = "",
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = 30000,
     val decisionForUpdate: Int = 90,
