@@ -31,12 +31,15 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import org.aspectj.lang.ProceedingJoinPoint
-import org.aspectj.lang.reflect.MethodSignature
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.BeanFactory
+import org.springframework.cache.interceptor.KeyGenerator
+import org.springframework.cache.interceptor.SimpleKeyGenerator
+import java.lang.reflect.Method
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.reflect.full.functions
@@ -49,77 +52,69 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val asyncCache: AsyncCache<Product> = mockk()
     private val joinPoint: ProceedingJoinPoint = mockk<ProceedingJoinPoint>()
-    private val methodSignature: MethodSignature = mockk()
     private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
-    private val mockContinuation = mockk<Continuation<Any?>>()
-    private val kotlinMethod =
-        TestBean::class.functions.find {
-            it.name == TestBean::cacheableWithSingleArgument.name && it.parameters.size == 2
-        }
-    private val method = kotlinMethod?.javaMethod
-
-    private val cacheName = "testCacheName"
-    private val cacheKey = "#paramMap['x'] + #paramMap['y']"
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
-    private val evaluatedKey = "paramXparamY"
+    private val mockContinuation = mockk<Continuation<Any?>>()
+//    private val kotlinMethod =
+//        TestBean::class.functions.find {
+//            it.name == TestBean::cacheableWithSingleArgument.name && it.parameters.size == 2
+//        }
+//    private val method = kotlinMethod?.javaMethod
+
+    private val cacheName = "TestCacheName"
+    private val cacheKeyGenerator = "customGenerator"
+    private val spelEvaluatedKey = "paramXparamY"
+    private val keyGeneratorKey = "KeyGeneratedByGenerator"
+
+    private val beanFactory = mockk<BeanFactory>()
+
     private val methodReturn = Product("testProduct", "testCategory")
 
     @BeforeEach
     fun setUp() {
-        every { joinPoint.signature } returns methodSignature
-
-        every { methodSignature.method } returns method
         every { mockContinuation.context } returns EmptyCoroutineContext
         every { joinPoint.args } returns arrayOf(argument, mockContinuation)
         every { joinPoint.target } returns targetObject
 
-        val reqShieldCacheable: ReqShieldCacheable = mockk()
-        every { reqShieldCacheable.key } returns cacheKey
-        every { reqShieldCacheable.timeToLiveMillis } returns 60
-        every { reqShieldCacheable.isLocalLock } returns false
-        every { reqShieldCacheable.lockTimeoutMillis } returns 0
-        every { reqShieldCacheable.decisionForUpdate } returns 70
-        every { reqShieldCacheable.cacheName } returns "product"
-
-        every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
-            ReqShieldCacheable(
-                cacheName = cacheName,
-                key = cacheKey,
-                lockTimeoutMillis = 1000,
-                timeToLiveMillis = 1000,
-            )
-
-        every { reqShieldAspect.getCacheEvictAnnotation(joinPoint) } returns
-            ReqShieldCacheEvict(
-                cacheName = cacheName,
-                lockTimeoutMillis = 1000,
-            )
+        reqShieldAspect.setBeanFactory(beanFactory)
     }
 
     @Test
-    override fun testAspectOperationVerifyReqShieldAndCacheCreation() =
+    override fun verifyReqShieldCacheCreation() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
             coEvery { asyncCache.get(any()) } returns reqShieldData
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithSingleArgument(argument) }
+            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithCustomKey.name && it.parameters.size == 2
+                    }?.javaMethod!!
 
             // Test the aroundTargetCacheable method
             val result = reqShieldAspect.aroundTargetCacheable(joinPoint)
 
             assertEquals(result, reqShieldData.value)
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
         }
 
     @Test
-    override fun testAspectOperationReqShieldObjectShouldBeCreatedOnce() =
+    override fun reqShieldObjectShouldBeCreatedOnce() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
             coEvery { asyncCache.get(any()) } returns reqShieldData
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithSingleArgument(argument) }
+            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithCustomKey.name && it.parameters.size == 2
+                    }?.javaMethod!!
 
             val jobs =
                 List(20) {
@@ -131,67 +126,109 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             jobs.awaitAll()
 
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
         }
 
     @Test
-    override fun testAspectOperationCacheEviction() =
+    override fun verifyReqShieldCacheEviction() =
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
             coEvery { asyncCache.get(any()) } returns reqShieldData
-            coEvery { asyncCache.evict(any()) } returns true
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithSingleArgument(argument) }
+            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithDefaultKeyGenerator.name && it.parameters.size == 2
+                    }?.javaMethod!!
 
             // Test the aroundTargetCacheable method
             val result = reqShieldAspect.aroundTargetCacheable(joinPoint)
 
             assertEquals(reqShieldData.value, result)
 
-            val kotlinMethod =
-                TestBean::class.functions.find {
-                    it.name == TestBean::evictWithSingleArgument.name && it.parameters.size == 2
-                }
-            val method = kotlinMethod?.javaMethod
-            every { methodSignature.method } returns method
+            // Validate cache eviction
+            coEvery { asyncCache.evict(any()) } returns true
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::evict.name && it.parameters.size == 2
+                    }?.javaMethod!!
+            coEvery { joinPoint.proceed() } coAnswers { targetObject.evict(argument) }
 
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.evictWithSingleArgument(argument) }
             val removeProductMono = reqShieldAspect.aroundTargetCacheable(joinPoint)
 
             assertTrue(removeProductMono as Boolean)
         }
 
     @Test
-    override fun testCacheKeyGenerationUseGeneratedKey() =
+    override fun verifyCacheKeyGenerationWithSpEL() =
         runTest {
-            val reqShieldData = ReqShieldData(methodReturn, 1000)
-            coEvery { asyncCache.get(any()) } returns reqShieldData
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithSingleArgument(argument) }
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithCustomKey.name && it.parameters.size == 2
+                    }?.javaMethod!!
 
-            reqShieldAspect.aroundTargetCacheable(joinPoint)
-
-            assertEquals(evaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
+            assertEquals(spelEvaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
         }
 
     @Test
-    override fun testCacheKeyGenerationCacheKeyShouldBeSuppliedKey() {
-        every { reqShieldAspect.getCacheableAnnotation(joinPoint) } returns
-            ReqShieldCacheable(
-                cacheName = cacheName,
-                key = cacheKey,
-            )
+    override fun verifyCacheKeyGenerationWithKeyGenerator() =
+        runTest {
+            coEvery { beanFactory.getBean(cacheKeyGenerator, KeyGenerator::class.java) } returns
+                CustomGenerator()
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithKeyGenerator.name && it.parameters.size == 2
+                    }?.javaMethod!!
 
-        assertEquals(evaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
-    }
+            assertEquals(keyGeneratorKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
+        }
+
+    @Test
+    override fun verifyCacheKeyGenerationWithDefaultGenerator() =
+        runTest {
+            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+                TestBean::class
+                    .functions
+                    .find {
+                        it.name == TestBean::cacheableWithDefaultKeyGenerator.name && it.parameters.size == 2
+                    }?.javaMethod!!
+
+            assertEquals(
+                SimpleKeyGenerator.generateKey(arrayOf(argument)).toString(),
+                reqShieldAspect.getCacheableCacheKey(joinPoint),
+            )
+        }
 
     class TestBean {
         @ReqShieldCacheable(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
-        suspend fun cacheableWithSingleArgument(paramMap: Map<String, String>): String = "ReturnValue: $paramMap"
+        suspend fun cacheableWithCustomKey(paramMap: Map<String, String>): String = "ReturnValue: $paramMap"
+
+        @ReqShieldCacheable(cacheName = "TestCacheName")
+        suspend fun cacheableWithDefaultKeyGenerator(paramMap: Map<String, String>): String = "ReturnValue: $paramMap"
+
+        @ReqShieldCacheable(cacheName = "TestCacheName", keyGenerator = "customGenerator")
+        fun cacheableWithKeyGenerator(paramMap: Map<String, String>): String = "ReturnValue: $paramMap"
 
         @ReqShieldCacheEvict(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
-        suspend fun evictWithSingleArgument(paramMap: Map<String, String>): Boolean {
+        suspend fun evict(paramMap: Map<String, String>): Boolean {
             log.debug("cache eviction")
             return true
         }
+    }
+
+    class CustomGenerator : KeyGenerator {
+        override fun generate(
+            target: Any,
+            method: Method,
+            vararg params: Any?,
+        ): Any = "KeyGeneratedByGenerator"
     }
 }

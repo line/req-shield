@@ -25,6 +25,9 @@ import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.reflect.MethodSignature
+import org.springframework.beans.factory.BeanFactory
+import org.springframework.beans.factory.BeanFactoryAware
+import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
 import org.springframework.core.DefaultParameterNameDiscoverer
@@ -34,6 +37,7 @@ import org.springframework.expression.Expression
 import org.springframework.expression.spel.standard.SpelExpressionParser
 import org.springframework.stereotype.Component
 import org.springframework.util.StringUtils
+import org.springframework.util.function.SingletonSupplier
 import reactor.core.publisher.Mono
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
@@ -42,8 +46,12 @@ import java.util.concurrent.ConcurrentHashMap
 @Component
 class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
-) {
+) : BeanFactoryAware {
+    private lateinit var beanFactory: BeanFactory
     private val spelParser = SpelExpressionParser()
+    private var defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
+
+    private val keyGeneratorMap = ConcurrentHashMap<String, KeyGenerator>()
     internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable)")
@@ -74,28 +82,33 @@ class ReqShieldAspect<T>(
             }
     }
 
-    fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
-        AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheEvict::class.java)
-            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
-
-    internal fun getCacheEvictCacheKey(joinPoint: ProceedingJoinPoint): String {
-        val annotation = getCacheEvictAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.key, joinPoint)
-    }
-
-    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
-
     internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
         AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheable::class.java)
             ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
 
     internal fun getCacheableCacheKey(joinPoint: ProceedingJoinPoint): String {
         val annotation = getCacheableAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.key, joinPoint)
+        validateCacheKey(annotation.key, annotation.keyGenerator)
+
+        return getCacheKeyOrDefault(annotation.key, annotation.keyGenerator, joinPoint)
     }
+
+    internal fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
+        AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheEvict::class.java)
+            ?: throw IllegalArgumentException("ReqShieldCacheEvict annotation is required")
+
+    internal fun getCacheEvictCacheKey(joinPoint: ProceedingJoinPoint): String {
+        val annotation = getCacheEvictAnnotation(joinPoint)
+        validateCacheKey(annotation.key, annotation.keyGenerator)
+
+        return getCacheKeyOrDefault(annotation.key, annotation.keyGenerator, joinPoint)
+    }
+
+    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
 
     private fun getCacheKeyOrDefault(
         annotationCacheKey: String,
+        annotationCacheKeyGenerator: String,
         joinPoint: ProceedingJoinPoint,
     ): String {
         val method = getTargetMethod(joinPoint)
@@ -107,12 +120,11 @@ class ReqShieldAspect<T>(
                 val expression: Expression = spelParser.parseExpression(annotationCacheKey)
                 expression.getValue(context, String::class.java)
             } else {
-                SimpleKeyGenerator.generateKey(joinPoint.target, method, joinPoint.args).toString()
+                val keyGenerator = getOrCreateKeyGenerator(annotationCacheKeyGenerator)
+                keyGenerator.generate(joinPoint.target, method, joinPoint.args).toString()
             }
 
-        if (key.isNullOrBlank()) {
-            throw IllegalArgumentException("Null key returned for cache method : $method")
-        }
+        require(!key.isNullOrBlank()) { "Null key returned for cache method : $method" }
 
         return key
     }
@@ -149,6 +161,29 @@ class ReqShieldAspect<T>(
         return ReqShield(reqShieldConfiguration)
     }
 
+    private fun validateCacheKey(
+        cacheKey: String,
+        cacheKeyGenerator: String,
+    ) {
+        if (cacheKey.isNotBlank() && cacheKeyGenerator.isNotBlank()) {
+            throw IllegalArgumentException("The key and keyGenerator attributes are mutually exclusive.")
+        }
+    }
+
+    private fun getOrCreateKeyGenerator(keyGeneratorBeanName: String?): KeyGenerator {
+        if (keyGeneratorBeanName.isNullOrBlank()) {
+            return defaultKeyGenerator.obtain()
+        }
+
+        return keyGeneratorMap.computeIfAbsent(keyGeneratorBeanName) {
+            beanFactory.getBean(it, KeyGenerator::class.java)
+        }
+    }
+
     private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
         "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+
+    override fun setBeanFactory(beanFactory: BeanFactory) {
+        this.beanFactory = beanFactory
+    }
 }
