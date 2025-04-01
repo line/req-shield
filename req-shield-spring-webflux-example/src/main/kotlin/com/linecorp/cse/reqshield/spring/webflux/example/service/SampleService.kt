@@ -49,6 +49,7 @@ class SampleService(
 
     @ReqShieldCacheable(
         cacheName = "productOnlyUpdataCache",
+        key = "'product-' + #productId",
         decisionForUpdate = 80,
         timeToLiveMillis = 60 * 1000,
         reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,

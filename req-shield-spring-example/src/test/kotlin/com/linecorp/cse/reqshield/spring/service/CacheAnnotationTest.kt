@@ -22,9 +22,7 @@ import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import org.awaitility.Awaitility.await
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -67,6 +65,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
     }
 
@@ -87,6 +86,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(100, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
     }
 
@@ -109,6 +109,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
     }
 

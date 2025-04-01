@@ -10,8 +10,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -48,7 +47,24 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
             delay(500)
 
-            Assertions.assertEquals(1, sampleService.getRequestCount())
+            assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(asyncCache.get("product-$testProductId"))
+        }
+
+    @Test
+    fun `ReqShieldCacheable test - request to 'sampleService' should be request count times(only update cache mode)`() =
+        runBlocking {
+            val testProductId: String = UUID.randomUUID().toString()
+
+            List(20) {
+                async {
+                    sampleService.getProductOnlyUpdateCache(testProductId)
+                }
+            }.awaitAll()
+
+            delay(500)
+
+            Assertions.assertEquals(20, sampleService.getRequestCount())
         }
 
     @Test
@@ -64,7 +80,8 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
             delay(500)
 
-            Assertions.assertEquals(1, sampleService.getRequestCount())
+            assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(asyncCache.get("product-$testProductId"))
         }
 
     @Test

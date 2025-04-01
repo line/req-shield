@@ -68,6 +68,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
@@ -88,6 +92,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(19, sampleService.getRequestCount(), "Request count should be 19")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
@@ -108,6 +116,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
