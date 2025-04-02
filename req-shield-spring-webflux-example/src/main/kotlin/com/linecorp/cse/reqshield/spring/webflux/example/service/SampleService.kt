@@ -35,7 +35,7 @@ class SampleService(
 ) {
     private val atomicInteger: AtomicInteger = AtomicInteger(0)
 
-    @ReqShieldCacheable(cacheName = "product", decisionForUpdate = 80, timeToLiveMillis = 60 * 1000)
+    @ReqShieldCacheable(cacheName = "product", key = "'product-' + #productId", decisionForUpdate = 80, timeToLiveMillis = 60 * 1000)
     fun getProduct(productId: String): Mono<Product> =
         Mono
             .delay(Duration.ofMillis(500))
@@ -49,6 +49,7 @@ class SampleService(
 
     @ReqShieldCacheable(
         cacheName = "productOnlyUpdataCache",
+        key = "'product-' + #productId",
         decisionForUpdate = 80,
         timeToLiveMillis = 60 * 1000,
         reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,
@@ -82,7 +83,7 @@ class SampleService(
                 60 * 1000,
             ).mapNotNull { it.value }
 
-    @ReqShieldCacheable(cacheName = "product", isLocalLock = false, decisionForUpdate = 80)
+    @ReqShieldCacheable(cacheName = "product", key = "'product-' + #productId", isLocalLock = false, decisionForUpdate = 80)
     fun getProductForGlobalLock(productId: String): Mono<Product> =
         Mono
             .delay(Duration.ofMillis(500))
@@ -94,7 +95,7 @@ class SampleService(
                     }.doFinally { atomicInteger.incrementAndGet() },
             )
 
-    @ReqShieldCacheEvict(cacheName = "product")
+    @ReqShieldCacheEvict(cacheName = "product", key = "'product-' + #productId")
     fun removeProduct(productId: String): Mono<Boolean> {
         log.info("remove product ($productId)")
         return Mono.fromCallable { true }

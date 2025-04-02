@@ -1,6 +1,7 @@
 package com.linecorp.cse.reqshield.spring3.webflux.kotlin.coroutine.example.service
 
 import com.linecorp.cse.reqshield.kotlin.coroutine.ReqShield
+import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring3.webflux.kotlin.coroutine.example.dto.Product
@@ -17,8 +18,29 @@ class SampleService(
 ) {
     private val atomicInteger: AtomicInteger = AtomicInteger(0)
 
-    @ReqShieldCacheable(cacheName = "product", decisionForUpdate = 80, timeToLiveMillis = 60 * 1000)
+    @ReqShieldCacheable(
+        cacheName = "product",
+        key = "'product-' + #productId",
+        decisionForUpdate = 80,
+        timeToLiveMillis = 60 * 1000,
+    )
     suspend fun getProduct(productId: String): Product {
+        log.info("find product with db request with req-shield local lock (will take 1 second)")
+
+        delay(500)
+        atomicInteger.incrementAndGet()
+
+        return Product(productId, "product_$productId")
+    }
+
+    @ReqShieldCacheable(
+        cacheName = "productOnlyUpdateCache",
+        key = "'product-' + #productId",
+        decisionForUpdate = 80,
+        timeToLiveMillis = 60 * 1000,
+        reqShieldWorkMode = ReqShieldWorkMode.ONLY_UPDATE_CACHE,
+    )
+    suspend fun getProductOnlyUpdateCache(productId: String): Product {
         log.info("find product with db request with req-shield local lock (will take 1 second)")
 
         delay(500)
@@ -45,7 +67,7 @@ class SampleService(
 
     @ReqShieldCacheable(
         cacheName = "product",
-        key = "global_lock",
+        key = "'product-' + #productId",
         isLocalLock = false,
         decisionForUpdate = 70,
         timeToLiveMillis = 60 * 1000,
@@ -59,7 +81,7 @@ class SampleService(
         return Product(productId, "product_$productId")
     }
 
-    @ReqShieldCacheEvict(cacheName = "product")
+    @ReqShieldCacheEvict(cacheName = "product", key = "'product-' + #productId")
     suspend fun removeProduct(productId: String) {
         log.info("remove product ($productId)")
     }

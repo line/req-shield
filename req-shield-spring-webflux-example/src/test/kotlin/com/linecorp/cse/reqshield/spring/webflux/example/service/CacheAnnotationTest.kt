@@ -68,6 +68,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
@@ -88,6 +92,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(19, sampleService.getRequestCount(), "Request count should be 19")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
@@ -108,6 +116,10 @@ class CacheAnnotationTest : AbstractRedisTest() {
             .assertNext { productList ->
                 assertEquals(1, sampleService.getRequestCount(), "Request count should be 1")
             }.verifyComplete()
+
+        await().atMost(5, TimeUnit.SECONDS).until {
+            asyncCache.get("product-$testProductId").block() != null
+        }
     }
 
     @Test
@@ -126,9 +138,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-[$testProductId]").block() != null
+            asyncCache.get("product-$testProductId").block() != null
         }
-        val cacheMono = asyncCache.get("product-[$testProductId]").block()
+        val cacheMono = asyncCache.get("product-$testProductId").block()
         assertNotNull(cacheMono)
 
         // when
@@ -144,9 +156,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-[$testProductId]").block() == null
+            asyncCache.get("product-$testProductId").block() == null
         }
-        val cacheMonoNull = asyncCache.get("product-[$testProductId]").block()
+        val cacheMonoNull = asyncCache.get("product-$testProductId").block()
         assertNull(cacheMonoNull)
     }
 }

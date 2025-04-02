@@ -60,8 +60,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val method = kotlinMethod?.javaMethod
 
     private val cacheName = "testCacheName"
-    private val cacheKey = "testCacheKey"
-    private val argument = "testArgument"
+    private val cacheKey = "#paramMap['x'] + #paramMap['y']"
+    private val argument = mapOf("x" to "paramX", "y" to "paramY")
+    private val evaluatedKey = "paramXparamY"
     private val methodReturn = Product("testProduct", "testCategory")
 
     @BeforeEach
@@ -109,7 +110,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
             assertEquals(result, reqShieldData.value)
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
         }
 
     @Test
@@ -130,7 +131,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             jobs.awaitAll()
 
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$cacheKey"])
+            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$evaluatedKey"])
         }
 
     @Test
@@ -169,7 +170,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
             reqShieldAspect.aroundTargetCacheable(joinPoint)
 
-            assertEquals("testCacheKey", reqShieldAspect.getCacheableCacheKey(joinPoint))
+            assertEquals(evaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
         }
 
     @Test
@@ -180,15 +181,15 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                 key = cacheKey,
             )
 
-        assertEquals(cacheKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
+        assertEquals(evaluatedKey, reqShieldAspect.getCacheableCacheKey(joinPoint))
     }
 
     class TestBean {
-        @ReqShieldCacheable(cacheName = "TestCacheName")
-        suspend fun cacheableWithSingleArgument(testArgument: String): String = "ReturnValue: $testArgument"
+        @ReqShieldCacheable(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
+        suspend fun cacheableWithSingleArgument(paramMap: Map<String, String>): String = "ReturnValue: $paramMap"
 
-        @ReqShieldCacheEvict(cacheName = "TestCacheName")
-        suspend fun evictWithSingleArgument(testArgument: String): Boolean {
+        @ReqShieldCacheEvict(cacheName = "TestCacheName", key = "#paramMap['x'] + #paramMap['y']")
+        suspend fun evictWithSingleArgument(paramMap: Map<String, String>): Boolean {
             log.debug("cache eviction")
             return true
         }

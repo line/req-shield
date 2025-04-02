@@ -50,6 +50,28 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
+        }
+    }
+
+    @Test
+    fun `ReqShieldCacheable test - request to 'sampleService' should be request count times (only update cache mode)`() {
+        val executorService = Executors.newFixedThreadPool(100)
+
+        val testProductId: String = UUID.randomUUID().toString()
+
+        for (i in 1..100) {
+            executorService.submit {
+                sampleService.getProductOnlyUpdateCache(testProductId)
+            }
+        }
+
+        executorService.shutdown()
+        executorService.awaitTermination(3000, TimeUnit.SECONDS)
+
+        await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
+            assertEquals(100, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
     }
 
@@ -72,6 +94,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
     }
 
@@ -82,19 +105,19 @@ class CacheAnnotationTest : AbstractRedisTest() {
         sampleService.getProduct(testProductId)
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-[$testProductId]") != null
+            reqShieldCache.get("product-$testProductId") != null
         }
 
-        assertNotNull(reqShieldCache.get("product-[$testProductId]"))
+        assertNotNull(reqShieldCache.get("product-$testProductId"))
 
         // when
         sampleService.removeProduct(testProductId)
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-[$testProductId]") == null
+            reqShieldCache.get("product-$testProductId") == null
         }
 
-        assertNull(reqShieldCache.get("product-[$testProductId]"))
+        assertNull(reqShieldCache.get("product-$testProductId"))
     }
 }

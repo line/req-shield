@@ -24,9 +24,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import org.junit.jupiter.api.Assertions
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -63,7 +61,8 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
             delay(500)
 
-            Assertions.assertEquals(1, sampleService.getRequestCount())
+            assertEquals(1, sampleService.getRequestCount())
+            assertNotNull(asyncCache.get("product-$testProductId"))
         }
 
     @Test
@@ -79,7 +78,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
             delay(500)
 
-            Assertions.assertEquals(20, sampleService.getRequestCount())
+            assertEquals(20, sampleService.getRequestCount())
         }
 
     @Test
@@ -95,7 +94,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
             delay(500)
 
-            Assertions.assertEquals(1, sampleService.getRequestCount())
+            assertEquals(1, sampleService.getRequestCount())
         }
 
     @Test
@@ -108,7 +107,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
             val maxAttempts = 30
 
             var attempts = 0
-            while (asyncCache.get("product-[$testProductId]") == null) {
+            while (asyncCache.get("product-$testProductId") == null) {
                 if (attempts >= maxAttempts) {
                     break
                 }
@@ -116,13 +115,13 @@ class CacheAnnotationTest : AbstractRedisTest() {
                 delay(100)
             }
 
-            assertNotNull(asyncCache.get("product-[$testProductId]"))
+            assertNotNull(asyncCache.get("product-$testProductId"))
 
             // when
             sampleService.removeProduct(testProductId)
 
             var attemptsSecond = 0
-            while (asyncCache.get("product-[$testProductId]") != null) {
+            while (asyncCache.get("product-$testProductId") != null) {
                 if (attemptsSecond >= maxAttempts) {
                     break
                 }
@@ -130,6 +129,6 @@ class CacheAnnotationTest : AbstractRedisTest() {
                 delay(100)
             }
 
-            assertNull(asyncCache.get("product-[$testProductId]"))
+            assertNull(asyncCache.get("product-$testProductId"))
         }
 }
