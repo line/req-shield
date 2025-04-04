@@ -56,11 +56,6 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
     private val mockContinuation = mockk<Continuation<Any?>>()
-//    private val kotlinMethod =
-//        TestBean::class.functions.find {
-//            it.name == TestBean::cacheableWithSingleArgument.name && it.parameters.size == 2
-//        }
-//    private val method = kotlinMethod?.javaMethod
 
     private val cacheName = "TestCacheName"
     private val cacheKeyGenerator = "customGenerator"
