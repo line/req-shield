@@ -20,7 +20,7 @@ object ConfigValues {
     const val DEFAULT_LOCK_TIMEOUT_MILLIS = 3000L
     const val DEFAULT_DECISION_FOR_UPDATE = 80
 
-    const val LOCK_MONITOR_INTERVAL_MILLIS = 10L
+    const val LOCK_MONITOR_INTERVAL_MILLIS = 1000L
 
     const val MAX_ATTEMPT_GET_CACHE = 50
     const val GET_CACHE_INTERVAL_MILLIS = 50L

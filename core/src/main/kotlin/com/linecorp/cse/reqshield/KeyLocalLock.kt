@@ -20,30 +20,98 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INT
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
 class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
     private data class LockInfo(val semaphore: Semaphore, val createdAt: Long)
 
-    private val lockMap = ConcurrentHashMap<String, LockInfo>()
+    companion object {
+        // Global lockMap shared by all instances - CRITICAL FIX for request collapsing
+        private val lockMap = ConcurrentHashMap<String, LockInfo>()
 
-    private val executorService: ExecutorService = Executors.newSingleThreadExecutor()
+        // Single scheduler shared by all instances
+        @Volatile
+        private var sharedScheduler: ScheduledExecutorService? = null
 
-    init {
-        executorService.execute {
-            while (true) {
-                try {
-                    val now = System.currentTimeMillis()
-                    lockMap.entries.removeIf { now - it.value.createdAt > lockTimeoutMillis }
-                    Thread.sleep(LOCK_MONITOR_INTERVAL_MILLIS)
-                } catch (e: InterruptedException) {
-                    log.error("Error in lock lifecycle monitoring : {}", e.message)
+        // Track active instances
+        private val instances = ConcurrentHashMap.newKeySet<KeyLocalLock>()
+
+        // Thread-safe lazy initialization
+        private fun getOrCreateScheduler(): ScheduledExecutorService {
+            return sharedScheduler ?: synchronized(this) {
+                sharedScheduler ?: createScheduler().also {
+                    sharedScheduler = it
+                    startMonitoring(it)
                 }
             }
+        }
+
+        private fun createScheduler(): ScheduledExecutorService {
+            return Executors.newSingleThreadScheduledExecutor { runnable ->
+                Thread(runnable, "req-shield-lock-monitor").apply {
+                    isDaemon = true // Does not prevent JVM shutdown
+                    priority = Thread.MIN_PRIORITY // Low priority
+                }
+            }
+        }
+
+        private fun startMonitoring(scheduler: ScheduledExecutorService) {
+            // Batch cleanup for all instances (10ms → 1000ms)
+            scheduler.scheduleWithFixedDelay({
+                try {
+                    instances.forEach { instance ->
+                        instance.cleanupExpiredLocks()
+                    }
+                } catch (e: Exception) {
+                    log.error("Error in shared lock lifecycle monitoring: {}", e.message)
+                }
+            }, 0, LOCK_MONITOR_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+        }
+
+        // Automatic cleanup on JVM shutdown
+        init {
+            Runtime.getRuntime().addShutdownHook(
+                Thread {
+                    sharedScheduler?.let { scheduler ->
+                        log.debug("Shutting down shared ReqShield scheduler")
+                        scheduler.shutdown()
+                        try {
+                            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                                scheduler.shutdownNow()
+                            }
+                        } catch (_: InterruptedException) {
+                            scheduler.shutdownNow()
+                        }
+                    }
+                }.apply { name = "req-shield-shutdown-hook" },
+            )
+        }
+    }
+
+    init {
+        // Register instance and initialize scheduler
+        instances.add(this)
+        getOrCreateScheduler()
+    }
+
+    // Internal cleanup method (called by shared scheduler)
+    internal fun cleanupExpiredLocks() {
+        val now = System.currentTimeMillis()
+        val expiredCount = lockMap.size
+        lockMap.entries.removeIf { now - it.value.createdAt > lockTimeoutMillis }
+        val remainingCount = lockMap.size
+
+        if (log.isTraceEnabled && expiredCount > remainingCount) {
+            log.trace(
+                "Cleaned up {} expired locks, {} remaining",
+                expiredCount - remainingCount,
+                remainingCount,
+            )
         }
     }
 
@@ -68,5 +136,13 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
             lockMap.remove(completeKey)
         }
         return true
+    }
+
+    fun shutdown() {
+        // Deregister instance
+        instances.remove(this)
+
+        // Shared scheduler is managed globally, no individual shutdown needed
+        log.debug("KeyLocalLock instance deregistered from shared monitoring")
     }
 }

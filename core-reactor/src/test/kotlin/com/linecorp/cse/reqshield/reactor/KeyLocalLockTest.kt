@@ -24,7 +24,6 @@ import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
 import java.time.Duration
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class KeyLocalLockTest : BaseKeyLockTest {
@@ -132,7 +131,9 @@ class KeyLocalLockTest : BaseKeyLockTest {
             ).expectNext(true)
             .verifyComplete()
 
-        Thread.sleep(TimeUnit.SECONDS.toMillis(3) + 100)
+        // Wait for lock timeout + cleanup interval + buffer
+        // lockTimeoutMillis = 3000ms, cleanup interval = 1000ms
+        Thread.sleep(lockTimeoutMillis + 1000L + 500L) // 4.5 seconds total
 
         StepVerifier
             .create(
