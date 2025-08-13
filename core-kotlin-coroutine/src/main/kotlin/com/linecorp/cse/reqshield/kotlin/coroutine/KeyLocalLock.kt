@@ -45,7 +45,7 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
             while (isActive) {
                 runCatching {
                     val now = System.currentTimeMillis()
-                    lockMap.entries.removeIf { now - it.value.createdAt > lockTimeoutMillis } // 특정 시간이 지나면 lock 여부와 상관없이 map에서 삭제한다.
+                    lockMap.entries.removeIf { now - it.value.createdAt > lockTimeoutMillis }
                     delay(LOCK_MONITOR_INTERVAL_MILLIS)
                 }.onFailure { e ->
                     log.error("Error in lock lifecycle monitoring : {}", e.message)
