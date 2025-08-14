@@ -112,6 +112,12 @@ Contains shared:
 - Coverage reports generated via `./gradlew jacocoTestReport`
 - Coverage enforced through Jacoco plugin configuration
 
+### Code Quality Requirements
+- **Lint validation**: All code must pass ktlint checks before completion
+- Run `./gradlew ktlintCheck` to validate code style
+- Fix any lint issues with `./gradlew ktlintFormat`
+- Lint validation is mandatory for all code changes
+
 ### Test Categories
 - **Unit Tests**: Test individual components in isolation
 - **Integration Tests**: Test Spring integration with real Redis containers

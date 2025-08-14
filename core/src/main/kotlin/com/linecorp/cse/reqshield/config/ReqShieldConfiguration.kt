@@ -36,7 +36,7 @@ data class ReqShieldConfiguration<T>(
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val executor: ScheduledExecutorService =
         Executors.newScheduledThreadPool(
-            Runtime.getRuntime().availableProcessors() * 10,
+            maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
         ),
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val keyLock: KeyLock =
