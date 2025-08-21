@@ -201,15 +201,14 @@ class ReqShield<T>(
         value: ReqShieldData<T>,
         lockType: LockType,
     ) {
-        var unlockSuccess = false
-        var retryCount = 0
-
         try {
             setFunction.invoke(key, value, value.timeToLiveMillis)
         } catch (e: Exception) {
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {
             if (shouldAttemptUnlock(lockType)) {
+                var unlockSuccess = false
+                var retryCount = 0
                 while (!unlockSuccess && retryCount < MAX_ATTEMPT_SET_CACHE) {
                     if (reqShieldConfig.keyLock.unLock(key, lockType)) {
                         unlockSuccess = true

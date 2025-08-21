@@ -26,7 +26,6 @@ import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
 class KeyLocalLockTest : BaseKeyLockTest {
@@ -117,7 +116,9 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
             assertTrue(keyLock.tryLock(key, lockType))
 
-            delay(Duration.ofSeconds(3).toMillis() + 100)
+            // Wait for lock timeout + cleanup interval + buffer
+            // lockTimeoutMillis = 3000ms, cleanup interval = 1000ms
+            delay(lockTimeoutMillis + 1000L + 500L) // 4.5 seconds total
 
             val result =
                 withContext(Dispatchers.IO) {
