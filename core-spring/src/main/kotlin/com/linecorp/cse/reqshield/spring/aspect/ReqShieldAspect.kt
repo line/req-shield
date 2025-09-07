@@ -21,6 +21,8 @@ import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
+import com.linecorp.cse.reqshield.support.config.ReqShieldAspectProperties
+import com.linecorp.cse.reqshield.support.utils.LRUCache
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
@@ -39,19 +41,19 @@ import org.springframework.stereotype.Component
 import org.springframework.util.StringUtils
 import org.springframework.util.function.SingletonSupplier
 import java.lang.reflect.Method
-import java.util.concurrent.ConcurrentHashMap
 
 @Aspect
 @Component
 class ReqShieldAspect<T>(
     private val reqShieldCache: ReqShieldCache<T>,
+    private val aspectProperties: ReqShieldAspectProperties = ReqShieldAspectProperties(),
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
     private val spelParser = SpelExpressionParser()
     private val defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
 
-    private val keyGeneratorMap = ConcurrentHashMap<String, KeyGenerator>()
-    internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
+    private val keyGeneratorMap = LRUCache<String, KeyGenerator>(aspectProperties.cacheMaxSize)
+    internal val reqShieldMap = LRUCache<String, ReqShield<T>>(aspectProperties.cacheMaxSize)
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable)")
     fun aroundReqShieldCacheable(joinPoint: ProceedingJoinPoint): Any? {
