@@ -25,7 +25,6 @@ package com.linecorp.cse.reqshield.support.config
  *    req-shield:
  *      aspect:
  *        cache-max-size: 500
- *        enable-metrics: true
  */
 data class ReqShieldAspectProperties(
     /**
@@ -33,9 +32,4 @@ data class ReqShieldAspectProperties(
      * Default: 1000
      */
     val cacheMaxSize: Int = 1000,
-    /**
-     * Enable cache usage metrics logging.
-     * Default: false
-     */
-    val enableMetrics: Boolean = false,
 )
