@@ -90,7 +90,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             // then
             assertEquals(reqShieldData.value, result)
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+            val method = reqShieldAspect.getTargetMethod(joinPoint)
+            val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+            assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
         }
     }
 
@@ -117,7 +119,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         Awaitility.await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
             // then
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+            val method = reqShieldAspect.getTargetMethod(joinPoint)
+            val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+            assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
         }
     }
 

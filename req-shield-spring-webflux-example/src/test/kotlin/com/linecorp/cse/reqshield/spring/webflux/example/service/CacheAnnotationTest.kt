@@ -90,8 +90,14 @@ class CacheAnnotationTest : AbstractRedisTest() {
         StepVerifier
             .create(flux)
             .assertNext { productList ->
-                assertEquals(19, sampleService.getRequestCount(), "Request count should be 19")
+                assertEquals(20, productList.size, "Result count should be 20")
             }.verifyComplete()
+
+        // Wait for all doFinally callbacks to complete (async cache storage may cause timing issues)
+        await().atMost(5, TimeUnit.SECONDS).until {
+            sampleService.getRequestCount() == 20
+        }
+        assertEquals(20, sampleService.getRequestCount(), "Request count should be 20")
 
         await().atMost(5, TimeUnit.SECONDS).until {
             asyncCache.get("product-$testProductId").block() != null

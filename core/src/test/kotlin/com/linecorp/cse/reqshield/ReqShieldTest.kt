@@ -482,4 +482,88 @@ class ReqShieldTest : BaseReqShieldTest {
         verify { cacheSetter.invoke(key, reqShieldData, 1000L) }
         verify { keyLock.unLock(any(), any()) }
     }
+
+    @Test
+    fun `should complete future with callable result when cache getter throws exception in scheduled task`() {
+        // Given: First cache check returns null (triggers scheduleTask path),
+        // then subsequent calls in scheduleTask throw exception
+        var callCount = 0
+        every { cacheGetter.invoke(key) } answers {
+            callCount++
+            if (callCount == 1) {
+                null // First call: cache miss, triggers handleLockForCacheCreation
+            } else {
+                throw Exception("cache connection error") // Subsequent calls: exception in scheduleTask
+            }
+        }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns false
+
+        // When: getAndSetReqShieldData is called
+        // The scheduled task will hit exception, should fallback to callable
+        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        // Then: Should return callable result (fallback), not hang
+        await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
+            assertNotNull(result)
+            assertEquals(value, result.value)
+            verify { callable.call() }
+        }
+    }
+
+    @Test
+    fun `should not hang when scheduled task encounters repeated cache getter exceptions`() {
+        // Given: First cache check returns null (triggers scheduleTask path),
+        // then subsequent calls always fail
+        var callCount = 0
+        every { cacheGetter.invoke(key) } answers {
+            callCount++
+            if (callCount == 1) {
+                null // First call: cache miss, triggers handleLockForCacheCreation
+            } else {
+                throw Exception("persistent cache error $callCount") // Subsequent calls: exception in scheduleTask
+            }
+        }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns false
+
+        // When: getAndSetReqShieldData is called
+        val startTime = System.currentTimeMillis()
+        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val elapsed = System.currentTimeMillis() - startTime
+
+        // Then: Should complete within reasonable time (not hang), using callable fallback
+        assertNotNull(result)
+        assertEquals(value, result.value)
+        // Should complete within 5 seconds (way less than infinite hang)
+        assertTrue(elapsed < 5000, "Should not hang - completed in ${elapsed}ms")
+        verify { callable.call() }
+    }
+
+    @Test
+    fun `should propagate exception when both cache getter and callable fail`() {
+        // Given: First cache check returns null (triggers scheduleTask path),
+        // then cache getter fails and callable also fails
+        var callCount = 0
+        every { cacheGetter.invoke(key) } answers {
+            callCount++
+            if (callCount == 1) {
+                null // First call: cache miss
+            } else {
+                throw Exception("cache error") // Subsequent calls: exception in scheduleTask
+            }
+        }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns false
+        every { callable.call() } throws Exception("callable also failed")
+
+        // When/Then: Should propagate the callable exception (via completeExceptionally)
+        val exception =
+            assertThrows<Exception> {
+                reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+            }
+
+        // The exception should be from the fallback callable failure
+        assertTrue(
+            exception is ClientException || exception.cause is ClientException,
+            "Should propagate ClientException from failed callable",
+        )
+    }
 }

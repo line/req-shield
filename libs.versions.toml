@@ -1,6 +1,7 @@
 [versions]
 kotlin = "1.8.20"
 kotlinCoroutine = "1.7.3"
+kotlinCoroutineSpring = "1.6.4"
 reactor = "3.4.23"
 spring = "5.3.30"
 springBoot3 = "3.3.1"
@@ -22,6 +23,7 @@ kotlin-coroutine = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", v
 kotlin-coroutine-jvm = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm", version.ref = "kotlinCoroutine" }
 kotlin-coroutine-jdk8 = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-jdk8", version.ref = "kotlinCoroutine" }
 kotlin-coroutine-reactor = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-reactor", version.ref = "kotlinCoroutine" }
+kotlin-coroutine-spring = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-spring", version.ref = "kotlinCoroutineSpring" }
 kotlin-coroutine-reactive = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-reactive", version.ref = "kotlinCoroutine" }
 
 # log

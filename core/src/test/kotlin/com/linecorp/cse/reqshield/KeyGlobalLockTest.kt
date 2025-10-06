@@ -40,10 +40,15 @@ class KeyGlobalLockTest :
 
     @BeforeEach
     fun init() {
-        val redisUrl = "redis://localhost:6379" // testContainer url
+        val host = AbstractRedisTest.redisHost
+        val port = AbstractRedisTest.redisPort
+        val redisUrl = "redis://$host:$port"
         val redisClient = RedisClient.create(redisUrl)
         val connection = redisClient.connect()
         redisCommands = connection.sync()
+
+        // Clean up all keys from previous tests for proper test isolation
+        redisCommands.flushdb()
 
         globalLockFunc = { key, timeToLiveMillis ->
             redisCommands.setnx(key, key)

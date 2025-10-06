@@ -31,7 +31,9 @@ dependencies {
     testImplementation(rootProject.libs.reactor)
     testImplementation(rootProject.libs.reactor.test)
     testImplementation(rootProject.libs.spring.context)
+    testImplementation(rootProject.libs.spring.test)
     testImplementation(rootProject.libs.aspectj)
+    testImplementation(rootProject.libs.lettuce)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

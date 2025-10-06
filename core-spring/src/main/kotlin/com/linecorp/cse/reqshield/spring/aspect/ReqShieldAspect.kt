@@ -151,7 +151,15 @@ class ReqShieldAspect<T>(
                 keyGenerator.generate(joinPoint.target, method, joinPoint.args).toString()
             }
 
-        require(!key.isNullOrBlank()) { "Null key returned for cache method : $method" }
+        require(!key.isNullOrBlank()) {
+            "Null/blank key for @ReqShieldCacheable method=${method.declaringClass.name}.${method.name} " +
+                "args=${joinPoint.args.joinToString(prefix = "[", postfix = "]") {
+                    it?.let {
+                            arg ->
+                        "${arg::class.simpleName}@${arg.hashCode().toString(16)}"
+                    } ?: "null"
+                }}"
+        }
 
         return key
     }
@@ -161,7 +169,9 @@ class ReqShieldAspect<T>(
         cacheKeyGenerator: String,
     ) {
         if (cacheKey.isNotBlank() && cacheKeyGenerator.isNotBlank()) {
-            throw IllegalArgumentException("The key and keyGenerator attributes are mutually exclusive.")
+            throw IllegalArgumentException(
+                "The key and keyGenerator attributes are mutually exclusive: key='$cacheKey', keyGenerator='$cacheKeyGenerator'",
+            )
         }
     }
 
@@ -175,8 +185,11 @@ class ReqShieldAspect<T>(
         }
     }
 
-    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
-        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String {
+        val method = getTargetMethod(joinPoint)
+        return "${method.declaringClass.name}.${method.name}-" +
+            "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    }
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory

@@ -42,7 +42,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
-    private val asyncCache: AsyncCache<Product> = mockk()
+    private val asyncCache: AsyncCache<Product> = InMemoryAsyncCache()
     private val joinPoint = mockk<ProceedingJoinPoint>()
     private val reqShieldAspect = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
@@ -63,13 +63,17 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         every { joinPoint.target } returns targetObject
 
         reqShieldAspect.setBeanFactory(beanFactory)
+        // Provide scheduler bean expected by aspect configuration
+        every {
+            beanFactory.getBean("reqShieldScheduler", reactor.core.scheduler.Scheduler::class.java)
+        } returns Schedulers.boundedElastic()
     }
 
     @Test
     override fun verifyReqShieldCacheCreation() {
-        // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
-        every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
+        // pre-populate cache
+        asyncCache.put(spelEvaluatedKey, reqShieldData, 1000).block()
         every { joinPoint.proceed() } answers { targetObject.cacheableWithCustomKey(argument) }
         every { reqShieldAspect.getTargetMethod(joinPoint) } returns
             ReflectionUtils.findMethod(
@@ -87,15 +91,16 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .assertNext { value ->
                 assertEquals(reqShieldData.value, value)
                 Assertions.assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+                val method = reqShieldAspect.getTargetMethod(joinPoint)
+                val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+                Assertions.assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
             }.verifyComplete()
     }
 
     @Test
     override fun reqShieldObjectShouldBeCreatedOnce() {
-        // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
-        every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
+        asyncCache.put(spelEvaluatedKey, reqShieldData, 1000).block()
         every { joinPoint.proceed() } answers { targetObject.cacheableWithCustomKey(argument) }
         every { reqShieldAspect.getTargetMethod(joinPoint) } returns
             ReflectionUtils.findMethod(
@@ -117,16 +122,16 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .create(flux)
             .assertNext { productList ->
                 Assertions.assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-                println(reqShieldAspect.reqShieldMap.keys().toList())
-                Assertions.assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+                val method = reqShieldAspect.getTargetMethod(joinPoint)
+                val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+                Assertions.assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
             }.verifyComplete()
     }
 
     @Test
     override fun verifyReqShieldCacheEviction() {
-        // Mock the cache data using mockk
         val reqShieldData = ReqShieldData(methodReturn, 1000)
-        every { asyncCache.get(any()) } returns Mono.just(reqShieldData)
+        asyncCache.put("${SimpleKeyGenerator.generateKey(arrayOf(argument))}", reqShieldData, 1000).block()
         every { reqShieldAspect.getTargetMethod(joinPoint) } returns
             ReflectionUtils.findMethod(
                 TestBean::class.java,
@@ -145,7 +150,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             }.verifyComplete()
 
         // Validate cache eviction
-        every { asyncCache.evict(any()) } returns Mono.just(true)
+        // real eviction call
         every { reqShieldAspect.getTargetMethod(joinPoint) } returns
             ReflectionUtils.findMethod(
                 TestBean::class.java,

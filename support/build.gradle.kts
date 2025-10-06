@@ -23,8 +23,11 @@ plugins {
 }
 
 dependencies {
-    testFixturesImplementation(rootProject.libs.testcontainers)
-    testFixturesImplementation(rootProject.libs.junit.jupiter.testcontainers)
+    testFixturesImplementation(rootProject.libs.junit)
+    // Expose Testcontainers to consumers of test fixtures because RedisContainer
+    // leaks GenericContainer type in its API (instance property)
+    testFixturesApi(rootProject.libs.testcontainers)
+    testFixturesApi(rootProject.libs.junit.jupiter.testcontainers)
     testFixturesImplementation(rootProject.libs.spring.context)
     testFixturesImplementation(rootProject.libs.spring.test)
     testFixturesImplementation(rootProject.libs.spring.boot.test)

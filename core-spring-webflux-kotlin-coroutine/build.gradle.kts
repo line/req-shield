@@ -34,7 +34,9 @@ dependencies {
     testImplementation(rootProject.libs.kotlin.coroutine.test)
     testImplementation(rootProject.libs.kotlin.coroutine.jvm)
     testImplementation(rootProject.libs.spring.context)
+    testImplementation(rootProject.libs.spring.test)
     testImplementation(rootProject.libs.aspectj)
+    testImplementation(rootProject.libs.lettuce)
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

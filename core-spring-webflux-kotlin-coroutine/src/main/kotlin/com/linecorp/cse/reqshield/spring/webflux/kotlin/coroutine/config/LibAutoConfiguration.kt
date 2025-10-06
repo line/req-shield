@@ -16,11 +16,12 @@
 
 package com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.config
 
-import org.springframework.context.annotation.ComponentScan
+import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.aspect.ReqShieldAspect
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
+import org.springframework.context.annotation.Import
 
 @Configuration
-@EnableAspectJAutoProxy
-@ComponentScan(basePackages = ["com.linecorp.cse"])
+@EnableAspectJAutoProxy(proxyTargetClass = true)
+@Import(ReqShieldAspect::class)
 open class LibAutoConfiguration

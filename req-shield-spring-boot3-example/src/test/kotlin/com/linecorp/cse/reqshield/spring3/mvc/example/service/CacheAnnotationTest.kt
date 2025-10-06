@@ -1,7 +1,6 @@
 package com.linecorp.cse.reqshield.spring3.mvc.example.service
 
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
-import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import org.awaitility.Awaitility.await
@@ -14,7 +13,6 @@ import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.test.context.junit.jupiter.SpringExtension
-import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -48,7 +46,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
         executorService.shutdown()
         executorService.awaitTermination(3000, TimeUnit.SECONDS)
 
-        await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
             assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
@@ -69,7 +67,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
         executorService.shutdown()
         executorService.awaitTermination(3000, TimeUnit.SECONDS)
 
-        await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(100, sampleService.getRequestCount())
             assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
@@ -92,7 +90,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         Thread.sleep(1000)
 
-        await().atMost(Duration.ofMillis(BaseReqShieldTest.AWAIT_TIMEOUT)).untilAsserted {
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
             assertNotNull(reqShieldCache.get("product-$testProductId"))
         }
@@ -105,7 +103,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
         sampleService.getProduct(testProductId)
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-$testProductId") != null
+            runCatching { reqShieldCache.get("product-$testProductId") != null }.getOrDefault(false)
         }
 
         assertNotNull(reqShieldCache.get("product-$testProductId"))
@@ -115,7 +113,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            reqShieldCache.get("product-$testProductId") == null
+            runCatching { reqShieldCache.get("product-$testProductId") == null }.getOrDefault(false)
         }
 
         assertNull(reqShieldCache.get("product-$testProductId"))
