@@ -20,11 +20,12 @@ package com.linecorp.cse.reqshield.support.config
  * Configuration properties for ReqShield aspect internal caches.
  *
  * Usage in Spring Boot:
- * 1. Add @EnableConfigurationProperties(ReqShieldAspectProperties::class) to your config
- * 2. Configure in application.yml:
+ * Configure in application.yml:
  *    req-shield:
  *      aspect:
  *        cache-max-size: 500
+ *
+ * The Spring modules automatically register this as a Bean using @Value injection.
  */
 data class ReqShieldAspectProperties(
     /**

@@ -46,7 +46,7 @@ import java.lang.reflect.Method
 @Component
 class ReqShieldAspect<T>(
     private val reqShieldCache: ReqShieldCache<T>,
-    private val aspectProperties: ReqShieldAspectProperties = ReqShieldAspectProperties(),
+    private val aspectProperties: ReqShieldAspectProperties,
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
     private val spelParser = SpelExpressionParser()

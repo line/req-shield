@@ -22,6 +22,7 @@ import com.linecorp.cse.reqshield.spring.aspect.ReqShieldAspect
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
 import com.linecorp.cse.reqshield.support.BaseReqShieldModuleSupportTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
+import com.linecorp.cse.reqshield.support.config.ReqShieldAspectProperties
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
@@ -49,7 +50,7 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val reqShieldCache: ReqShieldCache<Product> = mockk()
     private val joinPoint = mockk<ProceedingJoinPoint>()
-    private val reqShieldAspect = spyk(ReqShieldAspect(reqShieldCache))
+    private val reqShieldAspect = spyk(ReqShieldAspect(reqShieldCache, ReqShieldAspectProperties()))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
 
