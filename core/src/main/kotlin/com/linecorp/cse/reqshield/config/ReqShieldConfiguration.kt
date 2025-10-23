@@ -28,8 +28,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 
 data class ReqShieldConfiguration<T>(
-    val setCacheFunction: (String, ReqShieldData<T>, Long) -> Boolean,
-    val getCacheFunction: (String) -> ReqShieldData<T>?,
+    val setCacheFunction: (String, String, ReqShieldData<T>, Long) -> Boolean,
+    val getCacheFunction: (String, String) -> ReqShieldData<T>?,
     val globalLockFunction: ((String, Long) -> Boolean)? = null,
     val globalUnLockFunction: ((String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,

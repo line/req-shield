@@ -17,6 +17,7 @@ dependencies {
     implementation(rootProject.libs.spring.boot.starter.data.redis)
     implementation(rootProject.libs.spring.boot.starter.aop)
     implementation(rootProject.libs.jackson.module.kotlin)
+    implementation(rootProject.libs.caffeine)
 
     testImplementation(testFixtures(project(":support")))
     testImplementation(rootProject.libs.spring.boot.starter.test)
