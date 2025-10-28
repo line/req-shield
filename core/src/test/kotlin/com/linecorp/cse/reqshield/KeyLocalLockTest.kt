@@ -194,10 +194,10 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         // Then - Instance2 should not be able to acquire the same lock
         val lock2Result = instance2.tryLock(key, lockType)
-        
+
         assertTrue(lock1Result)
         assertTrue(!lock2Result, "Instance2 should not acquire lock held by Instance1")
-        
+
         // Cleanup
         instance1.unLock(key, lockType)
         instance1.shutdown()
@@ -208,7 +208,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
     fun `should maintain request collapsing across multiple instances`() {
         // Given
         val instance1 = KeyLocalLock(lockTimeoutMillis)
-        val instance2 = KeyLocalLock(lockTimeoutMillis) 
+        val instance2 = KeyLocalLock(lockTimeoutMillis)
         val instance3 = KeyLocalLock(lockTimeoutMillis)
         val key = "collapsing-key"
         val lockType = LockType.CREATE
@@ -220,11 +220,12 @@ class KeyLocalLockTest : BaseKeyLockTest {
         // When - Multiple instances try to acquire the same lock concurrently
         repeat(3) { index ->
             executor.submit {
-                val instance = when (index) {
-                    0 -> instance1
-                    1 -> instance2
-                    else -> instance3
-                }
+                val instance =
+                    when (index) {
+                        0 -> instance1
+                        1 -> instance2
+                        else -> instance3
+                    }
                 attemptCount.incrementAndGet()
                 if (instance.tryLock(key, lockType)) {
                     successCount.incrementAndGet()
@@ -241,7 +242,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
         // Then - Only one should succeed in acquiring the lock
         assertEquals(3, attemptCount.get())
         assertEquals(1, successCount.get(), "Only one instance should acquire the lock")
-        
+
         // Cleanup
         instance1.shutdown()
         instance2.shutdown()
@@ -259,11 +260,11 @@ class KeyLocalLockTest : BaseKeyLockTest {
         // When - Instance1 acquires lock, Instance2 unlocks
         assertTrue(instance1.tryLock(key, lockType))
         instance2.unLock(key, lockType) // Should work even from different instance
-        
+
         // Then - New lock acquisition should succeed
         val newLockResult = instance2.tryLock(key, lockType)
         assertTrue(newLockResult, "Should be able to acquire lock after global unlock")
-        
+
         // Cleanup
         instance2.unLock(key, lockType)
         instance1.shutdown()
@@ -305,16 +306,20 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         // Then - Verify thread safety and concurrent operations handling
         assertEquals(0, errors.get(), "No errors should occur during concurrent operations")
-        
+
         // Due to sequential nature of ThreadPool(10) and brief work duration (10ms),
         // multiple operations can succeed on the same key at different times
-        assertTrue(operations.get() >= 10, 
-            "At least one operation per key should succeed (minimum 10)")
-        assertTrue(operations.get() <= 50, 
-            "No more operations than total attempts should succeed (maximum 50)")
-        
+        assertTrue(
+            operations.get() >= 10,
+            "At least one operation per key should succeed (minimum 10)",
+        )
+        assertTrue(
+            operations.get() <= 50,
+            "No more operations than total attempts should succeed (maximum 50)",
+        )
+
         println("Successful operations: ${operations.get()}/50 total attempts")
-        
+
         // Cleanup
         instances.forEach { it.shutdown() }
     }

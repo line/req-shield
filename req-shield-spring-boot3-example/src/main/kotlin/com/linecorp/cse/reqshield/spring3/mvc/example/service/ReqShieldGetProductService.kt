@@ -6,6 +6,7 @@ import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring3.mvc.example.dto.Product
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.time.Duration
 
 private val log = LoggerFactory.getLogger(ReqShieldGetProductService::class.java)
 
@@ -26,13 +27,14 @@ class ReqShieldGetProductService(
         val returnValue =
             reqShield
                 .getAndSetReqShieldData(
-                    "productCacheKey",
-                    {
+                    name = "product",
+                    key = productId,
+                    callable = {
                         Thread.sleep(500)
-                        log.info("get product with 3s delay (Simulate db request) / productId : $productId")
+                        log.info("get product with 0.5s delay (Simulate db request) / productId : $productId")
                         Product(productId, "product_$productId")
                     },
-                    60 * 1000,
+                    timeToLiveMillis = Duration.ofMinutes(60).toMillis(),
                 ).value
 
         return returnValue
