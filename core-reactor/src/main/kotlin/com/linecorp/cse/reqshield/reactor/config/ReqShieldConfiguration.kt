@@ -29,8 +29,8 @@ import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 
 data class ReqShieldConfiguration<T>(
-    val setCacheFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
-    val getCacheFunction: (String) -> Mono<ReqShieldData<T>?>,
+    val setCacheFunction: (String, String, ReqShieldData<T>, Long) -> Mono<Boolean>,
+    val getCacheFunction: (String, String) -> Mono<ReqShieldData<T>?>,
     val globalLockFunction: ((String, Long) -> Mono<Boolean>)? = null,
     val globalUnLockFunction: ((String) -> Mono<Boolean>)? = null,
     val isLocalLock: Boolean = true,

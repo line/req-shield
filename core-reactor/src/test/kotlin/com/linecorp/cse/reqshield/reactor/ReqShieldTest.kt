@@ -23,11 +23,7 @@ import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.mockkStatic
-import io.mockk.unmockkStatic
-import io.mockk.verify
+import io.mockk.*
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -50,10 +46,11 @@ class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShieldOnlyCreateCache: ReqShield<Product>
     private lateinit var reqShieldForGlobalLock: ReqShield<Product>
     private lateinit var reqShieldForGlobalLockForError: ReqShield<Product>
-    private lateinit var cacheSetter: (String, ReqShieldData<Product>, Long) -> Mono<Boolean>
-    private lateinit var cacheGetter: (String) -> Mono<ReqShieldData<Product>?>
+    private lateinit var cacheSetter: (String, String, ReqShieldData<Product>, Long) -> Mono<Boolean>
+    private lateinit var cacheGetter: (String, String) -> Mono<ReqShieldData<Product>?>
     private lateinit var keyLock: KeyLock
     private lateinit var keyGlobalLock: KeyLock
+    private val name = "testName"
     private val key = "testKey"
     private val oldValue = Product("oldTestValue", "oldTestValue")
     private val value = Product("testValue", "testValue")
@@ -66,8 +63,8 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @BeforeEach
     fun setup() {
-        cacheSetter = mockk<(String, ReqShieldData<Product>, Long) -> Mono<Boolean>>()
-        cacheGetter = mockk<(String) -> Mono<ReqShieldData<Product>?>>()
+        cacheSetter = mockk<(String, String, ReqShieldData<Product>, Long) -> Mono<Boolean>>()
+        cacheGetter = mockk<(String, String) -> Mono<ReqShieldData<Product>?>>()
         globalLockFunc = mockk<(String, Long) -> Mono<Boolean>>()
         globalUnLockFunc = mockk<(String) -> Mono<Boolean>>()
         keyLock = mockk<KeyLock>()
@@ -128,12 +125,12 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
         every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.CREATE) } returns Mono.just(true)
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -148,8 +145,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, any(), any()) }
         verify { keyLock.tryLock(key, LockType.CREATE) }
         verify { keyLock.unLock(key, LockType.CREATE) }
         verify { callable.call() }
@@ -157,10 +154,10 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndOnlyUpdateCache() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
 
-        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -175,8 +172,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, any(), any()) }
         verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
         verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
         verify { callable.call() }
@@ -184,13 +181,13 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquired() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
 
         every { globalLockFunc(any(), any()) } returns Mono.just(true)
         every { globalUnLockFunc(any()) } returns Mono.just(true)
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -205,8 +202,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, any(), any()) }
         verify { globalLockFunc(any(), any()) }
         verify { globalUnLockFunc(any()) }
         verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -234,13 +231,13 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndCallableReturnNull() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
         every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.CREATE) } returns Mono.empty()
         every { callable.call() } returns Mono.empty()
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -256,8 +253,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, any(), any()) }
         verify { keyLock.tryLock(key, LockType.CREATE) }
         verify { keyLock.unLock(key, LockType.CREATE) }
         verify { callable.call() }
@@ -265,15 +262,15 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndCallableReturnNull() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
 
         every { globalLockFunc(any(), any()) } returns Mono.just(true)
         every { globalUnLockFunc(any()) } returns Mono.just(true)
 
         every { callable.call() } returns Mono.empty()
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -289,8 +286,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, any(), any()) }
         verify { globalLockFunc(any(), any()) }
         verify { globalUnLockFunc(any()) }
         verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -300,14 +297,14 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowCallableClientException() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
         every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.CREATE) } returns Mono.empty()
         every { callable.call() } returns Mono.error(Exception("callable error"))
 
         StepVerifier
-            .create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .create(reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis))
             .expectErrorMatches { throwable ->
                 throwable is ClientException && throwable.errorCode == ErrorCode.SUPPLIER_ERROR
             }.verify()
@@ -319,7 +316,7 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
+        verify { cacheGetter.invoke(name, key) }
         verify { keyLock.tryLock(key, LockType.CREATE) }
         verify { keyLock.unLock(key, LockType.CREATE) }
         verify { callable.call() }
@@ -327,8 +324,8 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowCallableClientException() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
 
         every { globalLockFunc(any(), any()) } returns Mono.just(true)
         every { globalUnLockFunc(any()) } returns Mono.just(true)
@@ -336,7 +333,7 @@ class ReqShieldTest : BaseReqShieldTest {
         every { callable.call() } returns Mono.error(Exception("callable error"))
 
         StepVerifier
-            .create(reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .create(reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis))
             .expectErrorMatches { throwable ->
                 throwable is ClientException && throwable.errorCode == ErrorCode.SUPPLIER_ERROR
             }.verify()
@@ -348,7 +345,7 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
+        verify { cacheGetter.invoke(name, key) }
         verify { globalLockFunc(any(), any()) }
         verify { globalUnLockFunc(any()) }
         verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -358,13 +355,13 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowGetCacheClientException() {
-        every { cacheGetter.invoke(key) } returns Mono.error(Exception("get cache error"))
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.error(Exception("get cache error"))
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
         every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.CREATE) } returns Mono.just(true)
 
         StepVerifier
-            .create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .create(reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis))
             .expectErrorMatches { throwable ->
                 throwable is ClientException && throwable.errorCode == ErrorCode.GET_CACHE_ERROR
             }.verify()
@@ -376,7 +373,7 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
+        verify { cacheGetter.invoke(name, key) }
         verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
         verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
         verify(inverse = true) { callable.call() }
@@ -384,14 +381,14 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowGetCacheClientException() {
-        every { cacheGetter.invoke(key) } returns Mono.error(Exception("get cache error"))
-        every { cacheSetter.invoke(key, any(), any()) } returns Mono.just(true)
+        every { cacheGetter.invoke(name, key) } returns Mono.error(Exception("get cache error"))
+        every { cacheSetter.invoke(name, key, any(), any()) } returns Mono.just(true)
 
         every { globalLockFunc(any(), any()) } returns Mono.just(true)
         every { globalUnLockFunc(any()) } returns Mono.just(true)
 
         StepVerifier
-            .create(reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .create(reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis))
             .expectErrorMatches { throwable ->
                 throwable is ClientException && throwable.errorCode == ErrorCode.GET_CACHE_ERROR
             }.verify()
@@ -403,7 +400,7 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
+        verify { cacheGetter.invoke(name, key) }
         verify(inverse = true) { globalLockFunc(any(), any()) }
         verify(inverse = true) { globalUnLockFunc(any()) }
         verify(inverse = true) { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -413,10 +410,10 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockNotAcquired() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
         every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(false)
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -424,18 +421,18 @@ class ReqShieldTest : BaseReqShieldTest {
                 assertNotNull(it)
             }.verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify(inverse = true) { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify(inverse = true) { cacheSetter.invoke(name, key, any(), any()) }
         verify { keyLock.tryLock(key, LockType.CREATE) }
         verify { callable.call() }
     }
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockNotAcquired() {
-        every { cacheGetter.invoke(key) } returns Mono.empty()
+        every { cacheGetter.invoke(name, key) } returns Mono.empty()
         every { globalLockFunc(any(), any()) } returns Mono.just(false)
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -443,8 +440,8 @@ class ReqShieldTest : BaseReqShieldTest {
                 assertNotNull(it)
             }.verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify(inverse = true) { cacheSetter.invoke(key, any(), any()) }
+        verify { cacheGetter.invoke(name, key) }
+        verify(inverse = true) { cacheSetter.invoke(name, key, any(), any()) }
         verify { globalLockFunc(any(), any()) }
         verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
         verify { callable.call() }
@@ -455,10 +452,10 @@ class ReqShieldTest : BaseReqShieldTest {
         timeToLiveMillis = 1000
         val reqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
+        every { cacheGetter.invoke(name, key) } returns Mono.just(reqShieldData)
         every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(false)
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -469,7 +466,7 @@ class ReqShieldTest : BaseReqShieldTest {
             .verify()
 
         verify { keyLock.tryLock(key, LockType.UPDATE) }
-        verify { cacheGetter.invoke(key) }
+        verify { cacheGetter.invoke(name, key) }
     }
 
     @Test
@@ -478,12 +475,12 @@ class ReqShieldTest : BaseReqShieldTest {
         val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
         val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
-        every { cacheSetter.invoke(key, any(), any()) } answers { Mono.just(true) }
+        every { cacheGetter.invoke(name, key) } returns Mono.just(reqShieldData)
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { Mono.just(true) }
         every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.UPDATE) } returns Mono.empty()
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -501,8 +498,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .verifyComplete()
 
         verify { keyLock.tryLock(key, LockType.UPDATE) }
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, newReqShieldData, timeToLiveMillis) }
         verify { keyLock.unLock(key, LockType.UPDATE) }
         verify { callable.call() }
     }
@@ -513,10 +510,10 @@ class ReqShieldTest : BaseReqShieldTest {
         val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
         val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
-        every { cacheSetter.invoke(key, any(), any()) } answers { Mono.just(true) }
+        every { cacheGetter.invoke(name, key) } returns Mono.just(reqShieldData)
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { Mono.just(true) }
 
-        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -534,8 +531,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .verifyComplete()
 
         verify(inverse = true) { keyLock.tryLock(key, LockType.UPDATE) }
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, newReqShieldData, timeToLiveMillis) }
         verify(inverse = true) { keyLock.unLock(key, LockType.UPDATE) }
         verify { callable.call() }
     }
@@ -546,13 +543,13 @@ class ReqShieldTest : BaseReqShieldTest {
         val reqShieldData = ReqShieldData(value, timeToLiveMillis)
         val reqShieldDataNull = ReqShieldData<Product>(null, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
-        every { cacheSetter.invoke(key, any(), any()) } answers { Mono.just(true) }
+        every { cacheGetter.invoke(name, key) } returns Mono.just(reqShieldData)
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { Mono.just(true) }
         every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(true)
         every { keyLock.unLock(key, LockType.UPDATE) } returns Mono.empty()
         every { callable.call() } returns Mono.empty()
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         StepVerifier
             .create(result)
@@ -568,8 +565,8 @@ class ReqShieldTest : BaseReqShieldTest {
             .expectNextCount(1)
             .verifyComplete()
 
-        verify { cacheGetter.invoke(key) }
-        verify { cacheSetter.invoke(key, reqShieldDataNull, timeToLiveMillis) }
+        verify { cacheGetter.invoke(name, key) }
+        verify { cacheSetter.invoke(name, key, reqShieldDataNull, timeToLiveMillis) }
         verify { keyLock.tryLock(key, LockType.UPDATE) }
         verify { keyLock.unLock(key, LockType.UPDATE) }
         verify { callable.call() }
@@ -590,12 +587,12 @@ class ReqShieldTest : BaseReqShieldTest {
 
         method.isAccessible = true
 
-        every { cacheSetter.invoke(any(), any(), any()) } returns Mono.error(Exception("set cache error"))
+        every { cacheSetter.invoke(any(), any(), any(), any()) } returns Mono.error(Exception("set cache error"))
 
         val mono =
             Mono.defer {
                 try {
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType) as Mono<Unit>
+                    method.invoke(reqShield, cacheSetter, name, key, reqShieldData, lockType) as Mono<Unit>
                 } catch (e: InvocationTargetException) {
                     Mono.error(e.cause ?: e)
                 }
@@ -608,7 +605,7 @@ class ReqShieldTest : BaseReqShieldTest {
                 assertEquals(ErrorCode.SET_CACHE_ERROR, (throwable as ClientException).errorCode)
             }.verify()
 
-        verify { cacheSetter.invoke(key, reqShieldData, 1000L) }
+        verify { cacheSetter.invoke(name, key, reqShieldData, 1000L) }
         verify { keyLock.unLock(any(), any()) }
     }
 }

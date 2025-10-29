@@ -26,8 +26,8 @@ import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 
 data class ReqShieldConfiguration<T>(
-    val setCacheFunction: suspend (String, ReqShieldData<T>, Long) -> Boolean,
-    val getCacheFunction: suspend (String) -> ReqShieldData<T>?,
+    val setCacheFunction: suspend (String, String, ReqShieldData<T>, Long) -> Boolean,
+    val getCacheFunction: suspend (String, String) -> ReqShieldData<T>?,
     val globalLockFunction: (suspend (String, Long) -> Boolean)? = null,
     val globalUnLockFunction: (suspend (String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,

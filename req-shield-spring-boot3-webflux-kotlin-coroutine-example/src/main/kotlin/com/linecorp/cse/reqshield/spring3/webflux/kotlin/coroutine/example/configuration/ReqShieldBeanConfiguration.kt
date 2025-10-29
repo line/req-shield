@@ -19,6 +19,7 @@ class ReqShieldBeanConfiguration<T>(
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = {
+                        name,
                         key,
                         value,
                         timeToLiveMillis,
@@ -29,7 +30,7 @@ class ReqShieldBeanConfiguration<T>(
                         Duration.ofMillis(timeToLiveMillis),
                     )
                 },
-                getCacheFunction = { key -> reactiveRedisOperations.opsForValue()[key].awaitFirstOrNull() },
+                getCacheFunction = { name, key -> reactiveRedisOperations.opsForValue()[key].awaitFirstOrNull() },
                 isLocalLock = true,
                 decisionForUpdate = 70,
             ),
