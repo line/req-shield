@@ -45,16 +45,24 @@ class LRUCache<K, V>(private val maxSize: Int) {
             return value
         }
 
-        // Slow path: compute new value with locking
+        // Compute new value outside of lock to avoid serialization
+        val newValue = mappingFunction(key)
+
+        // Slow path: double-checked locking pattern
         return lock.write {
-            cache.computeIfAbsent(key) { k ->
-                val value = mappingFunction(k)
-                accessOrder.add(k)
-                evictIfNeeded()
-                value
-            }.also {
+            // Double-check if value was added by another thread
+            cache[key]?.let { existingValue ->
                 updateAccessOrder(key)
+                return@write existingValue
             }
+
+            // Add new value to cache
+            cache[key] = newValue
+
+            // Evict before adding to prevent temporary size overflow
+            evictOldestIfAtCapacity()
+            accessOrder.add(key)
+            newValue
         }
     }
 
@@ -73,8 +81,9 @@ class LRUCache<K, V>(private val maxSize: Int) {
         return lock.write {
             val oldValue = cache.put(key, value)
             if (oldValue == null) {
+                // Evict before adding to prevent temporary size overflow
+                evictOldestIfAtCapacity()
                 accessOrder.add(key)
-                evictIfNeeded()
             } else {
                 updateAccessOrder(key)
             }
@@ -97,9 +106,10 @@ class LRUCache<K, V>(private val maxSize: Int) {
         }
     }
 
-    fun keys(): Set<K> = lock.read {
-        LinkedHashSet(accessOrder)
-    }
+    fun keys(): Set<K> =
+        lock.read {
+            LinkedHashSet(accessOrder)
+        }
 
     fun size(): Int = cache.size
 
@@ -110,8 +120,8 @@ class LRUCache<K, V>(private val maxSize: Int) {
         accessOrder.add(key)
     }
 
-    private fun evictIfNeeded() {
-        while (accessOrder.size > maxSize) {
+    private fun evictOldestIfAtCapacity() {
+        if (accessOrder.size >= maxSize) {
             val eldestKey = accessOrder.removeAt(0)
             cache.remove(eldestKey)
         }
