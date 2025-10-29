@@ -33,13 +33,14 @@ class ReqShieldBeanConfiguration<T>(
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = {
+                        name,
                         key,
                         value,
                         timeToLiveMillis,
                     ->
                     redisTemplate.opsForValue().setIfAbsent(key, value, Duration.ofMillis(timeToLiveMillis)) ?: false
                 },
-                getCacheFunction = { key -> redisTemplate.opsForValue()[key] },
+                getCacheFunction = { name, key -> redisTemplate.opsForValue()[key] },
             ),
         )
 }

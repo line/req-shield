@@ -42,6 +42,7 @@ class ReqShieldGetProductService(
         val returnValue =
             reqShield
                 .getAndSetReqShieldData(
+                    "product",
                     "productCacheKey",
                     {
                         Thread.sleep(500)
