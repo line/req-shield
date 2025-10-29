@@ -26,8 +26,8 @@ class ReqShieldConfigurationTest {
     fun testDefaultThreadPoolSizeIsOptimal() {
         val config =
             ReqShieldConfiguration<String>(
-                setCacheFunction = { _, _, _ -> true },
-                getCacheFunction = { null },
+                setCacheFunction = { _, _, _, _ -> true },
+                getCacheFunction = { _, _ -> null },
             )
 
         val executor = config.executor as? ThreadPoolExecutor
