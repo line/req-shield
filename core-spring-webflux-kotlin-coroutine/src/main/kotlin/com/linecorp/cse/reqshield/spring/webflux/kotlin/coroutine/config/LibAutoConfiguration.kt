@@ -16,6 +16,9 @@
 
 package com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.config
 
+import com.linecorp.cse.reqshield.support.config.ReqShieldAspectProperties
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.ComponentScan
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
@@ -23,4 +26,12 @@ import org.springframework.context.annotation.EnableAspectJAutoProxy
 @Configuration
 @EnableAspectJAutoProxy
 @ComponentScan(basePackages = ["com.linecorp.cse"])
-open class LibAutoConfiguration
+open class LibAutoConfiguration {
+
+    @Bean
+    open fun reqShieldAspectProperties(
+        @Value("\${req-shield.aspect.cache-max-size:1000}") cacheMaxSize: Int
+    ): ReqShieldAspectProperties {
+        return ReqShieldAspectProperties(cacheMaxSize = cacheMaxSize)
+    }
+}

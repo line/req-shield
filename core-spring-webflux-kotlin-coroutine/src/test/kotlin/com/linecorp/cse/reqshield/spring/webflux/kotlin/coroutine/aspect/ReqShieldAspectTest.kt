@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.support.BaseReqShieldModuleSupportTest
+import com.linecorp.cse.reqshield.support.config.ReqShieldAspectProperties
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.coEvery
@@ -51,8 +52,9 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val asyncCache: AsyncCache<Product> = mockk()
+    private val aspectProperties: ReqShieldAspectProperties = ReqShieldAspectProperties(cacheMaxSize = 1000)
     private val joinPoint: ProceedingJoinPoint = mockk<ProceedingJoinPoint>()
-    private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
+    private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache, aspectProperties))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
     private val mockContinuation = mockk<Continuation<Any?>>()

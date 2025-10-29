@@ -66,10 +66,11 @@ class KeyLocalLock(
         Mono
             .fromCallable {
                 val completeKey = "${key}_${lockType.name}"
-                val lockInfo = lockMap[completeKey]
-                lockInfo?.let {
-                    it.semaphore.release()
-                    lockMap.remove(completeKey)
+                lockMap.compute(completeKey) { _, existingLockInfo ->
+                    existingLockInfo?.let {
+                        it.semaphore.release()
+                        null // Remove the entry
+                    }
                 }
             }.thenReturn(true)
 }

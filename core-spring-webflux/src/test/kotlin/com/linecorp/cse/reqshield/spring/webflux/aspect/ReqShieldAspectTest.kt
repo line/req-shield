@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.support.BaseReqShieldModuleSupportTest
+import com.linecorp.cse.reqshield.support.config.ReqShieldAspectProperties
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
@@ -44,7 +45,7 @@ import kotlin.test.assertTrue
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val asyncCache: AsyncCache<Product> = mockk()
     private val joinPoint = mockk<ProceedingJoinPoint>()
-    private val reqShieldAspect = spyk(ReqShieldAspect(asyncCache))
+    private val reqShieldAspect = spyk(ReqShieldAspect(asyncCache, ReqShieldAspectProperties()))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
 
