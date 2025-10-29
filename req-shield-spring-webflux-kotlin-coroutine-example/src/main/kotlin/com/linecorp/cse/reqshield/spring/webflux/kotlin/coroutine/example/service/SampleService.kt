@@ -64,6 +64,7 @@ class SampleService(
         val result =
             reqShield
                 .getAndSetReqShieldData(
+                    "product",
                     "productCacheKeyCoroutine_$productId",
                     {
                         delay(500)

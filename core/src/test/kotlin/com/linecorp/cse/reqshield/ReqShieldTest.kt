@@ -51,10 +51,11 @@ class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShieldOnlyCreateCache: ReqShield<Product>
     private lateinit var reqShieldForGlobalLock: ReqShield<Product>
     private lateinit var reqShieldForGlobalLockForError: ReqShield<Product>
-    private lateinit var cacheSetter: (String, ReqShieldData<Product>, Long) -> Boolean
-    private lateinit var cacheGetter: (String) -> ReqShieldData<Product>?
+    private lateinit var cacheSetter: (String, String, ReqShieldData<Product>, Long) -> Boolean
+    private lateinit var cacheGetter: (String, String) -> ReqShieldData<Product>?
     private lateinit var keyLock: KeyLock
     private lateinit var keyGlobalLock: KeyLock
+    private val name = "testName"
     private val key = "testKey"
     private val oldValue = Product("oldTestValue", "oldTestName")
     private val value = Product("testId", "testName")
@@ -67,8 +68,8 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @BeforeEach
     fun setup() {
-        cacheSetter = mockk<(String, ReqShieldData<Product>, Long) -> Boolean>()
-        cacheGetter = mockk<(String) -> ReqShieldData<Product>?>()
+        cacheSetter = mockk<(String, String, ReqShieldData<Product>, Long) -> Boolean>()
+        cacheGetter = mockk<(String, String) -> ReqShieldData<Product>?>()
         globalLockFunc = mockk<(String, Long) -> Boolean>()
         globalUnLockFunc = mockk<(String) -> Boolean>()
         keyLock = mockk<KeyLock>()
@@ -129,17 +130,17 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
         every { keyLock.unLock(key, LockType.CREATE) } returns true
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertNotNull(result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, result, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.CREATE) }
             verify { keyLock.unLock(key, LockType.CREATE) }
             verify { callable.call() }
@@ -148,15 +149,15 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndOnlyUpdateCache() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
 
-        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldOnlyUpdateCache.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertNotNull(result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, result, timeToLiveMillis) }
             verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
             verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
             verify { callable.call() }
@@ -165,18 +166,18 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquired() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
 
         every { globalLockFunc(any(), any()) } returns true
         every { globalUnLockFunc(any()) } returns true
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertNotNull(result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, result, timeToLiveMillis) }
             verify { globalLockFunc(any(), any()) }
             verify { globalUnLockFunc(any()) }
             verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -205,20 +206,20 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndCallableReturnNull() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
         every { keyLock.unLock(key, LockType.CREATE) } returns true
         every { callable.call() } returns null
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertNotNull(result)
             assertNull(result.value)
 
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, result, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.CREATE) }
             verify { keyLock.unLock(key, LockType.CREATE) }
             verify { callable.call() }
@@ -227,22 +228,22 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndCallableReturnNull() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
 
         every { globalLockFunc(any(), any()) } returns true
         every { globalUnLockFunc(any()) } returns true
 
         every { callable.call() } returns null
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertNotNull(result)
             assertNull(result.value)
 
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, result, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, result, timeToLiveMillis) }
             verify { globalLockFunc(any(), any()) }
             verify { globalUnLockFunc(any()) }
             verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -253,18 +254,18 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowCallableClientException() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
         every { keyLock.unLock(key, LockType.CREATE) } returns true
         every { callable.call() } throws Exception("callable error")
 
         val exceptionCode =
-            assertThrows<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }.errorCode
+            assertThrows<ClientException> { reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis) }.errorCode
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(ErrorCode.SUPPLIER_ERROR, exceptionCode)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify { keyLock.tryLock(key, LockType.CREATE) }
             verify { keyLock.unLock(key, LockType.CREATE) }
             verify { callable.call() }
@@ -273,8 +274,8 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowCallableClientException() {
-        every { cacheGetter.invoke(key) } returns null
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } returns null
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
 
         every { globalLockFunc(any(), any()) } returns true
         every { globalUnLockFunc(any()) } returns true
@@ -282,11 +283,11 @@ class ReqShieldTest : BaseReqShieldTest {
         every { callable.call() } throws Exception("callable error")
 
         val exceptionCode =
-            assertThrows<ClientException> { reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis) }.errorCode
+            assertThrows<ClientException> { reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis) }.errorCode
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(ErrorCode.SUPPLIER_ERROR, exceptionCode)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify { globalLockFunc(any(), any()) }
             verify { globalUnLockFunc(any()) }
             verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -297,17 +298,17 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquiredAndThrowGetCacheClientException() {
-        every { cacheGetter.invoke(key) } throws Exception("get cache error")
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } throws Exception("get cache error")
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns true
         every { keyLock.unLock(key, LockType.CREATE) } returns true
 
         val exceptionCode =
-            assertThrows<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }.errorCode
+            assertThrows<ClientException> { reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis) }.errorCode
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(ErrorCode.GET_CACHE_ERROR, exceptionCode)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify(inverse = true) { keyLock.tryLock(key, LockType.CREATE) }
             verify(inverse = true) { keyLock.unLock(key, LockType.CREATE) }
             verify(inverse = true) { callable.call() }
@@ -316,18 +317,18 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndThrowGetCacheClientException() {
-        every { cacheGetter.invoke(key) } throws Exception("get cache error")
-        every { cacheSetter.invoke(key, any(), any()) } returns true
+        every { cacheGetter.invoke(name, key) } throws Exception("get cache error")
+        every { cacheSetter.invoke(name, key, any(), any()) } returns true
 
         every { globalLockFunc(any(), any()) } returns true
         every { globalUnLockFunc(any()) } returns true
 
         val exceptionCode =
-            assertThrows<ClientException> { reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis) }.errorCode
+            assertThrows<ClientException> { reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis) }.errorCode
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(ErrorCode.GET_CACHE_ERROR, exceptionCode)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify(inverse = true) { globalLockFunc(any(), any()) }
             verify(inverse = true) { globalUnLockFunc(any()) }
             verify(inverse = true) { keyGlobalLock.tryLock(key, LockType.CREATE) }
@@ -338,15 +339,15 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockNotAcquired() {
-        every { cacheGetter.invoke(key) } returns null
+        every { cacheGetter.invoke(name, key) } returns null
         every { keyLock.tryLock(key, LockType.CREATE) } returns false
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             result.value != null
             assertNotNull(result)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify { keyLock.tryLock(key, LockType.CREATE) }
             verify { callable.call() }
         }
@@ -354,15 +355,15 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheNotExistsAndGlobalLockNotAcquired() {
-        every { cacheGetter.invoke(key) } returns null
+        every { cacheGetter.invoke(name, key) } returns null
         every { globalLockFunc(any(), any()) } returns false
 
-        val result = reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldForGlobalLock.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             result.value != null
             assertNotNull(result)
-            verify { cacheGetter.invoke(key) }
+            verify { cacheGetter.invoke(name, key) }
             verify { keyGlobalLock.tryLock(key, LockType.CREATE) }
             verify { callable.call() }
         }
@@ -370,17 +371,17 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     override fun testSetMethodCacheExistsButNotTargetedForUpdate() {
-        val reqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
+        val reqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns reqShieldData
+        every { cacheGetter.invoke(name, key) } returns reqShieldData
         every { keyLock.tryLock(key, LockType.UPDATE) } returns false
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(reqShieldData, result)
-            verify { cacheGetter.invoke(key) }
-            verify(inverse = true) { cacheSetter.invoke(key, reqShieldData, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify(inverse = true) { cacheSetter.invoke(name, key, reqShieldData, timeToLiveMillis) }
             verify(inverse = true) { callable.call() }
         }
     }
@@ -388,20 +389,20 @@ class ReqShieldTest : BaseReqShieldTest {
     @Test
     override fun testSetMethodCacheExistsAndTheUpdateTarget() {
         timeToLiveMillis = 1000
-        val reqShieldData = ReqShieldData<Product>(oldValue, timeToLiveMillis)
-        val newReqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
+        val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
+        val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns reqShieldData
-        every { cacheSetter.invoke(key, any(), any()) } answers { true }
+        every { cacheGetter.invoke(name, key) } returns reqShieldData
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { true }
         every { keyLock.tryLock(key, LockType.UPDATE) } returns true
         every { keyLock.unLock(key, LockType.UPDATE) } returns true
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(reqShieldData, result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, newReqShieldData, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.UPDATE) }
             verify { keyLock.unLock(key, LockType.UPDATE) }
             verify { callable.call() }
@@ -411,18 +412,18 @@ class ReqShieldTest : BaseReqShieldTest {
     @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() {
         timeToLiveMillis = 1000
-        val reqShieldData = ReqShieldData<Product>(oldValue, timeToLiveMillis)
-        val newReqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
+        val reqShieldData = ReqShieldData(oldValue, timeToLiveMillis)
+        val newReqShieldData = ReqShieldData(value, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns reqShieldData
-        every { cacheSetter.invoke(key, any(), any()) } answers { true }
+        every { cacheGetter.invoke(name, key) } returns reqShieldData
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { true }
 
-        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShieldOnlyCreateCache.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(reqShieldData, result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, newReqShieldData, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, newReqShieldData, timeToLiveMillis) }
             verify(inverse = true) { keyLock.tryLock(key, LockType.UPDATE) }
             verify(inverse = true) { keyLock.unLock(key, LockType.UPDATE) }
             verify { callable.call() }
@@ -432,21 +433,21 @@ class ReqShieldTest : BaseReqShieldTest {
     @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull() {
         timeToLiveMillis = 1000
-        val reqShieldData = ReqShieldData<Product>(value, timeToLiveMillis)
+        val reqShieldData = ReqShieldData(value, timeToLiveMillis)
         val reqShieldDataNull = ReqShieldData<Product>(null, timeToLiveMillis)
 
-        every { cacheGetter.invoke(key) } returns reqShieldData
-        every { cacheSetter.invoke(key, any(), any()) } answers { true }
+        every { cacheGetter.invoke(name, key) } returns reqShieldData
+        every { cacheSetter.invoke(name, key, any(), any()) } answers { true }
         every { keyLock.tryLock(key, LockType.UPDATE) } returns true
         every { keyLock.unLock(key, LockType.UPDATE) } returns true
         every { callable.call() } returns null
 
-        val result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+        val result = reqShield.getAndSetReqShieldData(name, key, callable, timeToLiveMillis)
 
         await().atMost(Duration.ofMillis(AWAIT_TIMEOUT)).untilAsserted {
             assertEquals(reqShieldData, result)
-            verify { cacheGetter.invoke(key) }
-            verify { cacheSetter.invoke(key, reqShieldDataNull, timeToLiveMillis) }
+            verify { cacheGetter.invoke(name, key) }
+            verify { cacheSetter.invoke(name, key, reqShieldDataNull, timeToLiveMillis) }
             verify { keyLock.tryLock(key, LockType.UPDATE) }
             verify { keyLock.unLock(key, LockType.UPDATE) }
             verify { callable.call() }
@@ -468,18 +469,18 @@ class ReqShieldTest : BaseReqShieldTest {
 
         method.isAccessible = true
 
-        every { cacheSetter.invoke(any(), any(), any()) } throws Exception("set cache error")
+        every { cacheSetter.invoke(any(), any(), any(), any()) } throws Exception("set cache error")
 
         val exception =
             assertFailsWith<InvocationTargetException> {
-                method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType)
+                method.invoke(reqShield, cacheSetter, name, key, reqShieldData, lockType)
             }
 
         val cause = exception.cause
         assertTrue(cause is ClientException)
         assertEquals(ErrorCode.SET_CACHE_ERROR, (cause as ClientException).errorCode)
 
-        verify { cacheSetter.invoke(key, reqShieldData, 1000L) }
+        verify { cacheSetter.invoke(any(), key, reqShieldData, 1000L) }
         verify { keyLock.unLock(any(), any()) }
     }
 }

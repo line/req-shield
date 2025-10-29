@@ -25,30 +25,26 @@ import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicInteger
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
     suspend fun getAndSetReqShieldData(
+        name: String,
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, name, key)
         currentReqShieldData?.let {
             if (shouldUpdateCache(it)) {
-                updateReqShieldData(key, callable, timeToLiveMillis)
+                updateReqShieldData(name, key, callable, timeToLiveMillis)
             }
             return it
         } ?: run {
-            return handleLockForCacheCreation(key, callable, timeToLiveMillis)
+            return handleLockForCacheCreation(name, key, callable, timeToLiveMillis)
         }
     }
 
@@ -56,6 +52,7 @@ class ReqShield<T>(
         decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
 
     private suspend fun updateReqShieldData(
+        name: String,
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
@@ -71,6 +68,7 @@ class ReqShield<T>(
                     )
                 setReqShieldData(
                     reqShieldConfig.setCacheFunction,
+                    name,
                     key,
                     reqShieldData,
                     lockType,
@@ -86,6 +84,7 @@ class ReqShield<T>(
     }
 
     private suspend fun handleLockForCacheCreation(
+        name: String,
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
@@ -95,13 +94,14 @@ class ReqShield<T>(
         return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
             reqShieldConfig.keyLock.tryLock(key, lockType)
         ) {
-            createReqShieldData(key, callable, timeToLiveMillis, lockType)
+            createReqShieldData(name, key, callable, timeToLiveMillis, lockType)
         } else {
-            handleLockFailure(key, callable, timeToLiveMillis)
+            handleLockFailure(name, key, callable, timeToLiveMillis)
         }
     }
 
     private suspend fun createReqShieldData(
+        name: String,
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
@@ -113,19 +113,20 @@ class ReqShield<T>(
                 timeToLiveMillis,
             )
         CoroutineScope(Dispatchers.IO).launch {
-            setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType)
+            setReqShieldData(reqShieldConfig.setCacheFunction, name, key, reqShieldData, lockType)
         }
         return reqShieldData
     }
 
     private suspend fun handleLockFailure(
+        name: String,
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
         val counter = createCounter()
 
-        val result = scheduleTask(counter, reqShieldConfig.getCacheFunction, callable, key).await()
+        val result = scheduleTask(counter, reqShieldConfig.getCacheFunction, callable, name, key).await()
 
         return buildReqShieldData(result, timeToLiveMillis)
     }
@@ -140,25 +141,27 @@ class ReqShield<T>(
         )
 
     private suspend fun setReqShieldData(
-        cacheSetter: suspend (String, ReqShieldData<T>, Long) -> Boolean,
+        cacheSetter: suspend (String, String, ReqShieldData<T>, Long) -> Boolean,
+        name: String,
         key: String,
         reqShieldData: ReqShieldData<T>,
         lockType: LockType,
     ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType)
+        executeSetCacheFunction(cacheSetter, name, key, reqShieldData, lockType)
     }
 
     private fun createCounter(): AtomicInteger = AtomicInteger(0)
 
     private fun scheduleTask(
         counter: AtomicInteger,
-        cacheGetter: suspend (String) -> ReqShieldData<T>?,
+        cacheGetter: suspend (String, String) -> ReqShieldData<T>?,
         callable: suspend () -> T?,
+        name: String,
         key: String,
     ): Deferred<T?> =
         CoroutineScope(Dispatchers.IO).async {
             while (counter.incrementAndGet() <= reqShieldConfig.maxAttemptGetCache) {
-                executeGetCacheFunction(cacheGetter, key)?.let {
+                executeGetCacheFunction(cacheGetter, name, key)?.let {
                     return@async it.value
                 }
                 delay(GET_CACHE_INTERVAL_MILLIS)
@@ -168,23 +171,25 @@ class ReqShield<T>(
         }
 
     private suspend fun executeGetCacheFunction(
-        getFunction: suspend (String) -> ReqShieldData<T>?,
+        getFunction: suspend (String, String) -> ReqShieldData<T>?,
+        name: String,
         key: String,
     ): ReqShieldData<T>? =
         runCatching {
-            getFunction(key)
+            getFunction(name, key)
         }.getOrElse {
             throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = it.message)
         }
 
     private suspend fun executeSetCacheFunction(
-        setFunction: suspend (String, ReqShieldData<T>, Long) -> Boolean,
+        setFunction: suspend (String, String, ReqShieldData<T>, Long) -> Boolean,
+        name: String,
         key: String,
         value: ReqShieldData<T>,
         lockType: LockType,
     ) {
         try {
-            setFunction(key, value, value.timeToLiveMillis)
+            setFunction(name, key, value, value.timeToLiveMillis)
         } catch (e: Exception) {
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {

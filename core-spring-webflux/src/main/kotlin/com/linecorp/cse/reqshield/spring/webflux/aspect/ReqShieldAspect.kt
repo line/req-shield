@@ -59,9 +59,11 @@ class ReqShieldAspect<T>(
         val annotation = getCacheableAnnotation(joinPoint)
         val reqShield = getOrCreateReqShield(joinPoint)
         val cacheKey = getCacheableCacheKey(joinPoint)
+        val cacheName = getCacheableCacheName(joinPoint)
 
         return reqShield
             .getAndSetReqShieldData(
+                cacheName,
                 cacheKey,
                 {
                     joinPoint.proceed() as Mono<T?>
@@ -91,6 +93,36 @@ class ReqShieldAspect<T>(
         validateCacheKey(annotation.key, annotation.keyGenerator)
 
         return getCacheKeyOrDefault(annotation.key, annotation.keyGenerator, joinPoint)
+    }
+
+    internal fun getCacheableCacheName(joinPoint: ProceedingJoinPoint): String {
+        val annotation = getCacheableAnnotation(joinPoint)
+        return getCacheNameOrDefault(annotation.cacheName, joinPoint)
+    }
+
+    private fun getCacheNameOrDefault(
+        annotationCacheName: String,
+        joinPoint: ProceedingJoinPoint,
+    ): String {
+        val method = getTargetMethod(joinPoint)
+        val context: EvaluationContext =
+            MethodBasedEvaluationContext(joinPoint.target, method, joinPoint.args, DefaultParameterNameDiscoverer())
+
+        val cacheName =
+            if (StringUtils.hasText(annotationCacheName)) {
+                if (annotationCacheName.startsWith("#")) {
+                    val expression: Expression = spelParser.parseExpression(annotationCacheName)
+                    expression.getValue(context, String::class.java)
+                } else {
+                    annotationCacheName
+                }
+            } else {
+                throw IllegalArgumentException("Cache name must be provided for method: $method")
+            }
+
+        require(!cacheName.isNullOrBlank()) { "Null cache name returned for cache method: $method" }
+
+        return cacheName
     }
 
     internal fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
@@ -139,10 +171,10 @@ class ReqShieldAspect<T>(
 
         val reqShieldConfiguration =
             ReqShieldConfiguration(
-                setCacheFunction = { key, reqShieldData, timeToLiveMillis ->
+                setCacheFunction = { name, key, reqShieldData, timeToLiveMillis ->
                     asyncCache.put(key, reqShieldData, timeToLiveMillis)
                 },
-                getCacheFunction = { key ->
+                getCacheFunction = { name, key ->
                     asyncCache.get(key)
                 },
                 globalLockFunction = { key, timeToLiveMillis ->

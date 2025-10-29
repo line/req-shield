@@ -36,18 +36,19 @@ class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
     fun getAndSetReqShieldData(
+        name: String,
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, name, key)
         currentReqShieldData?.let {
             if (shouldUpdateCache(it)) {
-                updateReqShieldData(key, callable, timeToLiveMillis)
+                updateReqShieldData(name, key, callable, timeToLiveMillis)
             }
             return it
         } ?: run {
-            return handleLockForCacheCreation(key, callable, timeToLiveMillis)
+            return handleLockForCacheCreation(name, key, callable, timeToLiveMillis)
         }
     }
 
@@ -55,6 +56,7 @@ class ReqShield<T>(
         decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
 
     private fun updateReqShieldData(
+        name: String,
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
@@ -70,6 +72,7 @@ class ReqShield<T>(
                     )
                 setReqShieldData(
                     reqShieldConfig.setCacheFunction,
+                    name,
                     key,
                     reqShieldData,
                     lockType,
@@ -85,6 +88,7 @@ class ReqShield<T>(
     }
 
     private fun handleLockForCacheCreation(
+        name: String,
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
@@ -94,13 +98,14 @@ class ReqShield<T>(
         return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
             reqShieldConfig.keyLock.tryLock(key, lockType)
         ) {
-            createReqShieldData(key, callable, timeToLiveMillis, lockType)
+            createReqShieldData(name, key, callable, timeToLiveMillis, lockType)
         } else {
-            handleLockFailure(key, callable, timeToLiveMillis)
+            handleLockFailure(name, key, callable, timeToLiveMillis)
         }
     }
 
     private fun createReqShieldData(
+        name: String,
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
@@ -112,13 +117,14 @@ class ReqShield<T>(
                 timeToLiveMillis,
             )
         CompletableFuture.runAsync({
-            setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType)
+            setReqShieldData(reqShieldConfig.setCacheFunction, name, key, reqShieldData, lockType)
         }, reqShieldConfig.executor)
 
         return reqShieldData
     }
 
     private fun handleLockFailure(
+        name: String,
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
@@ -126,7 +132,7 @@ class ReqShield<T>(
         val future = createFuture()
         val counter = createCounter()
 
-        scheduleTask(reqShieldConfig.executor, future, counter, reqShieldConfig.getCacheFunction, callable, key)
+        scheduleTask(reqShieldConfig.executor, future, counter, reqShieldConfig.getCacheFunction, callable, name, key)
 
         val result = future.get()
 
@@ -143,12 +149,13 @@ class ReqShield<T>(
         )
 
     private fun setReqShieldData(
-        cacheSetter: (String, ReqShieldData<T>, Long) -> Boolean,
+        cacheSetter: (String, String, ReqShieldData<T>, Long) -> Boolean,
+        name: String,
         key: String,
         reqShieldData: ReqShieldData<T>,
         lockType: LockType,
     ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType)
+        executeSetCacheFunction(cacheSetter, name, key, reqShieldData, lockType)
     }
 
     private fun createFuture(): CompletableFuture<T> = CompletableFuture()
@@ -159,14 +166,15 @@ class ReqShield<T>(
         executor: ScheduledExecutorService,
         future: CompletableFuture<T>,
         counter: AtomicInteger,
-        cacheGetter: (String) -> ReqShieldData<T>?,
+        cacheGetter: (String, String) -> ReqShieldData<T>?,
         callable: Callable<T?>,
+        name: String,
         key: String,
     ) {
         fun schedule(): ScheduledFuture<*> =
             executor.schedule({
                 if (!future.isDone) {
-                    val funcResult = executeGetCacheFunction(cacheGetter, key)
+                    val funcResult = executeGetCacheFunction(cacheGetter, name, key)
                     if (funcResult != null) {
                         future.complete(funcResult.value)
                     } else if (counter.incrementAndGet() >= reqShieldConfig.maxAttemptGetCache) {
@@ -186,23 +194,25 @@ class ReqShield<T>(
     }
 
     private fun executeGetCacheFunction(
-        getFunction: (String) -> ReqShieldData<T>?,
+        getFunction: (String, String) -> ReqShieldData<T>?,
+        name: String,
         key: String,
     ): ReqShieldData<T>? =
         runCatching {
-            getFunction.invoke(key)
+            getFunction.invoke(name, key)
         }.getOrElse {
             throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = it.message)
         }
 
     private fun executeSetCacheFunction(
-        setFunction: (String, ReqShieldData<T>, Long) -> Boolean,
+        setFunction: (String, String, ReqShieldData<T>, Long) -> Boolean,
+        name: String,
         key: String,
         value: ReqShieldData<T>,
         lockType: LockType,
     ) {
         try {
-            setFunction.invoke(key, value, value.timeToLiveMillis)
+            setFunction.invoke(name, key, value, value.timeToLiveMillis)
         } catch (e: Exception) {
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {

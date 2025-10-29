@@ -36,21 +36,22 @@ class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
     fun getAndSetReqShieldData(
+        name: String,
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
     ): Mono<ReqShieldData<T>> {
-        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, name, key)
 
         return currentReqShieldData
             .flatMap { reqShieldData ->
                 if (shouldUpdateCache(reqShieldData)) {
-                    updateReqShieldData(key, callable, timeToLiveMillis)
+                    updateReqShieldData(name, key, callable, timeToLiveMillis)
                 }
                 Mono.justOrEmpty(reqShieldData!!)
             }.switchIfEmpty(
                 Mono.defer {
-                    handleLockForCacheCreation(key, callable, timeToLiveMillis)
+                    handleLockForCacheCreation(name, key, callable, timeToLiveMillis)
                 },
             )
     }
@@ -64,6 +65,7 @@ class ReqShield<T>(
             )
 
     private fun updateReqShieldData(
+        name: String,
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
@@ -76,6 +78,7 @@ class ReqShield<T>(
                 .doOnNext { reqShieldData ->
                     setReqShieldData(
                         reqShieldConfig.setCacheFunction,
+                        name,
                         key,
                         reqShieldData,
                         lockType,
@@ -85,6 +88,7 @@ class ReqShield<T>(
                         val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
                         setReqShieldData(
                             reqShieldConfig.setCacheFunction,
+                            name,
                             key,
                             reqShieldData,
                             lockType,
@@ -108,6 +112,7 @@ class ReqShield<T>(
     }
 
     private fun handleLockForCacheCreation(
+        name: String,
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
@@ -115,21 +120,22 @@ class ReqShield<T>(
         val lockType = LockType.CREATE
 
         if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE) {
-            return createReqShieldData(key, callable, timeToLiveMillis, lockType)
+            return createReqShieldData(name, key, callable, timeToLiveMillis, lockType)
         }
 
         return reqShieldConfig.keyLock
             .tryLock(key, lockType)
             .flatMap { acquired ->
                 if (acquired) {
-                    createReqShieldData(key, callable, timeToLiveMillis, lockType)
+                    createReqShieldData(name, key, callable, timeToLiveMillis, lockType)
                 } else {
-                    handleLockFailure(key, callable, timeToLiveMillis)
+                    handleLockFailure(name, key, callable, timeToLiveMillis)
                 }
             }
     }
 
     private fun createReqShieldData(
+        name: String,
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
@@ -141,6 +147,7 @@ class ReqShield<T>(
 
                 setReqShieldData(
                     reqShieldConfig.setCacheFunction,
+                    name,
                     key,
                     reqShieldData,
                     lockType,
@@ -153,6 +160,7 @@ class ReqShield<T>(
 
                     setReqShieldData(
                         reqShieldConfig.setCacheFunction,
+                        name,
                         key,
                         reqShieldData,
                         lockType,
@@ -163,12 +171,13 @@ class ReqShield<T>(
             )
 
     private fun handleLockFailure(
+        name: String,
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
     ): Mono<ReqShieldData<T>> =
         reqShieldConfig
-            .getCacheFunction(key)
+            .getCacheFunction(name, key)
             .repeatWhenEmpty {
                 Flux
                     .range(1, reqShieldConfig.maxAttemptGetCache)
@@ -203,30 +212,33 @@ class ReqShield<T>(
         )
 
     private fun setReqShieldData(
-        cacheSetter: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
+        cacheSetter: (String, String, ReqShieldData<T>, Long) -> Mono<Boolean>,
+        name: String,
         key: String,
         reqShieldData: ReqShieldData<T>,
         lockType: LockType,
     ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType).subscribe()
+        executeSetCacheFunction(cacheSetter, name, key, reqShieldData, lockType).subscribe()
     }
 
     private fun executeGetCacheFunction(
-        getFunction: (String) -> Mono<ReqShieldData<T>?>,
+        getFunction: (String, String) -> Mono<ReqShieldData<T>?>,
+        name: String,
         key: String,
     ): Mono<ReqShieldData<T>?> =
-        getFunction(key)
+        getFunction(name, key)
             .doOnError { e ->
                 throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = e.message)
             }
 
     private fun executeSetCacheFunction(
-        setFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
+        setFunction: (String, String, ReqShieldData<T>, Long) -> Mono<Boolean>,
+        name: String,
         key: String,
         value: ReqShieldData<T>,
         lockType: LockType,
     ): Mono<Boolean> =
-        setFunction(key, value, value.timeToLiveMillis)
+        setFunction(name, key, value, value.timeToLiveMillis)
             .doOnError { e ->
                 throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
             }.doFinally {

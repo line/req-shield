@@ -33,6 +33,9 @@ logback-spring-boot3 = { module = "ch.qos.logback:logback-classic", version = "1
 # redis
 lettuce = { module = "io.lettuce:lettuce-core", version = "6.1.10.RELEASE" }
 
+# caffeine
+caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version = "3.2.2" }
+
 # spring
 spring-context = { module = "org.springframework:spring-context", version.ref = "spring" }
 aspectj = { module = "org.aspectj:aspectjweaver", version = "1.9.7" }

@@ -34,13 +34,14 @@ class ReqShieldBeanConfiguration<T>(
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = {
+                        name,
                         key,
                         value,
                         timeToLiveMillis,
                     ->
                     reactiveRedisOperations.opsForValue().setIfAbsent(key, value, Duration.ofMillis(timeToLiveMillis)) ?: Mono.just(false)
                 },
-                getCacheFunction = { key -> reactiveRedisOperations.opsForValue()[key] },
+                getCacheFunction = { name, key -> reactiveRedisOperations.opsForValue()[key] },
             ),
         )
 }

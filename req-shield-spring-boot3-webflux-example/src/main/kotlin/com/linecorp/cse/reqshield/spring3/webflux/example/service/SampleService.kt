@@ -52,6 +52,7 @@ class SampleService(
     fun getProductNoAnno(productId: String): Mono<Product> =
         reqShield
             .getAndSetReqShieldData(
+                "product",
                 "productCacheKeyWebFlux_$productId",
                 {
                     Mono
