@@ -47,7 +47,7 @@ import kotlin.coroutines.Continuation
 
 @Aspect
 @Component
-class ReqShieldAspect<T>(
+open class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
@@ -58,41 +58,38 @@ class ReqShieldAspect<T>(
     private val keyGeneratorMap = ConcurrentHashMap<String, KeyGenerator>()
     internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
 
-    @Around("execution(@com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.* * *(.., kotlin.coroutines.Continuation))")
-    fun aroundTargetCacheable(joinPoint: ProceedingJoinPoint): Any? {
-        return joinPoint.runCoroutine {
-            getTargetMethod(joinPoint).annotations.forEach { annotation ->
-                when (annotation) {
-                    is ReqShieldCacheable -> {
-                        val reqShield = getOrCreateReqShield(joinPoint)
-                        val cacheKey = getCacheableCacheKey(joinPoint)
+    @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable)")
+    fun aroundReqShieldCacheable(joinPoint: ProceedingJoinPoint): Any? =
+        joinPoint.runCoroutine {
+            val annotation = getCacheableAnnotation(joinPoint)
+            val reqShield = getOrCreateReqShield(joinPoint)
+            val cacheKey = getCacheableCacheKey(joinPoint)
 
-                        return@runCoroutine reqShield
-                            .getAndSetReqShieldData(
-                                cacheKey,
-                                {
-                                    joinPoint.proceedCoroutine().let { rtn ->
-                                        if (rtn is Mono<*>) {
-                                            rtn.awaitSingleOrNull()?.let { it as T }
-                                        } else {
-                                            rtn?.let { it as T }
-                                        }
-                                    }
-                                },
-                                annotation.timeToLiveMillis,
-                            ).value
-                    }
-
-                    is ReqShieldCacheEvict -> {
-                        val cacheKey = getCacheEvictCacheKey(joinPoint)
-                        return@runCoroutine asyncCache.evict(cacheKey)
-                    }
-                }
-            }
+            reqShield
+                .getAndSetReqShieldData(
+                    cacheKey,
+                    {
+                        joinPoint.proceedSmart().let { rtn ->
+                            if (rtn is Mono<*>) {
+                                rtn.awaitSingleOrNull()?.let { it as T }
+                            } else {
+                                rtn?.let { it as T }
+                            }
+                        }
+                    },
+                    annotation.timeToLiveMillis,
+                ).value
         }
-    }
 
-    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
+    @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheEvict)")
+    fun aroundReqShieldCacheEvict(joinPoint: ProceedingJoinPoint): Any? =
+        joinPoint.runCoroutine {
+            val cacheKey = getCacheEvictCacheKey(joinPoint)
+            asyncCache.evict(cacheKey)
+            joinPoint.proceedSmart()
+        }
+
+    internal open fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
 
     internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
         AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheable::class.java)
@@ -141,7 +138,15 @@ class ReqShieldAspect<T>(
                 keyGenerator.generate(joinPoint.target, method, args).toString()
             }
 
-        require(!key.isNullOrBlank()) { "Null key returned for cache method : $method" }
+        require(!key.isNullOrBlank()) {
+            "Null/blank key for @ReqShieldCacheable method=${method.declaringClass.name}.${method.name} " +
+                "args=${args.joinToString(prefix = "[", postfix = "]") {
+                    it?.let {
+                            arg ->
+                        "${arg::class.simpleName}@${arg.hashCode().toString(16)}"
+                    } ?: "null"
+                }}"
+        }
 
         return key
     }
@@ -183,7 +188,9 @@ class ReqShieldAspect<T>(
         cacheKeyGenerator: String,
     ) {
         if (cacheKey.isNotBlank() && cacheKeyGenerator.isNotBlank()) {
-            throw IllegalArgumentException("The key and keyGenerator attributes are mutually exclusive.")
+            throw IllegalArgumentException(
+                "The key and keyGenerator attributes are mutually exclusive: key='$cacheKey', keyGenerator='$cacheKeyGenerator'",
+            )
         }
     }
 
@@ -206,8 +213,11 @@ class ReqShieldAspect<T>(
         return major > 6 || (major == 6 && minor >= 1)
     }
 
-    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
-        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String {
+        val method = getTargetMethod(joinPoint)
+        return "${method.declaringClass.name}.${method.name}-" +
+            "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    }
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory

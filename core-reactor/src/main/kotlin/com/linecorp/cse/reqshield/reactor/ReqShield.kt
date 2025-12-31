@@ -19,18 +19,17 @@ package com.linecorp.cse.reqshield.reactor
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
+import org.slf4j.LoggerFactory
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
-import reactor.core.scheduler.Schedulers
-import reactor.util.retry.Retry
 import java.time.Duration
 import java.util.concurrent.Callable
+
+private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
@@ -73,13 +72,13 @@ class ReqShield<T>(
         fun processMono(): Mono<ReqShieldData<T>> =
             executeCallable({ callable.call() }, true, key, lockType)
                 .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                .doOnNext { reqShieldData ->
+                .flatMap { reqShieldData ->
                     setReqShieldData(
                         reqShieldConfig.setCacheFunction,
                         key,
                         reqShieldData,
                         lockType,
-                    )
+                    ).thenReturn(reqShieldData)
                 }.switchIfEmpty(
                     Mono.defer {
                         val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
@@ -88,22 +87,27 @@ class ReqShield<T>(
                             key,
                             reqShieldData,
                             lockType,
-                        )
-                        Mono.just(reqShieldData)
+                        ).thenReturn(reqShieldData)
                     },
                 )
 
         if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
             processMono()
-                .subscribeOn(Schedulers.boundedElastic())
-                .subscribe()
+                .subscribeOn(reqShieldConfig.scheduler)
+                .subscribe(
+                    { /* success - no action needed */ },
+                    { e -> log.error("Failed to update cache for key '{}': {}", key, e.message, e) },
+                )
         } else {
             reqShieldConfig.keyLock
                 .tryLock(key, lockType)
                 .filter { it }
                 .flatMap { processMono() }
-                .subscribeOn(Schedulers.boundedElastic())
-                .subscribe()
+                .subscribeOn(reqShieldConfig.scheduler)
+                .subscribe(
+                    { /* success - no action needed */ },
+                    { e -> log.error("Failed to update cache for key '{}': {}", key, e.message, e) },
+                )
         }
     }
 
@@ -137,27 +141,32 @@ class ReqShield<T>(
     ): Mono<ReqShieldData<T>> =
         executeCallable({ callable.call() }, true, key, lockType)
             .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-            .flatMap { reqShieldData ->
-
+            .doOnNext { reqShieldData ->
+                // Async fire-and-forget cache storage (matches coroutine implementation)
                 setReqShieldData(
                     reqShieldConfig.setCacheFunction,
                     key,
                     reqShieldData,
                     lockType,
-                )
-
-                Mono.just(reqShieldData)
+                ).subscribeOn(reqShieldConfig.scheduler)
+                    .subscribe(
+                        { /* success - no action needed */ },
+                        { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+                    )
             }.switchIfEmpty(
                 Mono.defer {
                     val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
-
+                    // Async fire-and-forget cache storage (matches coroutine implementation)
                     setReqShieldData(
                         reqShieldConfig.setCacheFunction,
                         key,
                         reqShieldData,
                         lockType,
-                    )
-
+                    ).subscribeOn(reqShieldConfig.scheduler)
+                        .subscribe(
+                            { /* success - no action needed */ },
+                            { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+                        )
                     Mono.just(reqShieldData)
                 },
             )
@@ -191,7 +200,7 @@ class ReqShield<T>(
                             Mono.just(reqShieldData)
                         },
                     ),
-            ).subscribeOn(Schedulers.boundedElastic())
+            ).subscribeOn(reqShieldConfig.scheduler)
 
     private fun buildReqShieldData(
         value: T?,
@@ -207,18 +216,14 @@ class ReqShield<T>(
         key: String,
         reqShieldData: ReqShieldData<T>,
         lockType: LockType,
-    ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType).subscribe()
-    }
+    ): Mono<Boolean> = executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType)
 
     private fun executeGetCacheFunction(
         getFunction: (String) -> Mono<ReqShieldData<T>?>,
         key: String,
     ): Mono<ReqShieldData<T>?> =
         getFunction(key)
-            .doOnError { e ->
-                throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = e.message)
-            }
+            .onErrorMap { e -> ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = e.message) }
 
     private fun executeSetCacheFunction(
         setFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
@@ -227,20 +232,22 @@ class ReqShield<T>(
         lockType: LockType,
     ): Mono<Boolean> =
         setFunction(key, value, value.timeToLiveMillis)
-            .doOnError { e ->
-                throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
-            }.doFinally {
+            .onErrorMap { e -> ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message) }
+            .doFinally {
                 if (shouldAttemptUnlock(lockType)) {
+                    // No retry needed: false means lock already released or expired (not an error)
                     reqShieldConfig.keyLock
                         .unLock(key, lockType)
-                        .retryWhen(
-                            Retry.fixedDelay(
-                                MAX_ATTEMPT_SET_CACHE - 1L,
-                                Duration.ofMillis(SET_CACHE_RETRY_INTERVAL_MILLIS),
-                            ),
-                        ).subscribe()
+                        .doOnNext { unlocked ->
+                            if (!unlocked) {
+                                log.debug("Lock already released or expired for key '{}'", key)
+                            }
+                        }.subscribe(
+                            { /* success - no action needed */ },
+                            { e -> log.error("Failed to unlock key '{}': {}", key, e.message, e) },
+                        )
                 }
-            }.subscribeOn(Schedulers.boundedElastic())
+            }.subscribeOn(reqShieldConfig.scheduler)
 
     private fun executeCallable(
         callable: Callable<Mono<T?>>,
@@ -250,11 +257,24 @@ class ReqShield<T>(
     ): Mono<T?> =
         callable
             .call()
-            .doOnError { e ->
+            .doOnError { _ ->
                 if (isUnlockWhenException && key != null && lockType != null) {
-                    reqShieldConfig.keyLock.unLock(key, lockType).subscribe()
+                    reqShieldConfig.keyLock
+                        .unLock(key, lockType)
+                        .subscribe(
+                            { /* success - no action needed */ },
+                            { unlockError ->
+                                log.error(
+                                    "Failed to unlock key '{}' after callable error: {}",
+                                    key,
+                                    unlockError.message,
+                                    unlockError,
+                                )
+                            },
+                        )
                 }
-                throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = e.message)
+            }.onErrorMap { e ->
+                ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = e.message)
             }
 
     private fun shouldAttemptUnlock(lockType: LockType): Boolean =

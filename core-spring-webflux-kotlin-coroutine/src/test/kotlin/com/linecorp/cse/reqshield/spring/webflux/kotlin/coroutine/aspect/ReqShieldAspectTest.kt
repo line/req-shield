@@ -50,7 +50,7 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
-    private val asyncCache: AsyncCache<Product> = mockk()
+    private val asyncCache: AsyncCache<Product> = InMemoryAsyncCache()
     private val joinPoint: ProceedingJoinPoint = mockk<ProceedingJoinPoint>()
     private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
@@ -80,9 +80,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
-            coEvery { asyncCache.get(any()) } returns reqShieldData
+            asyncCache.put(spelEvaluatedKey, reqShieldData, 1000)
             coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
-            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+            every { reqShieldAspect.getTargetMethod(joinPoint) } returns
                 TestBean::class
                     .functions
                     .find {
@@ -90,11 +90,13 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
                     }?.javaMethod!!
 
             // Test the aroundTargetCacheable method
-            val result = reqShieldAspect.aroundTargetCacheable(joinPoint)
+            val result = reqShieldAspect.aroundReqShieldCacheable(joinPoint)
 
             assertEquals(result, reqShieldData.value)
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+            val method = reqShieldAspect.getTargetMethod(joinPoint)
+            val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+            assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
         }
 
     @Test
@@ -102,9 +104,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         runTest {
             // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
-            coEvery { asyncCache.get(any()) } returns reqShieldData
+            asyncCache.put(spelEvaluatedKey, reqShieldData, 1000)
             coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
-            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+            every { reqShieldAspect.getTargetMethod(joinPoint) } returns
                 TestBean::class
                     .functions
                     .find {
@@ -114,46 +116,51 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             val jobs =
                 List(20) {
                     async {
-                        reqShieldAspect.aroundTargetCacheable(joinPoint)
+                        reqShieldAspect.aroundReqShieldCacheable(joinPoint)
                     }
                 }
 
             jobs.awaitAll()
 
             assertTrue(reqShieldAspect.reqShieldMap.size == 1)
-            assertNotNull(reqShieldAspect.reqShieldMap["$cacheName-$spelEvaluatedKey"])
+            val method = reqShieldAspect.getTargetMethod(joinPoint)
+            val expectedKey = "${method.declaringClass.name}.${method.name}-$cacheName-$spelEvaluatedKey"
+            assertNotNull(reqShieldAspect.reqShieldMap[expectedKey])
         }
 
     @Test
     override fun verifyReqShieldCacheEviction() =
         runTest {
-            // Mock the cache data using mockk
             val reqShieldData = ReqShieldData(methodReturn, 1000)
-            coEvery { asyncCache.get(any()) } returns reqShieldData
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
-            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+            // Use SpEL-based key to align with eviction method's key
+            every { reqShieldAspect.getTargetMethod(joinPoint) } returns
                 TestBean::class
                     .functions
                     .find {
-                        it.name == TestBean::cacheableWithDefaultKeyGenerator.name && it.parameters.size == 2
+                        it.name == TestBean::cacheableWithCustomKey.name && it.parameters.size == 2
                     }?.javaMethod!!
+            val generatedKey = reqShieldAspect.getCacheableCacheKey(joinPoint)
+            asyncCache.put(generatedKey, reqShieldData, 1000)
+            coEvery { joinPoint.proceed() } coAnswers { targetObject.cacheableWithCustomKey(argument) }
 
-            // Test the aroundTargetCacheable method
-            val result = reqShieldAspect.aroundTargetCacheable(joinPoint)
+            // Test the aroundTargetCacheable method using the same SpEL key
+            val result = reqShieldAspect.aroundReqShieldCacheable(joinPoint)
 
             assertEquals(reqShieldData.value, result)
 
-            // Validate cache eviction
-            coEvery { asyncCache.evict(any()) } returns true
-            coEvery { reqShieldAspect.getTargetMethod(joinPoint) } returns
+            // Validate cache eviction using the eviction method (same SpEL key)
+            // real eviction call
+            every { reqShieldAspect.getTargetMethod(joinPoint) } returns
                 TestBean::class
                     .functions
                     .find {
                         it.name == TestBean::evict.name && it.parameters.size == 2
                     }?.javaMethod!!
-            coEvery { joinPoint.proceed() } coAnswers { targetObject.evict(argument) }
+            // Mock proceed for eviction - the aspect proceeds to the original method after evicting cache
+            // proceedSmart() calls proceed(args) with continuation, so we need to mock that as well
+            coEvery { joinPoint.proceed(any<Array<Any?>>()) } coAnswers { targetObject.evict(argument) }
 
-            val removeProductMono = reqShieldAspect.aroundTargetCacheable(joinPoint)
+            val removeProductMono = reqShieldAspect.aroundReqShieldCacheEvict(joinPoint)
 
             assertTrue(removeProductMono as Boolean)
         }

@@ -18,6 +18,16 @@ jobs:
     if: ${{ github.event_name == 'pull_request'
       && (github.event.action == 'opened' || github.event.action == 'synchronize' ||
       github.event.action == 'reopened' || github.event.action == 'ready_for_review') }}
+    services:
+      redis:
+        image: redis:6.2.7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,4 +38,7 @@ jobs:
           distribution: 'temurin'
           java-version: 17
       - name: Test
+        env:
+          TEST_REDIS_HOST: localhost
+          TEST_REDIS_PORT: 6379
         run: ./gradlew clean test --info

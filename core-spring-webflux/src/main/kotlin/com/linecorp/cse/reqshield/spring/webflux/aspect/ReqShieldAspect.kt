@@ -44,7 +44,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 @Aspect
 @Component
-class ReqShieldAspect<T>(
+open class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
@@ -60,14 +60,28 @@ class ReqShieldAspect<T>(
         val reqShield = getOrCreateReqShield(joinPoint)
         val cacheKey = getCacheableCacheKey(joinPoint)
 
-        return reqShield
-            .getAndSetReqShieldData(
-                cacheKey,
-                {
-                    joinPoint.proceed() as Mono<T?>
-                },
-                annotation.timeToLiveMillis,
-            ).mapNotNull { it.value }
+        val resultMono =
+            reqShield
+                .getAndSetReqShieldData(
+                    cacheKey,
+                    {
+                        joinPoint.proceed() as Mono<T?>
+                    },
+                    annotation.timeToLiveMillis,
+                ).map { it.value }
+
+        return when (annotation.nullHandling) {
+            com.linecorp.cse.reqshield.spring.webflux.annotation.NullHandling.EMIT_EMPTY ->
+                resultMono.flatMap { Mono.justOrEmpty(it) }
+            com.linecorp.cse.reqshield.spring.webflux.annotation.NullHandling.ERROR ->
+                resultMono.flatMap { value ->
+                    if (value == null) {
+                        Mono.error(IllegalStateException("ReqShieldCacheable returned null for key=$cacheKey"))
+                    } else {
+                        Mono.just(value)
+                    }
+                }
+        }
     }
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict)")
@@ -104,7 +118,7 @@ class ReqShieldAspect<T>(
         return getCacheKeyOrDefault(annotation.key, annotation.keyGenerator, joinPoint)
     }
 
-    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
+    internal open fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
 
     private fun getCacheKeyOrDefault(
         annotationCacheKey: String,
@@ -124,7 +138,15 @@ class ReqShieldAspect<T>(
                 keyGenerator.generate(joinPoint.target, method, joinPoint.args).toString()
             }
 
-        require(!key.isNullOrBlank()) { "Null key returned for cache method : $method" }
+        require(!key.isNullOrBlank()) {
+            "Null/blank key for @ReqShieldCacheable method=${method.declaringClass.name}.${method.name} " +
+                "args=${joinPoint.args.joinToString(prefix = "[", postfix = "]") {
+                    it?.let {
+                            arg ->
+                        "${arg::class.simpleName}@${arg.hashCode().toString(16)}"
+                    } ?: "null"
+                }}"
+        }
 
         return key
     }
@@ -156,6 +178,7 @@ class ReqShieldAspect<T>(
                 decisionForUpdate = annotation.decisionForUpdate,
                 maxAttemptGetCache = annotation.maxAttemptGetCache,
                 reqShieldWorkMode = annotation.reqShieldWorkMode,
+                scheduler = beanFactory.getBean("reqShieldScheduler", reactor.core.scheduler.Scheduler::class.java),
             )
 
         return ReqShield(reqShieldConfiguration)
@@ -166,7 +189,9 @@ class ReqShieldAspect<T>(
         cacheKeyGenerator: String,
     ) {
         if (cacheKey.isNotBlank() && cacheKeyGenerator.isNotBlank()) {
-            throw IllegalArgumentException("The key and keyGenerator attributes are mutually exclusive.")
+            throw IllegalArgumentException(
+                "The key and keyGenerator attributes are mutually exclusive: key='$cacheKey', keyGenerator='$cacheKeyGenerator'",
+            )
         }
     }
 
@@ -180,8 +205,11 @@ class ReqShieldAspect<T>(
         }
     }
 
-    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
-        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String {
+        val method = getTargetMethod(joinPoint)
+        return "${method.declaringClass.name}.${method.name}-" +
+            "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableCacheKey(joinPoint)}"
+    }
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory

@@ -90,7 +90,7 @@ Contains shared:
 - `isLocalLock`: Use local vs distributed locking (default: true)
 - `lockTimeoutMillis`: Lock acquisition timeout (default: 3000ms)
 - `decisionForUpdate`: Percentage of TTL after which to trigger async cache refresh (default: 80)
-- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 10)
+- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60)
 - `reqShieldWorkMode`: CREATE_AND_UPDATE_CACHE | ONLY_CREATE_CACHE | ONLY_UPDATE_CACHE
 
 ### Work Modes

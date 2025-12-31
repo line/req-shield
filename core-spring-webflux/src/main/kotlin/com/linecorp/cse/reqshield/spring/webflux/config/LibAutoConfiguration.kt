@@ -16,11 +16,18 @@
 
 package com.linecorp.cse.reqshield.spring.webflux.config
 
-import org.springframework.context.annotation.ComponentScan
+import com.linecorp.cse.reqshield.spring.webflux.aspect.ReqShieldAspect
+import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
+import org.springframework.context.annotation.Import
+import reactor.core.scheduler.Scheduler
+import reactor.core.scheduler.Schedulers
 
 @Configuration
-@EnableAspectJAutoProxy
-@ComponentScan(basePackages = ["com.linecorp.cse"])
-open class LibAutoConfiguration
+@EnableAspectJAutoProxy(proxyTargetClass = true)
+@Import(ReqShieldAspect::class)
+open class LibAutoConfiguration {
+    @Bean
+    open fun reqShieldScheduler(): Scheduler = Schedulers.boundedElastic()
+}

@@ -19,18 +19,19 @@ package com.linecorp.cse.reqshield
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
+import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+
+private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
@@ -163,26 +164,45 @@ class ReqShield<T>(
         callable: Callable<T?>,
         key: String,
     ) {
-        fun schedule(): ScheduledFuture<*> =
-            executor.schedule({
-                if (!future.isDone) {
+        val scheduled: ScheduledFuture<*> =
+            executor.scheduleAtFixedRate({
+                try {
+                    // Early exit if future is already completed to avoid unnecessary work
+                    if (future.isDone) {
+                        return@scheduleAtFixedRate
+                    }
+
                     val funcResult = executeGetCacheFunction(cacheGetter, key)
                     if (funcResult != null) {
+                        // Use CAS-like complete to handle race condition safely
+                        // If another thread already completed, this is a no-op
                         future.complete(funcResult.value)
-                    } else if (counter.incrementAndGet() >= reqShieldConfig.maxAttemptGetCache) {
-                        future.complete(
-                            executeCallable({ callable.call() }, false),
-                        )
+                        return@scheduleAtFixedRate
                     }
+
+                    // Increment first, then check - ensures atomic decision making
+                    val attempts = counter.incrementAndGet()
+                    if (attempts >= reqShieldConfig.maxAttemptGetCache && !future.isDone) {
+                        // Use complete() which handles concurrent completion safely
+                        // If another thread completed between our check and this call, it's ignored
+                        future.complete(executeCallable({ callable.call() }, false))
+                    }
+                } catch (e: Exception) {
+                    // Handle exception to prevent scheduleAtFixedRate from stopping
+                    // Fallback to callable to ensure service availability
+                    log.error("Error in scheduled cache getter for key '{}', falling back to callable", key, e)
                     if (!future.isDone) {
-                        schedule() // Schedule the next execution
+                        try {
+                            future.complete(executeCallable({ callable.call() }, false))
+                        } catch (fallbackException: Exception) {
+                            log.error("Fallback callable also failed for key '{}'", key, fallbackException)
+                            future.completeExceptionally(fallbackException)
+                        }
                     }
                 }
-            }, GET_CACHE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+            }, GET_CACHE_INTERVAL_MILLIS, GET_CACHE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
 
-        val scheduleFuture = schedule()
-
-        future.whenComplete { _, _ -> scheduleFuture.cancel(false) }
+        future.whenComplete { _, _ -> scheduled.cancel(false) }
     }
 
     private fun executeGetCacheFunction(
@@ -207,15 +227,10 @@ class ReqShield<T>(
             throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
         } finally {
             if (shouldAttemptUnlock(lockType)) {
-                var unlockSuccess = false
-                var retryCount = 0
-                while (!unlockSuccess && retryCount < MAX_ATTEMPT_SET_CACHE) {
-                    if (reqShieldConfig.keyLock.unLock(key, lockType)) {
-                        unlockSuccess = true
-                    } else {
-                        retryCount++
-                        Thread.sleep(SET_CACHE_RETRY_INTERVAL_MILLIS)
-                    }
+                // No retry needed: false means lock already released or expired (not an error)
+                val unlocked = reqShieldConfig.keyLock.unLock(key, lockType)
+                if (!unlocked) {
+                    log.debug("Lock already released or expired for key '{}'", key)
                 }
             }
         }

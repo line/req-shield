@@ -21,10 +21,7 @@ import org.testcontainers.utility.DockerImageName
 
 object RedisContainer {
     val instance =
-        GenericContainer(
-            DockerImageName.parse("redis:6.2.7-alpine"),
-        ).apply {
-            portBindings = listOf("6379:6379")
-            withReuse(true)
-        }
+        GenericContainer(DockerImageName.parse("redis:6.2.7-alpine"))
+            .withExposedPorts(6379)
+            .withReuse(true)
 }

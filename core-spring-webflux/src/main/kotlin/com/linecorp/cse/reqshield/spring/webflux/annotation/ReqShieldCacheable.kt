@@ -33,4 +33,10 @@ annotation class ReqShieldCacheable(
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val timeToLiveMillis: Long = 10 * 60 * 1000,
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    val nullHandling: NullHandling = NullHandling.EMIT_EMPTY,
 )
+
+enum class NullHandling {
+    EMIT_EMPTY,
+    ERROR,
+}

@@ -22,7 +22,7 @@ object ConfigValues {
 
     const val LOCK_MONITOR_INTERVAL_MILLIS = 1000L
 
-    const val MAX_ATTEMPT_GET_CACHE = 50
+    const val MAX_ATTEMPT_GET_CACHE = 60
     const val GET_CACHE_INTERVAL_MILLIS = 50L
 
     const val MAX_ATTEMPT_SET_CACHE = 3

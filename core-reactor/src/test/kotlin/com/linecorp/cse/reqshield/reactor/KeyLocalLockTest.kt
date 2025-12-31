@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.reactor
 
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -27,6 +28,47 @@ import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
 class KeyLocalLockTest : BaseKeyLockTest {
+    @AfterEach
+    fun cleanup() {
+        // Ensure monitor can restart after each test to prevent test isolation issues
+        KeyLocalLock.stopMonitoring()
+    }
+
+    @Test
+    fun `should share global lockMap across multiple instances`() {
+        val instance1 = KeyLocalLock(lockTimeoutMillis)
+        val instance2 = KeyLocalLock(lockTimeoutMillis)
+        val key = "shared-key"
+        val lockType = LockType.CREATE
+
+        StepVerifier.create(instance1.tryLock(key, lockType)).expectNext(true).verifyComplete()
+        StepVerifier.create(instance2.tryLock(key, lockType)).expectNext(false).verifyComplete()
+
+        StepVerifier.create(instance1.unLock(key, lockType)).expectNext(true).verifyComplete()
+    }
+
+    @Test
+    fun `should maintain request collapsing across multiple instances`() {
+        val instance1 = KeyLocalLock(lockTimeoutMillis)
+        val instance2 = KeyLocalLock(lockTimeoutMillis)
+        val instance3 = KeyLocalLock(lockTimeoutMillis)
+        val key = "collapsing-key"
+        val lockType = LockType.CREATE
+
+        val attempts =
+            listOf(instance1, instance2, instance3).map { inst ->
+                inst.tryLock(key, lockType).map { acquired -> if (acquired) 1 else 0 }
+            }
+
+        StepVerifier
+            .create(Mono.zip(attempts) { arr -> arr.sumOf { it as Int } })
+            .expectNextMatches { it == 1 }
+            .verifyComplete()
+
+        // cleanup by unlocking whoever acquired
+        listOf(instance1, instance2, instance3).forEach { inst -> inst.unLock(key, lockType).subscribe() }
+    }
+
     @Test
     override fun testConcurrencyWithOneKey() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
@@ -146,6 +188,82 @@ class KeyLocalLockTest : BaseKeyLockTest {
                 keyLock.unLock(key, lockType),
             ).expectNext(true)
             .verifyComplete()
+    }
+
+    @Test
+    fun `should not over-release semaphore on multiple unlock calls`() {
+        val keyLock = KeyLocalLock(lockTimeoutMillis)
+        val key = "over-release-test"
+        val lockType = LockType.CREATE
+
+        // Acquire lock
+        StepVerifier.create(keyLock.tryLock(key, lockType))
+            .expectNext(true)
+            .verifyComplete()
+
+        // First unlock should succeed
+        StepVerifier.create(keyLock.unLock(key, lockType))
+            .expectNext(true)
+            .verifyComplete()
+
+        // Second unlock should return false (over-release prevention)
+        StepVerifier.create(keyLock.unLock(key, lockType))
+            .expectNext(false)
+            .verifyComplete()
+
+        // Verify semaphore is not over-released: can acquire once, not twice
+        StepVerifier.create(keyLock.tryLock(key, lockType))
+            .expectNext(true)
+            .verifyComplete()
+
+        StepVerifier.create(keyLock.tryLock(key, lockType))
+            .expectNext(false)
+            .verifyComplete()
+
+        // Cleanup
+        keyLock.unLock(key, lockType).subscribe()
+    }
+
+    @Test
+    fun `should prevent concurrent lock acquisition after over-release attempt`() {
+        val keyLock = KeyLocalLock(lockTimeoutMillis)
+        val key = "concurrent-over-release-test"
+        val lockType = LockType.CREATE
+        val successfulAcquisitions = AtomicInteger(0)
+
+        // Simulate over-release attempt
+        StepVerifier.create(keyLock.tryLock(key, lockType))
+            .expectNext(true)
+            .verifyComplete()
+
+        StepVerifier.create(keyLock.unLock(key, lockType))
+            .expectNext(true)
+            .verifyComplete()
+
+        // Multiple unlock attempts should all return false
+        repeat(5) {
+            StepVerifier.create(keyLock.unLock(key, lockType))
+                .expectNext(false)
+                .verifyComplete()
+        }
+
+        // Try to acquire lock concurrently - only ONE should succeed
+        val attempts =
+            (1..10).map {
+                keyLock.tryLock(key, lockType)
+                    .map { acquired -> if (acquired) successfulAcquisitions.incrementAndGet() else 0 }
+            }
+
+        StepVerifier
+            .create(Mono.zip(attempts) { it.toList() })
+            .expectNextCount(1)
+            .verifyComplete()
+
+        // Only one should have acquired the lock
+        assertEquals(1, successfulAcquisitions.get(), "Only one should acquire the lock")
+
+        // Cleanup
+        keyLock.unLock(key, lockType).subscribe()
     }
 
     private fun doWork(): Mono<Unit> =
