@@ -25,7 +25,4 @@ annotation class ReqShieldCacheEvict(
     val cacheName: String,
     val key: String = "",
     val keyGenerator: String = "",
-    val isLocalLock: Boolean = true,
-    val lockTimeoutMillis: Long = 3000,
-    val condition: String = "",
 )

@@ -26,18 +26,30 @@ import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.atomic.AtomicLong
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Boolean,
     val getCacheFunction: (String) -> ReqShieldData<T>?,
-    val globalLockFunction: ((String, Long) -> Boolean)? = null,
-    val globalUnLockFunction: ((String) -> Boolean)? = null,
+    /**
+     * (lockKey, token, ttlMillis) -> acquired. Required when [isLocalLock] is false.
+     * The implementation must acquire only when the key is absent and must let the lock expire
+     * on its own, e.g. `SET key token NX PX ttl`.
+     */
+    val globalLockFunction: ((String, String, Long) -> Boolean)? = null,
+    /**
+     * (lockKey, token) -> released. Required when [isLocalLock] is false.
+     * The implementation must be a compare-and-delete: delete the key only while its value still
+     * equals the token, so an expired holder cannot release the lock of the next holder.
+     */
+    val globalUnLockFunction: ((String, String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
-    val executor: ScheduledExecutorService =
-        Executors.newScheduledThreadPool(
-            maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
-        ),
+    /**
+     * Executor used for the asynchronous cache writes and for polling the cache while another
+     * request holds the lock. Defaults to a single pool shared by every configuration instance.
+     */
+    val executor: ScheduledExecutorService = sharedExecutor,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val keyLock: KeyLock =
         if (isLocalLock) {
@@ -48,6 +60,24 @@ data class ReqShieldConfiguration<T>(
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 ) {
+    companion object {
+        private val executorThreadCounter = AtomicLong(0)
+
+        /**
+         * Shared by every configuration instance: one ReqShield per cache key must not mean one
+         * thread pool per cache key. Threads are daemons so the pool never blocks JVM shutdown.
+         */
+        private val sharedExecutor: ScheduledExecutorService by lazy {
+            Executors.newScheduledThreadPool(
+                maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
+            ) { runnable ->
+                Thread(runnable, "req-shield-executor-${executorThreadCounter.incrementAndGet()}").apply {
+                    isDaemon = true
+                }
+            }
+        }
+    }
+
     init {
         if (!isLocalLock) {
             requireNotNull(globalLockFunction) {

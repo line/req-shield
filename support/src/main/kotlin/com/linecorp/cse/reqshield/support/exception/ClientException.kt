@@ -17,16 +17,17 @@
 package com.linecorp.cse.reqshield.support.exception
 
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
-import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger(ClientException::class.java)
-
+/**
+ * Wraps failures raised by client-provided functions (supplier, cache getter/setter, lock functions).
+ *
+ * The original exception is chained as [cause] so callers keep the full stack trace.
+ * This class intentionally does not log: synchronous failures are propagated to the caller,
+ * and fire-and-forget paths inside ReqShield log at the point where the error is dropped.
+ */
 class ClientException(
     val errorCode: ErrorCode,
     override val message: String = errorCode.message,
-    originErrorMessage: String? = null,
-) : RuntimeException(message) {
-    init {
-        log.error("[Req-Shield] errorCode : {}, message : {}, originErrorMessage : {}", errorCode.code, message, originErrorMessage)
-    }
-}
+    cause: Throwable? = null,
+    val originErrorMessage: String? = cause?.message,
+) : RuntimeException(message, cause)

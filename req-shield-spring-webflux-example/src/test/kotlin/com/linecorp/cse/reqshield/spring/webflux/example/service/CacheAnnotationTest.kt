@@ -70,7 +70,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
             }.verifyComplete()
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-$testProductId").block() != null
+            asyncCache.get("product::product-$testProductId").block() != null
         }
     }
 
@@ -100,7 +100,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
         assertEquals(20, sampleService.getRequestCount(), "Request count should be 20")
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-$testProductId").block() != null
+            asyncCache.get("productOnlyUpdataCache::product-$testProductId").block() != null
         }
     }
 
@@ -124,7 +124,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
             }.verifyComplete()
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-$testProductId").block() != null
+            asyncCache.get("product::product-$testProductId").block() != null
         }
     }
 
@@ -144,9 +144,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-$testProductId").block() != null
+            asyncCache.get("product::product-$testProductId").block() != null
         }
-        val cacheMono = asyncCache.get("product-$testProductId").block()
+        val cacheMono = asyncCache.get("product::product-$testProductId").block()
         assertNotNull(cacheMono)
 
         // when
@@ -162,9 +162,9 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            asyncCache.get("product-$testProductId").block() == null
+            asyncCache.get("product::product-$testProductId").block() == null
         }
-        val cacheMonoNull = asyncCache.get("product-$testProductId").block()
+        val cacheMonoNull = asyncCache.get("product::product-$testProductId").block()
         assertNull(cacheMonoNull)
     }
 }

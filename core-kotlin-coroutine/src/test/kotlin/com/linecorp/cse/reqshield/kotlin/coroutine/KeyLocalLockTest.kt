@@ -30,7 +30,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 class KeyLocalLockTest : BaseKeyLockTest {
     @AfterEach
@@ -47,26 +50,69 @@ class KeyLocalLockTest : BaseKeyLockTest {
             val key = "shared-key"
             val lockType = LockType.CREATE
 
-            assertTrue(instance1.tryLock(key, lockType))
-            assertTrue(!instance2.tryLock(key, lockType))
+            val token = instance1.tryLock(key, lockType)
+            assertNotNull(token)
+            assertNull(instance2.tryLock(key, lockType))
 
-            instance1.unLock(key, lockType)
+            // Any instance may release the lock as long as it presents the owning token.
+            assertTrue(instance2.unLock(key, lockType, token))
         }
 
     @Test
     fun `should maintain request collapsing across multiple instances`() =
         runBlocking {
-            val instance1 = KeyLocalLock(lockTimeoutMillis)
-            val instance2 = KeyLocalLock(lockTimeoutMillis)
-            val instance3 = KeyLocalLock(lockTimeoutMillis)
+            val instances = List(3) { KeyLocalLock(lockTimeoutMillis) }
             val key = "collapsing-key"
             val lockType = LockType.CREATE
 
-            val acquired = listOf(instance1, instance2, instance3).map { it.tryLock(key, lockType) }.count { it }
-            assertEquals(1, acquired)
+            val tokens = instances.mapNotNull { it.tryLock(key, lockType) }
+            assertEquals(1, tokens.size)
 
             // cleanup whoever acquired
-            listOf(instance1, instance2, instance3).forEach { it.unLock(key, lockType) }
+            tokens.forEach { instances.first().unLock(key, lockType, it) }
+        }
+
+    @Test
+    fun `should reject an unlock presenting a token of another owner`() =
+        runBlocking {
+            val keyLock = KeyLocalLock(lockTimeoutMillis)
+            val key = "foreign-token-test"
+            val lockType = LockType.CREATE
+
+            val token = keyLock.tryLock(key, lockType)
+            assertNotNull(token)
+
+            assertFalse(keyLock.unLock(key, lockType, "someone-elses-token"), "A foreign token must not release the lock")
+            // The lock is still held, so nobody else can acquire it.
+            assertNull(keyLock.tryLock(key, lockType))
+
+            assertTrue(keyLock.unLock(key, lockType, token), "The owning token must release the lock")
+            keyLock.cancel()
+        }
+
+    @Test
+    fun `should not let a stale token release the lock of the next owner`() =
+        runBlocking {
+            val shortLockTimeout = 50L
+            val keyLock = KeyLocalLock(shortLockTimeout)
+            val key = "stale-token-test"
+            val lockType = LockType.CREATE
+
+            val staleToken = keyLock.tryLock(key, lockType)
+            assertNotNull(staleToken)
+
+            // Let the lock time out so that the next caller can force-acquire it.
+            delay(shortLockTimeout + 10L)
+            val newToken = keyLock.tryLock(key, lockType)
+            assertNotNull(newToken)
+            assertTrue(staleToken != newToken)
+
+            // The timed-out owner must not be able to release the new owner's lock.
+            assertFalse(keyLock.unLock(key, lockType, staleToken))
+            assertNull(keyLock.tryLock(key, lockType), "The new owner must still hold the lock")
+
+            assertTrue(keyLock.unLock(key, lockType, newToken))
+            keyLock.cancel()
         }
 
     @Test
@@ -82,7 +128,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
                 List(20) {
                     launch {
                         withContext(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
+                            val token = keyLock.tryLock(key, lockType)
+                            if (token != null) {
                                 try {
                                     println("${Thread.currentThread().name} acquired the lock")
                                     lockAcquiredCount.incrementAndGet()
@@ -90,7 +137,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
                                 } catch (e: InterruptedException) {
                                     e.printStackTrace()
                                 } finally {
-                                    keyLock.unLock(key, lockType)
+                                    keyLock.unLock(key, lockType, token)
                                     println("${Thread.currentThread().name} released the lock")
                                 }
                             } else {
@@ -107,7 +154,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
             delay(100)
 
-            assertTrue(keyLock.tryLock(key, lockType))
+            assertTrue(keyLock.tryLock(key, lockType) != null, "The lock must be free again")
         }
 
     @Test
@@ -123,14 +170,15 @@ class KeyLocalLockTest : BaseKeyLockTest {
                     val key = if (i % 2 == 0) "myKey1" else "myKey2"
                     launch {
                         withContext(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
+                            val token = keyLock.tryLock(key, lockType)
+                            if (token != null) {
                                 try {
                                     lockAcquiredCount.incrementAndGet()
                                     doWork()
                                 } catch (e: InterruptedException) {
                                     e.printStackTrace()
                                 } finally {
-                                    keyLock.unLock(key, lockType)
+                                    keyLock.unLock(key, lockType, token)
                                 }
                             }
                             tasksCompletedCount.incrementAndGet()
@@ -143,8 +191,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
             delay(100)
 
-            assertTrue(keyLock.tryLock("myKey1", lockType))
-            assertTrue(keyLock.tryLock("myKey2", lockType))
+            assertTrue(keyLock.tryLock("myKey1", lockType) != null)
+            assertTrue(keyLock.tryLock("myKey2", lockType) != null)
         }
 
     @Test
@@ -154,19 +202,19 @@ class KeyLocalLockTest : BaseKeyLockTest {
             val key = "myKey"
             val lockType = LockType.CREATE
 
-            assertTrue(keyLock.tryLock(key, lockType))
+            assertNotNull(keyLock.tryLock(key, lockType))
 
             // Wait for lock timeout + cleanup interval + buffer
             // lockTimeoutMillis = 3000ms, cleanup interval = 1000ms
             delay(lockTimeoutMillis + 1000L + 500L) // 4.5 seconds total
 
-            val result =
+            val token =
                 withContext(Dispatchers.IO) {
                     keyLock.tryLock(key, lockType)
                 }
 
-            assertTrue(result)
-            assertTrue(keyLock.unLock(key, lockType))
+            assertNotNull(token)
+            assertTrue(keyLock.unLock(key, lockType, token))
         }
 
     @Test
@@ -177,20 +225,22 @@ class KeyLocalLockTest : BaseKeyLockTest {
             val lockType = LockType.CREATE
 
             // Acquire lock
-            assertTrue(keyLock.tryLock(key, lockType))
+            val token = keyLock.tryLock(key, lockType)
+            assertNotNull(token)
 
             // First unlock should succeed
-            assertTrue(keyLock.unLock(key, lockType), "First unlock should succeed")
+            assertTrue(keyLock.unLock(key, lockType, token), "First unlock should succeed")
 
             // Second unlock should return false (over-release prevention)
-            assertFalse(keyLock.unLock(key, lockType), "Second unlock should fail (over-release prevention)")
+            assertFalse(keyLock.unLock(key, lockType, token), "Second unlock should fail (over-release prevention)")
 
             // Verify semaphore is not over-released: can acquire once, not twice
-            assertTrue(keyLock.tryLock(key, lockType), "Should acquire lock after proper unlock")
-            assertFalse(keyLock.tryLock(key, lockType), "Should not acquire lock twice (semaphore intact)")
+            val reacquiredToken = keyLock.tryLock(key, lockType)
+            assertNotNull(reacquiredToken, "Should acquire lock after proper unlock")
+            assertNull(keyLock.tryLock(key, lockType), "Should not acquire lock twice (semaphore intact)")
 
             // Cleanup
-            keyLock.unLock(key, lockType)
+            keyLock.unLock(key, lockType, reacquiredToken)
             keyLock.cancel()
         }
 
@@ -200,31 +250,30 @@ class KeyLocalLockTest : BaseKeyLockTest {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
             val key = "concurrent-over-release-test"
             val lockType = LockType.CREATE
-            val successfulAcquisitions = AtomicInteger(0)
+            val acquiredTokens = ConcurrentLinkedQueue<String>()
 
             // Simulate over-release attempt
-            assertTrue(keyLock.tryLock(key, lockType))
-            keyLock.unLock(key, lockType)
+            val token = keyLock.tryLock(key, lockType)
+            assertNotNull(token)
+            assertTrue(keyLock.unLock(key, lockType, token))
             // Multiple unlock attempts should all return false (not over-release)
-            repeat(5) { assertFalse(keyLock.unLock(key, lockType)) }
+            repeat(5) { assertFalse(keyLock.unLock(key, lockType, token)) }
 
             // Try to acquire lock concurrently - only ONE should succeed
             val attempts =
                 (1..10).map {
                     async(Dispatchers.IO) {
-                        if (keyLock.tryLock(key, lockType)) {
-                            successfulAcquisitions.incrementAndGet()
-                        }
+                        keyLock.tryLock(key, lockType)?.let { acquiredTokens.add(it) }
                     }
                 }
 
             attempts.awaitAll()
 
             // Only one should have acquired the lock
-            assertEquals(1, successfulAcquisitions.get(), "Only one should acquire the lock")
+            assertEquals(1, acquiredTokens.size, "Only one should acquire the lock")
 
             // Cleanup
-            keyLock.unLock(key, lockType)
+            acquiredTokens.forEach { keyLock.unLock(key, lockType, it) }
             keyLock.cancel()
         }
 
@@ -239,7 +288,8 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
             repeat(100) { iteration ->
                 // Step 1: Acquire lock
-                assertTrue(keyLock.tryLock(key, lockType), "Iteration $iteration: Initial lock should succeed")
+                val token = keyLock.tryLock(key, lockType)
+                assertNotNull(token, "Iteration $iteration: Initial lock should succeed")
 
                 // Step 2: Wait for lock to expire (but not be cleaned up by monitor)
                 delay(shortLockTimeout + 10L)
@@ -254,34 +304,33 @@ class KeyLocalLockTest : BaseKeyLockTest {
                     }
                 val unLockResult =
                     async(Dispatchers.IO) {
-                        keyLock.unLock(key, lockType)
+                        keyLock.unLock(key, lockType, token)
                     }
 
-                tryLockResult.await()
+                val raceToken = tryLockResult.await()
                 unLockResult.await()
 
                 // Step 4: Verify no over-release by checking lock behavior
                 // If over-release occurred, permits > 1, allowing multiple acquisitions
-                val acquisitions = AtomicInteger(0)
+                val acquiredTokens = ConcurrentLinkedQueue<String>()
                 val attempts =
                     (1..5).map {
                         async(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
-                                acquisitions.incrementAndGet()
-                            }
+                            keyLock.tryLock(key, lockType)?.let { acquiredTokens.add(it) }
                         }
                     }
                 attempts.awaitAll()
 
                 // At most 1 should succeed (0 if tryLock already holds it, 1 if it released)
                 assertTrue(
-                    acquisitions.get() <= 1,
+                    acquiredTokens.size <= 1,
                     "Iteration $iteration: Over-release detected! " +
-                        "Expected at most 1 acquisition, got ${acquisitions.get()}",
+                        "Expected at most 1 acquisition, got ${acquiredTokens.size}",
                 )
 
                 // Cleanup for next iteration
-                repeat(3) { keyLock.unLock(key, lockType) }
+                raceToken?.let { keyLock.unLock(key, lockType, it) }
+                acquiredTokens.forEach { keyLock.unLock(key, lockType, it) }
             }
 
             keyLock.cancel()
@@ -298,38 +347,41 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
             repeat(50) { iteration ->
                 // Acquire lock and let it expire
-                assertTrue(keyLock.tryLock(key, lockType))
+                val expiredToken = keyLock.tryLock(key, lockType)
+                assertNotNull(expiredToken, "Iteration $iteration: Initial lock should succeed")
                 delay(shortLockTimeout + 5L)
 
-                // High contention: many concurrent tryLock and unLock calls
+                // High contention: many concurrent tryLock and unLock calls.
+                // Releases present whichever token is currently known - a stale one must be rejected.
+                val liveTokens = ConcurrentLinkedQueue<String>()
                 val jobs =
                     (1..20).map { i ->
                         if (i % 2 == 0) {
-                            async(Dispatchers.IO) { keyLock.tryLock(key, lockType) }
+                            async(Dispatchers.IO) { keyLock.tryLock(key, lockType)?.let { liveTokens.add(it) } }
                         } else {
-                            async(Dispatchers.IO) { keyLock.unLock(key, lockType) }
+                            async(Dispatchers.IO) {
+                                keyLock.unLock(key, lockType, liveTokens.poll() ?: expiredToken)
+                            }
                         }
                     }
                 jobs.awaitAll()
 
                 // Verify: try to acquire lock multiple times concurrently
-                val acquisitions = AtomicInteger(0)
+                val acquiredTokens = ConcurrentLinkedQueue<String>()
                 val verifyJobs =
                     (1..10).map {
                         async(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
-                                acquisitions.incrementAndGet()
-                            }
+                            keyLock.tryLock(key, lockType)?.let { acquiredTokens.add(it) }
                         }
                     }
                 verifyJobs.awaitAll()
 
-                if (acquisitions.get() > 1) {
+                if (acquiredTokens.size > 1) {
                     overReleaseDetected.incrementAndGet()
                 }
 
                 // Cleanup
-                repeat(15) { keyLock.unLock(key, lockType) }
+                (liveTokens + acquiredTokens).forEach { keyLock.unLock(key, lockType, it) }
             }
 
             assertEquals(

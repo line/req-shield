@@ -39,27 +39,59 @@ A lib that regulates the cache-based requests an application receives in terms o
   - `EMIT_EMPTY` (default): map `null` to `Mono.empty()`.
   - `ERROR`: throw an `IllegalStateException` if a `null` value is produced.
 
+### Cache key layout
+
+- The Spring adapters store every entry under `"{cacheName}::{key}"` (the same convention as Spring's `RedisCacheManager`),
+  where `key` is the SpEL result or the `KeyGenerator` output. `@ReqShieldCacheEvict` applies the same rule, so an evict
+  with the same `cacheName` and `key` always targets the entry written by `@ReqShieldCacheable`.
+- Lock keys are derived from that namespaced key and prefixed with `reqshield:lock:`, so two caches that happen to use the
+  same raw key never share a lock or an entry.
+- If you call `ReqShield` directly (core / core-reactor / core-kotlin-coroutine), the key you pass is used as is.
+
 ### Global lock guidance
 
-- When `isLocalLock = false`, you must provide real global lock/unlock implementations.
-- Recommended approach with Redis:
-  - Lock: `SETNX lock:{key} 1` + `PEXPIRE lock:{key} {ttlMillis}`
-  - Unlock: `DEL lock:{key}`
-- The provided defaults return `true` and are only suitable for local/dev usage.
+- When `isLocalLock = false`, your cache bean must also implement the module's `GlobalLockSupport` interface
+  (`com.linecorp.cse.reqshield.spring.cache.GlobalLockSupport`, `...spring.webflux.cache.GlobalLockSupport`,
+  `...spring.webflux.kotlin.coroutine.cache.GlobalLockSupport`). If it does not, the first call to the annotated method
+  fails with an `IllegalArgumentException` instead of silently running without request collapsing.
+- Every lock acquisition carries an ownership token. Only the holder that acquired the lock can release it, so a slow
+  holder whose lock already expired can no longer release the lock of the next holder.
+- Recommended Redis implementation:
+  - Lock: `SET {lockKey} {token} NX PX {ttlMillis}` (atomic; never `SETNX` followed by a separate `PEXPIRE`)
+  - Unlock: compare-and-delete in a Lua script, e.g.
+    `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`
+- The example modules contain working implementations for `RedisTemplate`, `ReactiveRedisTemplate` and the coroutine
+  extensions.
 
-### Reactor Scheduler tuning
+### Cache eviction semantics
 
-- Reactor-based modules accept a `Scheduler` (e.g., `boundedElastic`) through configuration.
-- Spring WebFlux adapter exposes a `reqShieldScheduler` bean you can override for tuning thread usage.
+- `@ReqShieldCacheEvict` evicts **after** the annotated method completes successfully (Spring's `@CacheEvict` default).
+  If the method throws, nothing is evicted; if the eviction itself fails, that failure propagates to the caller.
+- In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
 
-### Kotlin Coroutine Parallelism Configuration
+### Waiting for another request (lock not acquired)
 
-| Property | Default | Description |
-|----------|---------|-------------|
-| `reqshield.blocking.parallelism` | `availableProcessors * 2` (clamped 4-256) | Controls parallelism for blocking calls in the coroutine aspect |
+- A request that loses the lock polls the cache every 50 ms, up to `maxAttemptGetCache` times (default 60).
+- A cache read failure while polling is logged and counted as a failed attempt. Three consecutive failures are treated as a
+  cache outage and the request falls back to calling the supplier itself right away.
+- When the attempts are exhausted the request calls the supplier once. A supplier failure is propagated as a
+  `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
 
-**Note**: This feature uses `Dispatchers.IO.limitedParallelism()` which is marked as `@ExperimentalCoroutinesApi`.
-The API may change in future Kotlin Coroutines versions.
+### Thread pools and schedulers
+
+- `core` uses a `ScheduledExecutorService`. The default is a shared daemon pool; the Spring adapter exposes it as the
+  `reqShieldExecutor` bean, which you can override.
+- `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter exposes it as the
+  `reqShieldScheduler` bean.
+- `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
+  `Dispatchers.IO`). The coroutine Spring adapter exposes it as the `reqShieldCoroutineScope` bean and cancels it on
+  context shutdown.
+
+### Kotlin coroutine adapter
+
+- `@ReqShieldCacheable` / `@ReqShieldCacheEvict` from `core-spring-webflux-kotlin-coroutine` require `suspend`
+  functions. Annotating a regular function fails fast with an `IllegalArgumentException`; use `core-spring` or
+  `core-spring-webflux` for blocking or `Mono`-returning methods.
 
 ## Contributing
 

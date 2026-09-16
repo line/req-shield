@@ -21,6 +21,8 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 class KeyLocalLockShutdownTest {
     @Test
@@ -31,8 +33,8 @@ class KeyLocalLockShutdownTest {
         val key1 = "testKey1"
         val key2 = "testKey2"
 
-        keyLock.tryLock(key1, LockType.CREATE)
-        keyLock.tryLock(key2, LockType.CREATE)
+        val token1 = assertNotNull(keyLock.tryLock(key1, LockType.CREATE))
+        val token2 = assertNotNull(keyLock.tryLock(key2, LockType.CREATE))
 
         // Call shutdown
         keyLock.shutdown()
@@ -40,12 +42,12 @@ class KeyLocalLockShutdownTest {
         // Test behavioral verification instead of internal state
         // After shutdown, the instance should still function normally
         // but should be deregistered from shared monitoring
-        assertTrue(keyLock.tryLock("newKey", LockType.CREATE), "Lock should still work after shutdown")
-        keyLock.unLock("newKey", LockType.CREATE)
+        val newToken = assertNotNull(keyLock.tryLock("newKey", LockType.CREATE), "Lock should still work after shutdown")
+        keyLock.unLock("newKey", LockType.CREATE, newToken)
 
         // Cleanup existing locks
-        keyLock.unLock(key1, LockType.CREATE)
-        keyLock.unLock(key2, LockType.CREATE)
+        keyLock.unLock(key1, LockType.CREATE, token1)
+        keyLock.unLock(key2, LockType.CREATE, token2)
     }
 
     @Test
@@ -57,17 +59,17 @@ class KeyLocalLockShutdownTest {
         val lockType = LockType.CREATE
 
         // Acquire lock
-        assertTrue(keyLock.tryLock(key, lockType), "Should acquire lock initially")
+        assertNotNull(keyLock.tryLock(key, lockType), "Should acquire lock initially")
 
         // Should fail to acquire same lock again (already acquired)
-        assertTrue(!keyLock.tryLock(key, lockType), "Should not acquire same lock again")
+        assertNull(keyLock.tryLock(key, lockType), "Should not acquire same lock again")
 
         // Should be automatically cleaned up after lock timeout + cleanup interval
         // Cleanup interval is 1000ms, so we wait for lock timeout + cleanup interval + buffer
         await().atMost(Duration.ofMillis(shortTimeout + 1000L + 500L)).untilAsserted {
             // Should be able to acquire new lock after cleanup
-            assertTrue(keyLock.tryLock(key, lockType), "Should be able to acquire lock after timeout and cleanup")
-            keyLock.unLock(key, lockType) // Cleanup
+            val token = assertNotNull(keyLock.tryLock(key, lockType), "Should be able to acquire lock after timeout and cleanup")
+            keyLock.unLock(key, lockType, token) // Cleanup
         }
 
         keyLock.shutdown()
@@ -89,9 +91,10 @@ class KeyLocalLockShutdownTest {
             // Should be able to acquire locks again after all keys are cleaned up
             var availableCount = 0
             for (i in 1..5) {
-                if (keyLock.tryLock("key$i", LockType.CREATE)) {
+                val token = keyLock.tryLock("key$i", LockType.CREATE)
+                if (token != null) {
                     availableCount++
-                    keyLock.unLock("key$i", LockType.CREATE)
+                    keyLock.unLock("key$i", LockType.CREATE, token)
                 }
             }
             assertEquals(5, availableCount, "All expired locks should be cleaned up")
@@ -126,8 +129,9 @@ class KeyLocalLockShutdownTest {
 
         // Test behavioral verification: shutdown should complete normally
         // and the keyLock should still function correctly after interrupted shutdown
-        assertTrue(keyLock.tryLock("interruptTestKey", LockType.CREATE), "Lock should work after interrupted shutdown")
-        keyLock.unLock("interruptTestKey", LockType.CREATE)
+        val token =
+            assertNotNull(keyLock.tryLock("interruptTestKey", LockType.CREATE), "Lock should work after interrupted shutdown")
+        keyLock.unLock("interruptTestKey", LockType.CREATE, token)
 
         // Clear interrupt state
         Thread.interrupted()

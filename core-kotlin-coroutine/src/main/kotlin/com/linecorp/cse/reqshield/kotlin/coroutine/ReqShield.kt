@@ -19,19 +19,23 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_SET_CACHE
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.SET_CACHE_RETRY_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.withContext
+import org.slf4j.LoggerFactory
+
+private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
@@ -55,33 +59,32 @@ class ReqShield<T>(
     private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>): Boolean =
         decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun updateReqShieldData(
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
     ) {
         val lockType = LockType.UPDATE
+        // ONLY_CREATE_CACHE collapses requests on creation only, so the update runs without a lock.
+        val onlyCreateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE
+        val token = if (onlyCreateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
-        fun executeAsyncTask() {
-            CoroutineScope(Dispatchers.IO).launch {
+        if (!onlyCreateCache && token == null) return
+
+        reqShieldConfig.scope.launch(start = CoroutineStart.ATOMIC) {
+            try {
                 val reqShieldData =
                     buildReqShieldData(
-                        executeCallable({ callable() }, true, key, lockType),
+                        executeCallable(callable, key, lockType, token),
                         timeToLiveMillis,
                     )
-                setReqShieldData(
-                    reqShieldConfig.setCacheFunction,
-                    key,
-                    reqShieldData,
-                    lockType,
-                )
+                executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("[Req-Shield] failed to update the cache of key '{}'", key, e)
             }
-        }
-
-        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE ||
-            reqShieldConfig.keyLock.tryLock(key, lockType)
-        ) {
-            return executeAsyncTask()
         }
     }
 
@@ -91,43 +94,79 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
         val lockType = LockType.CREATE
+        // ONLY_UPDATE_CACHE collapses requests on update only, so the creation runs without a lock.
+        val onlyUpdateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE
+        val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
-        return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
-            reqShieldConfig.keyLock.tryLock(key, lockType)
-        ) {
-            createReqShieldData(key, callable, timeToLiveMillis, lockType)
+        return if (onlyUpdateCache || token != null) {
+            createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
         } else {
             handleLockFailure(key, callable, timeToLiveMillis)
         }
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun createReqShieldData(
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
         lockType: LockType,
+        token: String?,
     ): ReqShieldData<T> {
         val reqShieldData =
             buildReqShieldData(
-                executeCallable({ callable() }, true, key, lockType),
+                executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
-        CoroutineScope(Dispatchers.IO).launch {
-            setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType)
+        reqShieldConfig.scope.launch(start = CoroutineStart.ATOMIC) {
+            try {
+                executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("[Req-Shield] failed to create the cache of key '{}'", key, e)
+            }
         }
         return reqShieldData
     }
 
+    /**
+     * Another request owns the create lock, so wait for it to fill the cache.
+     *
+     * Polling runs on the caller's coroutine: [delay] is a cancellation point, so a cancelled caller
+     * stops polling immediately. Consecutive cache-read failures are treated as a cache outage and
+     * end the wait early, after which the supplier is called on this coroutine as the last resort.
+     */
     private suspend fun handleLockFailure(
         key: String,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val counter = createCounter()
+        var attempts = 0
+        var consecutiveFailures = 0
 
-        val result = scheduleTask(counter, reqShieldConfig.getCacheFunction, callable, key).await()
+        while (attempts < reqShieldConfig.maxAttemptGetCache) {
+            val cachedData =
+                try {
+                    executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+                        .also { consecutiveFailures = 0 }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: ClientException) {
+                    log.warn("[Req-Shield] failed to read the cache of key '{}' while waiting", key, e)
+                    if (++consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) break
+                    null
+                }
 
-        return buildReqShieldData(result, timeToLiveMillis)
+            if (cachedData != null) return cachedData
+
+            attempts++
+            delay(GET_CACHE_INTERVAL_MILLIS)
+        }
+
+        // The other request never filled the cache: fall back to the supplier. No lock was acquired
+        // here, so there is nothing to release, and a supplier failure propagates as SUPPLIER_ERROR.
+        return buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
     }
 
     private fun buildReqShieldData(
@@ -139,42 +178,16 @@ class ReqShield<T>(
             timeToLiveMillis = timeToLiveMillis,
         )
 
-    private suspend fun setReqShieldData(
-        cacheSetter: suspend (String, ReqShieldData<T>, Long) -> Boolean,
-        key: String,
-        reqShieldData: ReqShieldData<T>,
-        lockType: LockType,
-    ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType)
-    }
-
-    private fun createCounter(): AtomicInteger = AtomicInteger(0)
-
-    private fun scheduleTask(
-        counter: AtomicInteger,
-        cacheGetter: suspend (String) -> ReqShieldData<T>?,
-        callable: suspend () -> T?,
-        key: String,
-    ): Deferred<T?> =
-        CoroutineScope(Dispatchers.IO).async {
-            while (counter.incrementAndGet() <= reqShieldConfig.maxAttemptGetCache) {
-                executeGetCacheFunction(cacheGetter, key)?.let {
-                    return@async it.value
-                }
-                delay(GET_CACHE_INTERVAL_MILLIS)
-            }
-
-            return@async executeCallable({ callable() }, false)
-        }
-
     private suspend fun executeGetCacheFunction(
         getFunction: suspend (String) -> ReqShieldData<T>?,
         key: String,
     ): ReqShieldData<T>? =
-        runCatching {
+        try {
             getFunction(key)
-        }.getOrElse {
-            throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = it.message)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = e)
         }
 
     private suspend fun executeSetCacheFunction(
@@ -182,47 +195,42 @@ class ReqShield<T>(
         key: String,
         value: ReqShieldData<T>,
         lockType: LockType,
+        token: String?,
     ) {
         try {
+            currentCoroutineContext().ensureActive()
             setFunction(key, value, value.timeToLiveMillis)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
+            throw ClientException(ErrorCode.SET_CACHE_ERROR, cause = e)
         } finally {
-            if (shouldAttemptUnlock(lockType)) {
-                unlockWithRetry(key, lockType)
-            }
-        }
-    }
-
-    private suspend fun unlockWithRetry(
-        key: String,
-        lockType: LockType,
-    ) {
-        repeat(MAX_ATTEMPT_SET_CACHE) { attempt ->
-            if (reqShieldConfig.keyLock.unLock(key, lockType)) {
-                return
-            } else if (attempt < MAX_ATTEMPT_SET_CACHE - 1) {
-                delay(SET_CACHE_RETRY_INTERVAL_MILLIS)
+            // Only the holder of a token has a lock to release.
+            if (token != null) {
+                withContext(NonCancellable) {
+                    reqShieldConfig.keyLock.unLock(key, lockType, token)
+                }
             }
         }
     }
 
     private suspend fun executeCallable(
         callable: suspend () -> T?,
-        isUnlockWhenException: Boolean,
-        key: String? = null,
-        lockType: LockType? = null,
+        key: String,
+        lockType: LockType?,
+        token: String?,
     ): T? =
-        runCatching {
+        try {
+            currentCoroutineContext().ensureActive()
             callable()
-        }.getOrElse {
-            if (isUnlockWhenException && key != null && lockType != null) {
-                reqShieldConfig.keyLock.unLock(key, lockType)
+        } catch (e: Exception) {
+            // Release the lock only when this call actually acquired one.
+            if (token != null && lockType != null) {
+                withContext(NonCancellable) {
+                    reqShieldConfig.keyLock.unLock(key, lockType, token)
+                }
             }
-            throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = it.message)
+            if (e is CancellationException) throw e
+            throw ClientException(ErrorCode.SUPPLIER_ERROR, cause = e)
         }
-
-    private fun shouldAttemptUnlock(lockType: LockType): Boolean =
-        (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) ||
-            (lockType == LockType.CREATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_UPDATE_CACHE)
 }

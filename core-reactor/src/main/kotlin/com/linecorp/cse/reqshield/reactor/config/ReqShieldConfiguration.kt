@@ -31,8 +31,22 @@ import reactor.core.scheduler.Schedulers
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
     val getCacheFunction: (String) -> Mono<ReqShieldData<T>?>,
-    val globalLockFunction: ((String, Long) -> Mono<Boolean>)? = null,
-    val globalUnLockFunction: ((String) -> Mono<Boolean>)? = null,
+    /**
+     * Acquires the distributed lock. Called with (lockKey, token, ttlMillis) and must emit
+     * true only when this caller acquired the lock.
+     *
+     * The token identifies the owner, so the lock must be stored together with it -
+     * `SET key token NX PX ttl` is the recommended implementation.
+     */
+    val globalLockFunction: ((String, String, Long) -> Mono<Boolean>)? = null,
+    /**
+     * Releases the distributed lock. Called with (lockKey, token).
+     *
+     * It must release the lock only when the stored value still equals the token
+     * (compare-and-delete, e.g. a Lua script doing `get` + `del`), otherwise a caller whose
+     * lock already expired could release the lock of the next owner.
+     */
+    val globalUnLockFunction: ((String, String) -> Mono<Boolean>)? = null,
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val scheduler: Scheduler = Schedulers.boundedElastic(),

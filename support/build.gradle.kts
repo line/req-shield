@@ -16,9 +16,6 @@
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
-    alias(libs.plugins.kotlin.spring)
-    alias(libs.plugins.spring.boot2)
-    alias(libs.plugins.spring.dependency.management)
     `java-test-fixtures`
 }
 

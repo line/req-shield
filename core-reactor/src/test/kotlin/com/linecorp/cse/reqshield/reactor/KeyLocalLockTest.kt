@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield.reactor
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import reactor.core.publisher.Mono
@@ -26,6 +27,7 @@ import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertNotNull
 
 class KeyLocalLockTest : BaseKeyLockTest {
     @AfterEach
@@ -41,10 +43,13 @@ class KeyLocalLockTest : BaseKeyLockTest {
         val key = "shared-key"
         val lockType = LockType.CREATE
 
-        StepVerifier.create(instance1.tryLock(key, lockType)).expectNext(true).verifyComplete()
-        StepVerifier.create(instance2.tryLock(key, lockType)).expectNext(false).verifyComplete()
+        val token = instance1.tryLock(key, lockType).block()
+        assertNotNull(token)
 
-        StepVerifier.create(instance1.unLock(key, lockType)).expectNext(true).verifyComplete()
+        // Another instance sees the same lock as held: empty means "not acquired"
+        StepVerifier.create(instance2.tryLock(key, lockType)).verifyComplete()
+
+        StepVerifier.create(instance1.unLock(key, lockType, token)).expectNext(true).verifyComplete()
     }
 
     @Test
@@ -57,22 +62,64 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         val attempts =
             listOf(instance1, instance2, instance3).map { inst ->
-                inst.tryLock(key, lockType).map { acquired -> if (acquired) 1 else 0 }
+                inst
+                    .tryLock(key, lockType)
+                    .map { 1 }
+                    .defaultIfEmpty(0)
             }
 
         StepVerifier
             .create(Mono.zip(attempts) { arr -> arr.sumOf { it as Int } })
             .expectNextMatches { it == 1 }
             .verifyComplete()
+    }
 
-        // cleanup by unlocking whoever acquired
-        listOf(instance1, instance2, instance3).forEach { inst -> inst.unLock(key, lockType).subscribe() }
+    @Test
+    fun `should not release a lock held by another owner`() {
+        val keyLock = KeyLocalLock(lockTimeoutMillis)
+        val key = "foreign-token-test"
+        val lockType = LockType.CREATE
+
+        val token = keyLock.tryLock(key, lockType).block()
+        assertNotNull(token)
+
+        // A token that never owned this lock must not release it
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, "someone-elses-token"))
+            .expectNext(false)
+            .verifyComplete()
+
+        // The lock is therefore still held
+        StepVerifier.create(keyLock.tryLock(key, lockType)).verifyComplete()
+
+        StepVerifier.create(keyLock.unLock(key, lockType, token)).expectNext(true).verifyComplete()
+    }
+
+    @Test
+    fun `should not let a stale token release the lock of the next owner`() {
+        val shortTimeoutMillis = 300L
+        val keyLock = KeyLocalLock(shortTimeoutMillis)
+        val key = "stale-token-test"
+        val lockType = LockType.CREATE
+
+        val staleToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(staleToken)
+
+        // Let the lock expire so that it can be force-released and handed to a new owner
+        Thread.sleep(shortTimeoutMillis + 100L)
+
+        val newToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(newToken)
+        assertNotEquals(staleToken, newToken)
+
+        StepVerifier.create(keyLock.unLock(key, lockType, staleToken)).expectNext(false).verifyComplete()
+        StepVerifier.create(keyLock.unLock(key, lockType, newToken)).expectNext(true).verifyComplete()
     }
 
     @Test
     override fun testConcurrencyWithOneKey() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
-        val key = "myKey"
+        val key = "one-key-test"
         val lockType = LockType.CREATE
         val lockAcquiredCount = AtomicInteger(0)
         val tasksCompletedCount = AtomicInteger(0)
@@ -82,13 +129,12 @@ class KeyLocalLockTest : BaseKeyLockTest {
                 tasksCompletedCount.incrementAndGet()
                 keyLock
                     .tryLock(key, lockType)
-                    .filter { it }
-                    .flatMap {
+                    .flatMap { token ->
                         lockAcquiredCount.incrementAndGet()
                         doWork()
                             .publishOn(Schedulers.boundedElastic())
                             .doFinally { _ ->
-                                keyLock.unLock(key, lockType).subscribe()
+                                keyLock.unLock(key, lockType, token).subscribe()
                             }
                     }.onErrorResume { Mono.just(Unit) }
             }
@@ -107,7 +153,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
                 Mono
                     .delay(Duration.ofMillis(100))
                     .then(keyLock.tryLock(key, lockType)),
-            ).expectNext(true)
+            ).expectNextCount(1)
             .verifyComplete()
     }
 
@@ -121,16 +167,15 @@ class KeyLocalLockTest : BaseKeyLockTest {
         val tasks =
             (0 until 20).map { i ->
                 tasksCompletedCount.incrementAndGet()
-                val key = if (i % 2 == 0) "myKey1" else "myKey2"
+                val key = if (i % 2 == 0) "two-key-test1" else "two-key-test2"
                 keyLock
                     .tryLock(key, lockType)
-                    .filter { it }
-                    .flatMap {
+                    .flatMap { token ->
                         lockAcquiredCount.incrementAndGet()
                         doWork()
                             .publishOn(Schedulers.boundedElastic())
                             .doFinally { _ ->
-                                keyLock.unLock(key, lockType).subscribe()
+                                keyLock.unLock(key, lockType, token).subscribe()
                             }
                     }.onErrorResume { Mono.just(Unit) }
             }
@@ -148,46 +193,39 @@ class KeyLocalLockTest : BaseKeyLockTest {
             .create(
                 Mono
                     .delay(Duration.ofMillis(100))
-                    .then(keyLock.tryLock("myKey1", lockType)),
-            ).expectNext(true)
+                    .then(keyLock.tryLock("two-key-test1", lockType)),
+            ).expectNextCount(1)
             .verifyComplete()
 
         StepVerifier
             .create(
                 Mono
                     .delay(Duration.ofMillis(100))
-                    .then(keyLock.tryLock("myKey2", lockType)),
-            ).expectNext(true)
+                    .then(keyLock.tryLock("two-key-test2", lockType)),
+            ).expectNextCount(1)
             .verifyComplete()
     }
 
     @Test
     override fun testLockExpiration() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
-        val key = "myKey"
+        val key = "expiration-test"
         val lockType = LockType.CREATE
 
-        StepVerifier
-            .create(
-                keyLock.tryLock(key, lockType),
-            ).expectNext(true)
-            .verifyComplete()
+        val expiredToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(expiredToken)
 
         // Wait for lock timeout + cleanup interval + buffer
         // lockTimeoutMillis = 3000ms, cleanup interval = 1000ms
         Thread.sleep(lockTimeoutMillis + 1000L + 500L) // 4.5 seconds total
 
-        StepVerifier
-            .create(
-                keyLock.tryLock(key, lockType),
-            ).expectNext(true)
-            .verifyComplete()
+        val newToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(newToken)
 
-        StepVerifier
-            .create(
-                keyLock.unLock(key, lockType),
-            ).expectNext(true)
-            .verifyComplete()
+        // The expired holder must not be able to release the lock of the new holder
+        StepVerifier.create(keyLock.unLock(key, lockType, expiredToken)).expectNext(false).verifyComplete()
+
+        StepVerifier.create(keyLock.unLock(key, lockType, newToken)).expectNext(true).verifyComplete()
     }
 
     @Test
@@ -197,31 +235,31 @@ class KeyLocalLockTest : BaseKeyLockTest {
         val lockType = LockType.CREATE
 
         // Acquire lock
-        StepVerifier.create(keyLock.tryLock(key, lockType))
-            .expectNext(true)
-            .verifyComplete()
+        val token = keyLock.tryLock(key, lockType).block()
+        assertNotNull(token)
 
         // First unlock should succeed
-        StepVerifier.create(keyLock.unLock(key, lockType))
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, token))
             .expectNext(true)
             .verifyComplete()
 
         // Second unlock should return false (over-release prevention)
-        StepVerifier.create(keyLock.unLock(key, lockType))
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, token))
             .expectNext(false)
             .verifyComplete()
 
         // Verify semaphore is not over-released: can acquire once, not twice
-        StepVerifier.create(keyLock.tryLock(key, lockType))
-            .expectNext(true)
-            .verifyComplete()
+        val reacquiredToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(reacquiredToken)
 
-        StepVerifier.create(keyLock.tryLock(key, lockType))
-            .expectNext(false)
+        StepVerifier
+            .create(keyLock.tryLock(key, lockType))
             .verifyComplete()
 
         // Cleanup
-        keyLock.unLock(key, lockType).subscribe()
+        keyLock.unLock(key, lockType, reacquiredToken).subscribe()
     }
 
     @Test
@@ -232,17 +270,18 @@ class KeyLocalLockTest : BaseKeyLockTest {
         val successfulAcquisitions = AtomicInteger(0)
 
         // Simulate over-release attempt
-        StepVerifier.create(keyLock.tryLock(key, lockType))
-            .expectNext(true)
-            .verifyComplete()
+        val token = keyLock.tryLock(key, lockType).block()
+        assertNotNull(token)
 
-        StepVerifier.create(keyLock.unLock(key, lockType))
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, token))
             .expectNext(true)
             .verifyComplete()
 
         // Multiple unlock attempts should all return false
         repeat(5) {
-            StepVerifier.create(keyLock.unLock(key, lockType))
+            StepVerifier
+                .create(keyLock.unLock(key, lockType, token))
                 .expectNext(false)
                 .verifyComplete()
         }
@@ -250,8 +289,10 @@ class KeyLocalLockTest : BaseKeyLockTest {
         // Try to acquire lock concurrently - only ONE should succeed
         val attempts =
             (1..10).map {
-                keyLock.tryLock(key, lockType)
-                    .map { acquired -> if (acquired) successfulAcquisitions.incrementAndGet() else 0 }
+                keyLock
+                    .tryLock(key, lockType)
+                    .map { successfulAcquisitions.incrementAndGet() }
+                    .defaultIfEmpty(0)
             }
 
         StepVerifier
@@ -261,9 +302,6 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         // Only one should have acquired the lock
         assertEquals(1, successfulAcquisitions.get(), "Only one should acquire the lock")
-
-        // Cleanup
-        keyLock.unLock(key, lockType).subscribe()
     }
 
     private fun doWork(): Mono<Unit> =

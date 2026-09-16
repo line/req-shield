@@ -21,10 +21,11 @@ The library is organized into several core modules:
 ### Key Components
 
 1. **ReqShield**: Main orchestrator that manages cache operations and request collapsing
-2. **KeyLock**: Locking mechanism (local or global) to prevent concurrent cache operations
+2. **KeyLock**: Locking mechanism (local or global) to prevent concurrent cache operations. `tryLock` returns an ownership token and `unLock` only releases when the token matches, so a slow holder cannot release someone else's lock
 3. **ReqShieldConfiguration**: Configuration object that defines cache functions, locking behavior, and timeouts
 4. **ReqShieldData**: Wrapper for cached data with metadata (creation time, TTL)
-5. **Spring Aspects**: AOP-based implementations that provide annotation-driven caching
+5. **Spring Aspects**: AOP-based implementations that provide annotation-driven caching. One `ReqShield` instance per annotated method; cache and lock keys are namespaced as `"{cacheName}::{key}"`; eviction happens after the method returns successfully
+6. **GlobalLockSupport**: Optional interface a cache bean implements to enable `isLocalLock = false` (Redis `SET NX PX` + compare-and-delete). Without it, `isLocalLock = false` fails fast
 
 ### Design Patterns
 
@@ -88,29 +89,31 @@ Contains shared:
 
 ### ReqShieldConfiguration Parameters
 - `isLocalLock`: Use local vs distributed locking (default: true)
+- `globalLockFunction` / `globalUnLockFunction`: `(lockKey, token, ttlMillis) -> Boolean` / `(lockKey, token) -> Boolean`, required when `isLocalLock = false`
+- `executor` (core) / `scheduler` (reactor) / `scope` (coroutine): where background cache writes run; defaults are shared, the Spring adapters expose them as `reqShieldExecutor` / `reqShieldScheduler` / `reqShieldCoroutineScope` beans
 - `lockTimeoutMillis`: Lock acquisition timeout (default: 3000ms)
 - `decisionForUpdate`: Percentage of TTL after which to trigger async cache refresh (default: 80)
-- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60)
+- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60, 50ms apart). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
 - `reqShieldWorkMode`: CREATE_AND_UPDATE_CACHE | ONLY_CREATE_CACHE | ONLY_UPDATE_CACHE
 
 ### Work Modes
 - **CREATE_AND_UPDATE_CACHE**: Full functionality (default)
-- **ONLY_CREATE_CACHE**: Never updates existing cache entries
-- **ONLY_UPDATE_CACHE**: Never creates new cache entries
+- **ONLY_CREATE_CACHE**: Request collapsing (lock) applies only when a cache entry is being created; refreshes of existing entries still happen but without a lock, so every request past the `decisionForUpdate` threshold may trigger a refresh
+- **ONLY_UPDATE_CACHE**: Request collapsing (lock) applies only when an existing entry is being refreshed; on a cache miss every request calls the supplier and writes the cache without a lock
 
 ## Testing Guidelines
 
 ### Test Infrastructure
 - Uses JUnit 5 platform
 - MockK for Kotlin mocking
-- Testcontainers for integration tests (Redis)
+- Testcontainers for integration tests (Redis); set `TEST_REDIS_HOST`/`TEST_REDIS_PORT` to use an external Redis instead (CI does this)
 - Awaitility for asynchronous testing
 - Separate test fixtures in `support` module
 
 ### Test Coverage Requirements
-- **Minimum test coverage**: 80% must be maintained across all modules
+- **Minimum test coverage**: 80% line coverage for every library module (example modules are exempt)
 - Coverage reports generated via `./gradlew jacocoTestReport`
-- Coverage enforced through Jacoco plugin configuration
+- Enforced by `jacocoTestCoverageVerification`, which runs as part of `./gradlew check` / `./gradlew build`
 
 ### Code Quality Requirements
 - **Lint validation**: All code must pass ktlint checks before completion

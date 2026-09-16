@@ -16,6 +16,7 @@
 
 package com.linecorp.cse.reqshield.reactor
 
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import org.slf4j.LoggerFactory
@@ -28,6 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
@@ -52,10 +55,20 @@ class KeyLocalLock(
          * check vs unLock, or monitor cleanup vs unLock).
          */
         val isHeld: AtomicBoolean = AtomicBoolean(false),
+        /**
+         * Ownership token of the current holder, null when the lock is not held.
+         * Only the holder that owns this token may release the lock, so a holder whose
+         * lock already expired cannot release the lock of the next holder.
+         */
+        @Volatile var token: String? = null,
     )
 
     companion object {
         private val lockMap = ConcurrentHashMap<String, LockInfo>()
+
+        // Monotonic counter backing the local ownership tokens. A counter is enough because
+        // the tokens never leave this JVM, and it is far cheaper than UUID generation.
+        private val tokenSequence = AtomicLong(0)
 
         @Volatile
         private var monitoringStarted: Boolean = false
@@ -63,8 +76,10 @@ class KeyLocalLock(
         @Volatile
         private var monitorDisposable: Disposable? = null
 
-        // Track consecutive failures for backoff logging
+        // Track consecutive failures for rate-limited logging
         private val consecutiveFailures = AtomicInteger(0)
+
+        private fun nextToken(): String = "local-${tokenSequence.incrementAndGet()}"
 
         private fun startMonitoringOnce() {
             if (monitoringStarted) return
@@ -73,7 +88,8 @@ class KeyLocalLock(
                 monitorDisposable =
                     Flux
                         .interval(Duration.ofMillis(LOCK_MONITOR_INTERVAL_MILLIS), Schedulers.single())
-                        .flatMap {
+                        // Concurrency of 1: a slow cleanup must not fan out into overlapping runs.
+                        .flatMap({
                             Mono
                                 .fromRunnable<Unit> {
                                     val now = System.currentTimeMillis()
@@ -93,6 +109,7 @@ class KeyLocalLock(
                                                 if (lockInfo.isHeld.compareAndSet(true, false)) {
                                                     lockInfo.semaphore.release()
                                                 }
+                                                lockInfo.token = null
                                                 null // Atomic removal
                                             } else {
                                                 lockInfo // Keep the entry
@@ -110,11 +127,9 @@ class KeyLocalLock(
                                             e.message,
                                         )
                                     }
-                                    // Backoff: delay on failure (max 5 seconds)
-                                    val backoffMs = minOf(failures * LOCK_MONITOR_INTERVAL_MILLIS, 5000L)
-                                    Mono.delay(Duration.ofMillis(backoffMs)).then(Mono.empty())
+                                    Mono.empty()
                                 }
-                        }.subscribe(
+                        }, 1).subscribe(
                             { /* success - no action needed */ },
                             { e -> log.error("Fatal error in lock lifecycle monitoring: {}", e.message, e) },
                         )
@@ -140,11 +155,12 @@ class KeyLocalLock(
     override fun tryLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean> =
+    ): Mono<String> =
         Mono.fromCallable {
-            val completeKey = "${key}_${lockType.name}"
+            val completeKey = completeKey(key, lockType)
             val now = nowToEpochTime()
-            val result = AtomicBoolean(false)
+            // Holds the token handed out by this attempt, or null when the lock could not be acquired.
+            val acquiredToken = AtomicReference<String?>(null)
 
             // Use compute() for atomic lock acquisition.
             // This ensures mutual exclusion with cleanup - they cannot race on the same key.
@@ -156,42 +172,62 @@ class KeyLocalLock(
                     // both threads would call release(), causing over-release (permits > 1).
                     if (now > existing.expiresAt && existing.isHeld.compareAndSet(true, false)) {
                         existing.semaphore.release()
+                        // The previous holder lost ownership: its token must no longer release the lock.
+                        existing.token = null
                     }
 
                     // Existing entry: try to acquire semaphore
                     if (existing.semaphore.tryAcquire()) {
+                        val token = nextToken()
                         existing.isHeld.set(true)
                         existing.expiresAt = now + lockTimeoutMillis
-                        result.set(true)
+                        existing.token = token
+                        acquiredToken.set(token)
                     }
                     existing
                 } else {
                     // New entry: create and acquire
+                    val token = nextToken()
                     val newLock = LockInfo(Semaphore(1), now + lockTimeoutMillis)
                     newLock.semaphore.tryAcquire() // Always succeeds for new semaphore
                     newLock.isHeld.set(true)
-                    result.set(true)
+                    newLock.token = token
+                    acquiredToken.set(token)
                     newLock
                 }
             }
-            result.get()
+            // Mono.fromCallable completes empty on a null result, which signals "not acquired".
+            acquiredToken.get()
         }
 
     override fun unLock(
         key: String,
         lockType: LockType,
+        token: String,
     ): Mono<Boolean> =
         Mono.fromCallable {
-            val completeKey = "${key}_${lockType.name}"
-            val lockInfo = lockMap[completeKey] ?: return@fromCallable false
+            val completeKey = completeKey(key, lockType)
+            val released = AtomicBoolean(false)
 
-            // Use CAS to prevent over-release: only release if we actually hold the lock
-            if (lockInfo.isHeld.compareAndSet(true, false)) {
-                lockInfo.semaphore.release()
-                true
-            } else {
-                log.debug("Attempted to unlock key '{}' that is not held", completeKey)
-                false
+            // Release inside compute() so that it is atomic with acquisition and cleanup:
+            // no other thread can reacquire this key while the ownership check runs.
+            lockMap.compute(completeKey) { _, existing ->
+                if (existing == null) return@compute null
+
+                if (existing.token == token && existing.isHeld.compareAndSet(true, false)) {
+                    existing.semaphore.release()
+                    existing.token = null
+                    released.set(true)
+                } else {
+                    log.debug("Attempted to unlock key '{}' without holding its current token", completeKey)
+                }
+                existing // Keep the entry
             }
+            released.get()
         }
+
+    private fun completeKey(
+        key: String,
+        lockType: LockType,
+    ): String = "$LOCK_KEY_PREFIX${key}_${lockType.name}"
 }

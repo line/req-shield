@@ -17,15 +17,19 @@
 package com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.aspect
 
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
+import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Semaphore
 
-class InMemoryAsyncCache<T> : AsyncCache<T> {
+class InMemoryAsyncCache<T> :
+    AsyncCache<T>,
+    GlobalLockSupport {
     private data class Entry<T>(val data: ReqShieldData<T>, val expiresAt: Long)
 
+    private data class Lock(val token: String, val expiresAt: Long)
+
     private val store = ConcurrentHashMap<String, Entry<T>>()
-    private val locks = ConcurrentHashMap<String, Semaphore>()
+    private val locks = ConcurrentHashMap<String, Lock>()
 
     override suspend fun get(key: String): ReqShieldData<T>? {
         val now = System.currentTimeMillis()
@@ -44,13 +48,40 @@ class InMemoryAsyncCache<T> : AsyncCache<T> {
 
     override suspend fun evict(key: String): Boolean = store.remove(key) != null
 
+    /** In-memory equivalent of `SET lockKey token NX PX ttl`: the stored token identifies the owner. */
     override suspend fun globalLock(
-        key: String,
+        lockKey: String,
+        token: String,
         timeToLiveMillis: Long,
-    ): Boolean = locks.computeIfAbsent(key) { Semaphore(1) }.tryAcquire()
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val owner =
+            locks.compute(lockKey) { _, current ->
+                if (current == null || now > current.expiresAt) {
+                    Lock(token, now + timeToLiveMillis)
+                } else {
+                    current
+                }
+            }
 
-    override suspend fun globalUnLock(key: String): Boolean {
-        locks[key]?.release()
-        return true
+        return owner?.token == token
+    }
+
+    /** In-memory equivalent of the compare-and-delete script: a stale owner cannot release the lock. */
+    override suspend fun globalUnLock(
+        lockKey: String,
+        token: String,
+    ): Boolean {
+        var released = false
+        locks.compute(lockKey) { _, current ->
+            if (current?.token == token) {
+                released = true
+                null
+            } else {
+                current
+            }
+        }
+
+        return released
     }
 }

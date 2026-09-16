@@ -20,9 +20,13 @@ import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.config.LibAutoConfiguration
+import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Bean
@@ -32,7 +36,10 @@ import org.springframework.test.context.junit.jupiter.SpringExtension
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
+import reactor.test.StepVerifier
 import java.util.concurrent.atomic.AtomicInteger
+
+private const val INTEGRATION_CACHE_NAME = "it"
 
 @ExtendWith(SpringExtension::class)
 @ContextConfiguration(classes = [LibAutoConfiguration::class, ReqShieldAspectIntegrationTest.TestConfig::class])
@@ -40,9 +47,29 @@ class ReqShieldAspectIntegrationTest {
     @Autowired
     private lateinit var service: TestService
 
+    @Autowired
+    private lateinit var asyncCache: AsyncCache<String>
+
+    private fun cacheKey(key: String) = "$INTEGRATION_CACHE_NAME::$key"
+
+    /** ReqShield writes the cache asynchronously, so a test that needs the entry has to wait for it. */
+    private fun awaitCachePut(
+        key: String,
+        timeoutMillis: Long = 2_000,
+    ): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMillis) {
+            if (asyncCache.get(key).block() != null) {
+                return true
+            }
+            Thread.sleep(10)
+        }
+        return false
+    }
+
     @Test
     fun shouldCollapseDuplicateRequests() {
-        val key = "dup"
+        val key = "dup-${System.nanoTime()}"
         val attempts = 20
 
         val result =
@@ -59,8 +86,10 @@ class ReqShieldAspectIntegrationTest {
 
     @Test
     fun shouldEvictAndRecompute() {
-        val key = "evict"
+        val key = "evict-${System.nanoTime()}"
         val v1 = service.get(key).block()
+        assertTrue(awaitCachePut(cacheKey(key)), "Timed out waiting for cache put for key=${cacheKey(key)}")
+
         val evicted = service.evict(key).block()
         val v2 = service.get(key).block()
 
@@ -68,6 +97,45 @@ class ReqShieldAspectIntegrationTest {
         assertTrue(v1 != null)
         assertTrue(v2 != null)
         assertTrue(v1 != v2)
+    }
+
+    @Test
+    fun shouldEvictAfterAMethodThatCompletesEmpty() {
+        val key = "evict-void-${System.nanoTime()}"
+        asyncCache.put(cacheKey(key), ReqShieldData("cached", 10_000), 10_000).block()
+
+        StepVerifier
+            .create(service.evictWithoutResult(key))
+            .verifyComplete()
+
+        assertEquals(1, service.getEmptyEvictCount(), "The annotated method must still run")
+        assertNull(asyncCache.get(cacheKey(key)).block(), "An empty completion is a success, so it evicts")
+    }
+
+    @Test
+    fun shouldNotEvictWhenTheAnnotatedMethodFails() {
+        val key = "evict-fail-${System.nanoTime()}"
+        asyncCache.put(cacheKey(key), ReqShieldData("cached", 10_000), 10_000).block()
+
+        assertThrows<IllegalStateException> { service.evictFailing(key).block() }
+
+        assertNotNull(asyncCache.get(cacheKey(key)).block(), "A failed method must leave the cache untouched")
+    }
+
+    @Test
+    fun shouldCollapseDuplicateRequestsWithGlobalLock() {
+        val key = "dup-global-${System.nanoTime()}"
+        val attempts = 20
+
+        val result =
+            Flux
+                .range(1, attempts)
+                .flatMap { service.getWithGlobalLock(key).subscribeOn(Schedulers.boundedElastic()) }
+                .collectList()
+                .block()!!
+
+        assertEquals(attempts, result.size)
+        assertEquals(1, service.getGlobalLockCount(), "The backend should be called once")
     }
 
     @Configuration
@@ -80,12 +148,69 @@ class ReqShieldAspectIntegrationTest {
     }
 
     open class TestService {
-        val counter = AtomicInteger(0)
+        private val counter = AtomicInteger(0)
+        private val globalLockCounter = AtomicInteger(0)
+        private val emptyEvictCounter = AtomicInteger(0)
 
-        @ReqShieldCacheable(cacheName = "it", key = "#key", timeToLiveMillis = 10_000)
+        // Read through open methods: a CGLIB proxy cannot delegate the final getter of a Kotlin property.
+        open fun getGlobalLockCount(): Int = globalLockCounter.get()
+
+        open fun getEmptyEvictCount(): Int = emptyEvictCounter.get()
+
+        @ReqShieldCacheable(cacheName = INTEGRATION_CACHE_NAME, key = "#key", timeToLiveMillis = 10_000)
         open fun get(key: String): Mono<String> = Mono.fromCallable { "value-" + counter.incrementAndGet() }
 
-        @ReqShieldCacheEvict(cacheName = "it", key = "#key")
+        @ReqShieldCacheable(cacheName = INTEGRATION_CACHE_NAME, key = "#key", timeToLiveMillis = 10_000, isLocalLock = false)
+        open fun getWithGlobalLock(key: String): Mono<String> = Mono.fromCallable { "value-" + globalLockCounter.incrementAndGet() }
+
+        @ReqShieldCacheEvict(cacheName = INTEGRATION_CACHE_NAME, key = "#key")
         open fun evict(key: String): Mono<Boolean> = Mono.just(true)
+
+        @ReqShieldCacheEvict(cacheName = INTEGRATION_CACHE_NAME, key = "#key")
+        open fun evictWithoutResult(key: String): Mono<Void> = Mono.fromRunnable { emptyEvictCounter.incrementAndGet() }
+
+        @ReqShieldCacheEvict(cacheName = INTEGRATION_CACHE_NAME, key = "#key")
+        open fun evictFailing(key: String): Mono<Boolean> = Mono.error(IllegalStateException("eviction must not happen"))
+    }
+}
+
+/**
+ * `isLocalLock = false` needs its own context: the cache bean here deliberately does not implement
+ * [com.linecorp.cse.reqshield.spring.webflux.cache.GlobalLockSupport].
+ */
+@ExtendWith(SpringExtension::class)
+@ContextConfiguration(classes = [LibAutoConfiguration::class, ReqShieldAspectWithoutGlobalLockSupportTest.TestConfig::class])
+class ReqShieldAspectWithoutGlobalLockSupportTest {
+    @Autowired
+    private lateinit var service: TestService
+
+    @Test
+    fun globalLockWithoutGlobalLockSupportFailsOnTheFirstCall() {
+        val exception = assertThrows<IllegalArgumentException> { service.getWithGlobalLock("key").block() }
+
+        assertTrue(
+            exception.message!!.contains("requires the AsyncCache bean to implement GlobalLockSupport"),
+            "Unexpected message: ${exception.message}",
+        )
+        assertEquals(0, service.getCallCount(), "The backend must not be called")
+    }
+
+    @Configuration
+    open class TestConfig {
+        @Bean
+        open fun asyncCache(): AsyncCache<String> = LocalOnlyAsyncCache()
+
+        @Bean
+        open fun service(): TestService = TestService()
+    }
+
+    open class TestService {
+        private val counter = AtomicInteger(0)
+
+        // Read through an open method: a CGLIB proxy cannot delegate the final getter of a Kotlin property.
+        open fun getCallCount(): Int = counter.get()
+
+        @ReqShieldCacheable(cacheName = INTEGRATION_CACHE_NAME, key = "#key", isLocalLock = false)
+        open fun getWithGlobalLock(key: String): Mono<String> = Mono.fromCallable { "value-" + counter.incrementAndGet() }
     }
 }

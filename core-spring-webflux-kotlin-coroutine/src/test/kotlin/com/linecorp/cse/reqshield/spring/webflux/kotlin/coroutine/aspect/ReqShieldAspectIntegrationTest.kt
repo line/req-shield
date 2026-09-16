@@ -20,22 +20,29 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.config.LibAutoConfiguration
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.test.context.ContextConfiguration
 import org.springframework.test.context.junit.jupiter.SpringExtension
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertFailsWith
 
 @ExtendWith(SpringExtension::class)
 @ContextConfiguration(classes = [LibAutoConfiguration::class, ReqShieldAspectIntegrationTest.TestConfig::class])
@@ -46,12 +53,18 @@ class ReqShieldAspectIntegrationTest {
     @Autowired
     private lateinit var asyncCache: AsyncCache<String>
 
+    @Autowired
+    private lateinit var reqShieldCoroutineScope: CoroutineScope
+
+    /** The aspect namespaces every key with the cache name of the annotation. */
+    private fun cacheKeyOf(key: String) = "$CACHE_NAME::$key"
+
     private suspend fun awaitCachePut(
         key: String,
         timeoutMillis: Long = 1_000,
     ): Boolean =
         withTimeoutOrNull(timeoutMillis) {
-            while (asyncCache.get(key) == null) {
+            while (asyncCache.get(cacheKeyOf(key)) == null) {
                 delay(5)
             }
             true
@@ -84,6 +97,56 @@ class ReqShieldAspectIntegrationTest {
             assertTrue(v1 != v2)
         }
 
+    @Test
+    fun shouldEvictOnlyAfterTheAnnotatedMethodSucceeds() =
+        runBlocking {
+            val key = "evict-success-${System.nanoTime()}"
+            service.get(key)
+            assertTrue(awaitCachePut(key), "Timed out waiting for cache put for key=$key")
+
+            assertTrue(service.evict(key))
+
+            assertNull(asyncCache.get(cacheKeyOf(key)))
+        }
+
+    @Test
+    fun shouldKeepTheCacheWhenTheAnnotatedMethodThrows() =
+        runBlocking {
+            val key = "evict-failure-${System.nanoTime()}"
+            service.get(key)
+            assertTrue(awaitCachePut(key), "Timed out waiting for cache put for key=$key")
+
+            assertFailsWith<IllegalStateException> { service.evictFailing(key) }
+
+            assertNotNull(asyncCache.get(cacheKeyOf(key)))
+        }
+
+    @Test
+    fun shouldExposeTheCacheKeyUnderTheCacheNameNamespace() =
+        runBlocking {
+            val key = "namespace-${System.nanoTime()}"
+            service.get(key)
+            assertTrue(awaitCachePut(key), "Timed out waiting for cache put for key=$key")
+
+            // The bare key must never be used: only the namespaced one carries the entry.
+            assertNull(asyncCache.get(key))
+            assertNotNull(asyncCache.get(cacheKeyOf(key)))
+        }
+
+    @Test
+    fun shouldWireTheCoroutineScopeBeanAndCancelItOnShutdown() {
+        // The autowired bean proves LibAutoConfiguration alone provides the scope (no component scan).
+        assertFalse(reqShieldCoroutineScope.coroutineContext[Job]!!.isCancelled)
+
+        val context = AnnotationConfigApplicationContext(LibAutoConfiguration::class.java, TestConfig::class.java)
+        val scope = context.getBean("reqShieldCoroutineScope", CoroutineScope::class.java)
+        assertFalse(scope.coroutineContext[Job]!!.isCancelled)
+
+        context.close()
+
+        assertTrue(scope.coroutineContext[Job]?.isCancelled == true)
+    }
+
     @Configuration
     open class TestConfig {
         @Bean
@@ -96,10 +159,17 @@ class ReqShieldAspectIntegrationTest {
     open class TestService {
         val counter = AtomicInteger(0)
 
-        @ReqShieldCacheable(cacheName = "it", key = "#key", timeToLiveMillis = 10_000)
+        @ReqShieldCacheable(cacheName = CACHE_NAME, key = "#key", timeToLiveMillis = 10_000)
         open suspend fun get(key: String): String = "value-" + counter.incrementAndGet()
 
-        @ReqShieldCacheEvict(cacheName = "it", key = "#key")
+        @ReqShieldCacheEvict(cacheName = CACHE_NAME, key = "#key")
         open suspend fun evict(key: String): Boolean = true
+
+        @ReqShieldCacheEvict(cacheName = CACHE_NAME, key = "#key")
+        open suspend fun evictFailing(key: String): Boolean = throw IllegalStateException("eviction target failed: $key")
+    }
+
+    companion object {
+        const val CACHE_NAME = "it"
     }
 }

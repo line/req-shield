@@ -19,8 +19,11 @@ package com.linecorp.cse.reqshield.reactor
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import io.lettuce.core.RedisClient
+import io.lettuce.core.ScriptOutputType
+import io.lettuce.core.SetArgs
 import io.lettuce.core.api.async.RedisAsyncCommands
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -29,14 +32,14 @@ import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.Ignore
+import kotlin.test.assertNotNull
 
 class KeyGlobalLockTest :
     AbstractRedisTest(),
     BaseKeyLockTest {
     private lateinit var redisCommands: RedisAsyncCommands<String, String>
-    private lateinit var globalLockFunc: (String, Long) -> Mono<Boolean>
-    private lateinit var globalUnLockFunc: (String) -> Mono<Boolean>
+    private lateinit var globalLockFunc: (String, String, Long) -> Mono<Boolean>
+    private lateinit var globalUnLockFunc: (String, String) -> Mono<Boolean>
 
     @BeforeEach
     fun init() {
@@ -50,12 +53,23 @@ class KeyGlobalLockTest :
         // Clean up all keys from previous tests for proper test isolation
         connection.sync().flushdb()
 
-        globalLockFunc = { key, timeToLiveMillis ->
-            Mono.fromFuture { redisCommands.setnx(key, key).toCompletableFuture() }
+        // Recommended lock implementation: the token is stored as the value so that
+        // ownership can be checked on release, and PX makes the lock self-expiring.
+        globalLockFunc = { lockKey, token, ttlMillis ->
+            Mono
+                .fromFuture {
+                    redisCommands.set(lockKey, token, SetArgs.Builder.nx().px(ttlMillis)).toCompletableFuture()
+                }.map { it == "OK" }
         }
 
-        globalUnLockFunc = { key ->
-            Mono.fromFuture { redisCommands.del(key).toCompletableFuture() }.map { true }
+        // Compare-and-delete: only the owner of the stored token may release the lock.
+        globalUnLockFunc = { lockKey, token ->
+            Mono
+                .fromFuture {
+                    redisCommands
+                        .eval<Long>(UNLOCK_SCRIPT, ScriptOutputType.INTEGER, arrayOf(lockKey), token)
+                        .toCompletableFuture()
+                }.map { it == 1L }
         }
     }
 
@@ -72,13 +86,12 @@ class KeyGlobalLockTest :
                 tasksCompletedCount.incrementAndGet()
                 keyLock
                     .tryLock(key, lockType)
-                    .filter { it }
-                    .flatMap {
+                    .flatMap { token ->
                         lockAcquiredCount.incrementAndGet()
                         doWork()
                             .publishOn(Schedulers.boundedElastic())
                             .doFinally { _ ->
-                                keyLock.unLock(key, lockType).subscribe()
+                                keyLock.unLock(key, lockType, token).subscribe()
                             }
                     }.onErrorResume { Mono.just(Unit) }
             }
@@ -97,7 +110,7 @@ class KeyGlobalLockTest :
                 Mono
                     .delay(Duration.ofMillis(100))
                     .then(keyLock.tryLock(key, lockType)),
-            ).expectNext(true)
+            ).expectNextCount(1)
             .verifyComplete()
     }
 
@@ -114,13 +127,12 @@ class KeyGlobalLockTest :
                 val key = if (i % 2 == 0) "myKey1" else "myKey2"
                 keyLock
                     .tryLock(key, lockType)
-                    .filter { it }
-                    .flatMap {
+                    .flatMap { token ->
                         lockAcquiredCount.incrementAndGet()
                         doWork()
                             .publishOn(Schedulers.boundedElastic())
                             .doFinally { _ ->
-                                keyLock.unLock(key, lockType).subscribe()
+                                keyLock.unLock(key, lockType, token).subscribe()
                             }
                     }.onErrorResume { Mono.just(Unit) }
             }
@@ -139,7 +151,7 @@ class KeyGlobalLockTest :
                 Mono
                     .delay(Duration.ofMillis(100))
                     .then(keyLock.tryLock("myKey1", lockType)),
-            ).expectNext(true)
+            ).expectNextCount(1)
             .verifyComplete()
 
         StepVerifier
@@ -147,14 +159,40 @@ class KeyGlobalLockTest :
                 Mono
                     .delay(Duration.ofMillis(100))
                     .then(keyLock.tryLock("myKey2", lockType)),
-            ).expectNext(true)
+            ).expectNextCount(1)
             .verifyComplete()
     }
 
     @Test
-    @Ignore
     override fun testLockExpiration() {
-        // Global locks do not have an expiration
+        val shortTimeoutMillis = 500L
+        val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, shortTimeoutMillis)
+        val key = "expirationKey"
+        val lockType = LockType.CREATE
+
+        val expiredToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(expiredToken)
+
+        // While the lock is held, nobody else can acquire it
+        StepVerifier.create(keyLock.tryLock(key, lockType)).verifyComplete()
+
+        // Wait for the Redis key TTL to elapse
+        Thread.sleep(shortTimeoutMillis + 300L)
+
+        val newToken = keyLock.tryLock(key, lockType).block()
+        assertNotNull(newToken)
+        assertNotEquals(expiredToken, newToken)
+
+        // The expired holder must not release the lock that now belongs to someone else
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, expiredToken))
+            .expectNext(false)
+            .verifyComplete()
+
+        StepVerifier
+            .create(keyLock.unLock(key, lockType, newToken))
+            .expectNext(true)
+            .verifyComplete()
     }
 
     private fun doWork(): Mono<Unit> =
@@ -162,4 +200,9 @@ class KeyGlobalLockTest :
             .delay(Duration.ofSeconds(1))
             .then(Mono.just(Unit))
             .subscribeOn(Schedulers.boundedElastic())
+
+    companion object {
+        private const val UNLOCK_SCRIPT =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+    }
 }

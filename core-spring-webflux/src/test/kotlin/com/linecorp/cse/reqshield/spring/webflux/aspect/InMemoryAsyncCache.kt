@@ -17,16 +17,24 @@
 package com.linecorp.cse.reqshield.spring.webflux.aspect
 
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
+import com.linecorp.cse.reqshield.spring.webflux.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import reactor.core.publisher.Mono
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Semaphore
 
-class InMemoryAsyncCache<T> : AsyncCache<T> {
+/**
+ * In-memory stand-in for a distributed cache, with the same token semantics a Redis
+ * implementation has: `SET NX PX` on lock and compare-and-delete on unlock.
+ */
+class InMemoryAsyncCache<T> :
+    AsyncCache<T>,
+    GlobalLockSupport {
     private data class Entry<T>(val data: ReqShieldData<T>, val expiresAt: Long)
 
+    private data class Lock(val token: String, val expiresAt: Long)
+
     private val store = ConcurrentHashMap<String, Entry<T>>()
-    private val locks = ConcurrentHashMap<String, Semaphore>()
+    private val locks = ConcurrentHashMap<String, Lock>()
 
     override fun get(key: String): Mono<ReqShieldData<T>?> =
         Mono.fromCallable {
@@ -48,16 +56,39 @@ class InMemoryAsyncCache<T> : AsyncCache<T> {
     override fun evict(key: String): Mono<Boolean> = Mono.fromCallable { store.remove(key) != null }
 
     override fun globalLock(
-        key: String,
+        lockKey: String,
+        token: String,
         timeToLiveMillis: Long,
     ): Mono<Boolean> =
         Mono.fromCallable {
-            locks.computeIfAbsent(key) { Semaphore(1) }.tryAcquire()
+            val now = System.currentTimeMillis()
+            // SET NX PX: only a key without a live lock can be taken, and the owner is remembered.
+            val holder =
+                locks.compute(lockKey) { _, current ->
+                    if (current == null || now > current.expiresAt) {
+                        Lock(token, now + timeToLiveMillis)
+                    } else {
+                        current
+                    }
+                }!!
+            holder.token == token
         }
 
-    override fun globalUnLock(key: String): Mono<Boolean> =
+    override fun globalUnLock(
+        lockKey: String,
+        token: String,
+    ): Mono<Boolean> =
         Mono.fromCallable {
-            locks[key]?.release()
-            true
+            var released = false
+            // Compare-and-delete: an owner whose lock already expired must not release the next owner's lock.
+            locks.compute(lockKey) { _, current ->
+                if (current != null && current.token == token) {
+                    released = true
+                    null
+                } else {
+                    current
+                }
+            }
+            released
         }
 }

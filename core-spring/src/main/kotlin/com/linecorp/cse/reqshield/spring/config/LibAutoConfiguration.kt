@@ -16,11 +16,36 @@
 
 package com.linecorp.cse.reqshield.spring.config
 
-import org.springframework.context.annotation.ComponentScan
+import com.linecorp.cse.reqshield.spring.aspect.ReqShieldAspect
+import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
+import org.springframework.context.annotation.Import
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.atomic.AtomicLong
 
 @Configuration
 @EnableAspectJAutoProxy
-@ComponentScan(basePackages = ["com.linecorp.cse"])
-open class LibAutoConfiguration
+@Import(ReqShieldAspect::class)
+open class LibAutoConfiguration {
+    /**
+     * Pool shared by every [com.linecorp.cse.reqshield.ReqShield] the aspect creates, used for the
+     * asynchronous cache writes and for polling the cache while another request holds the lock.
+     *
+     * Spring's inferred destroy method calls [ScheduledExecutorService.shutdown] when the context is
+     * closed; the threads are daemons anyway so a pending task can never block JVM shutdown.
+     */
+    @Bean
+    open fun reqShieldExecutor(): ScheduledExecutorService {
+        val threadCounter = AtomicLong(0)
+
+        return Executors.newScheduledThreadPool(
+            maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
+        ) { runnable ->
+            Thread(runnable, "req-shield-executor-${threadCounter.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+    }
+}

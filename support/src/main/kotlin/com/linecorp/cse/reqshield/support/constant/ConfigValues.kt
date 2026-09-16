@@ -19,12 +19,19 @@ package com.linecorp.cse.reqshield.support.constant
 object ConfigValues {
     const val DEFAULT_LOCK_TIMEOUT_MILLIS = 3000L
     const val DEFAULT_DECISION_FOR_UPDATE = 80
+    const val DEFAULT_TIME_TO_LIVE_MILLIS = 10 * 60 * 1000L
 
     const val LOCK_MONITOR_INTERVAL_MILLIS = 1000L
 
     const val MAX_ATTEMPT_GET_CACHE = 60
     const val GET_CACHE_INTERVAL_MILLIS = 50L
 
-    const val MAX_ATTEMPT_SET_CACHE = 3
-    const val SET_CACHE_RETRY_INTERVAL_MILLIS = 100L
+    /**
+     * While waiting for another request to fill the cache, this many consecutive cache-read
+     * failures are treated as a cache outage and the waiter falls back to the supplier at once.
+     */
+    const val MAX_CONSECUTIVE_GET_CACHE_FAILURES = 3
+
+    /** Prefix applied to every lock key so lock entries can never collide with cache entries. */
+    const val LOCK_KEY_PREFIX = "reqshield:lock:"
 }

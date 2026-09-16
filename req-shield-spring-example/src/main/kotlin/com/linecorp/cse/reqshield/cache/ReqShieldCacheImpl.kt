@@ -16,9 +16,11 @@
 
 package com.linecorp.cse.reqshield.cache
 
+import com.linecorp.cse.reqshield.spring.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import org.springframework.data.redis.core.RedisTemplate
+import org.springframework.data.redis.core.script.DefaultRedisScript
 import org.springframework.stereotype.Service
 import java.time.Duration
 
@@ -26,7 +28,8 @@ import java.time.Duration
 class ReqShieldCacheImpl<T>(
     private val redisTemplate: RedisTemplate<String, ReqShieldData<T>>,
     private val redisTemplateForGlobalLock: RedisTemplate<String, String>,
-) : ReqShieldCache<T> {
+) : ReqShieldCache<T>,
+    GlobalLockSupport {
     override fun get(key: String): ReqShieldData<T>? = redisTemplate.opsForValue()[key]
 
     override fun put(
@@ -38,9 +41,22 @@ class ReqShieldCacheImpl<T>(
     override fun evict(key: String): Boolean? = redisTemplate.delete(key)
 
     override fun globalLock(
-        key: String,
+        lockKey: String,
+        token: String,
         timeToLiveMillis: Long,
-    ): Boolean = redisTemplateForGlobalLock.opsForValue().setIfAbsent(key, key, Duration.ofMillis(timeToLiveMillis)) ?: false
+    ): Boolean = redisTemplateForGlobalLock.opsForValue().setIfAbsent(lockKey, token, Duration.ofMillis(timeToLiveMillis)) ?: false
 
-    override fun globalUnLock(key: String): Boolean = redisTemplateForGlobalLock.delete(key)
+    override fun globalUnLock(
+        lockKey: String,
+        token: String,
+    ): Boolean = redisTemplateForGlobalLock.execute(UN_LOCK_SCRIPT, listOf(lockKey), token) == 1L
+
+    companion object {
+        /** Compare-and-delete, so an expired holder cannot release the lock of the next holder. */
+        private val UN_LOCK_SCRIPT =
+            DefaultRedisScript(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+                Long::class.javaObjectType,
+            )
+    }
 }
