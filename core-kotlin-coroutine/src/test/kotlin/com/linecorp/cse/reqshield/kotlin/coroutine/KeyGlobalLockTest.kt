@@ -19,6 +19,8 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import io.lettuce.core.RedisClient
+import io.lettuce.core.ScriptOutputType
+import io.lettuce.core.SetArgs
 import io.lettuce.core.api.async.RedisAsyncCommands
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -28,18 +30,27 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.Ignore
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+
+/**
+ * Releases the lock only when the stored value still equals the token presented by the caller.
+ * This is the compare-and-delete the global unlock function is documented to implement.
+ */
+private const val UNLOCK_SCRIPT =
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
 class KeyGlobalLockTest :
     AbstractRedisTest(),
     BaseKeyLockTest {
     private lateinit var redisCommands: RedisAsyncCommands<String, String>
-    private lateinit var globalLockFunc: suspend (String, Long) -> Boolean
-    private lateinit var globalUnLockFunc: suspend (String) -> Boolean
+    private lateinit var globalLockFunc: suspend (String, String, Long) -> Boolean
+    private lateinit var globalUnLockFunc: suspend (String, String) -> Boolean
 
     @BeforeEach
     fun init() {
@@ -53,13 +64,18 @@ class KeyGlobalLockTest :
         // Clean up all keys from previous tests for proper test isolation
         connection.sync().flushdb()
 
-        globalLockFunc = { key, timeToLiveMillis ->
-            redisCommands.setnx(key, key).toCompletableFuture().await()
+        globalLockFunc = { key, token, lockTimeoutMillis ->
+            redisCommands
+                .set(key, token, SetArgs.Builder.nx().px(lockTimeoutMillis))
+                .toCompletableFuture()
+                .await() == "OK"
         }
 
-        globalUnLockFunc = { key ->
-            redisCommands.del(key).toCompletableFuture().await()
-            true
+        globalUnLockFunc = { key, token ->
+            redisCommands
+                .eval<Long>(UNLOCK_SCRIPT, ScriptOutputType.INTEGER, arrayOf(key), token)
+                .toCompletableFuture()
+                .await() == 1L
         }
     }
 
@@ -76,7 +92,8 @@ class KeyGlobalLockTest :
                 List(20) {
                     launch {
                         withContext(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
+                            val token = keyLock.tryLock(key, lockType)
+                            if (token != null) {
                                 try {
                                     println("${Thread.currentThread().name} acquired the lock")
                                     lockAcquiredCount.incrementAndGet()
@@ -84,7 +101,7 @@ class KeyGlobalLockTest :
                                 } catch (e: InterruptedException) {
                                     e.printStackTrace()
                                 } finally {
-                                    keyLock.unLock(key, lockType)
+                                    assertTrue(keyLock.unLock(key, lockType, token))
                                     println("${Thread.currentThread().name} released the lock")
                                 }
                             } else {
@@ -101,7 +118,7 @@ class KeyGlobalLockTest :
 
             delay(100)
 
-            assertTrue(keyLock.tryLock(key, lockType))
+            assertTrue(keyLock.tryLock(key, lockType) != null, "The lock must be free again")
         }
 
     @Test
@@ -117,7 +134,8 @@ class KeyGlobalLockTest :
                     val key = if (i % 2 == 0) "myKey1" else "myKey2"
                     launch {
                         withContext(Dispatchers.IO) {
-                            if (keyLock.tryLock(key, lockType)) {
+                            val token = keyLock.tryLock(key, lockType)
+                            if (token != null) {
                                 try {
                                     println("${Thread.currentThread().name} acquired the lock")
                                     lockAcquiredCount.incrementAndGet()
@@ -125,7 +143,7 @@ class KeyGlobalLockTest :
                                 } catch (e: InterruptedException) {
                                     e.printStackTrace()
                                 } finally {
-                                    keyLock.unLock(key, lockType)
+                                    assertTrue(keyLock.unLock(key, lockType, token))
                                     println("${Thread.currentThread().name} released the lock")
                                 }
                             } else {
@@ -141,15 +159,34 @@ class KeyGlobalLockTest :
 
             delay(100)
 
-            assertTrue(keyLock.tryLock("myKey1", lockType))
-            assertTrue(keyLock.tryLock("myKey2", lockType))
+            assertTrue(keyLock.tryLock("myKey1", lockType) != null)
+            assertTrue(keyLock.tryLock("myKey2", lockType) != null)
         }
 
     @Test
-    @Ignore
     override fun testLockExpiration() =
         runBlocking {
-            // Global locks do not have an expiration
+            // The lock is written with `SET ... NX PX lockTimeoutMillis`, so Redis expires it for us.
+            val shortLockTimeout = 300L
+            val keyLock = KeyGlobalLock(globalLockFunc, globalUnLockFunc, shortLockTimeout)
+            val key = "expiring-key"
+            val lockType = LockType.CREATE
+
+            val expiredToken = keyLock.tryLock(key, lockType)
+            assertNotNull(expiredToken)
+            assertNull(keyLock.tryLock(key, lockType), "The lock must stay held until it expires")
+
+            delay(shortLockTimeout + 200L)
+
+            val newToken = keyLock.tryLock(key, lockType)
+            assertNotNull(newToken, "The lock must be reacquirable once it expired")
+
+            // The previous owner must not be able to release the lock of the new owner.
+            assertFalse(keyLock.unLock(key, lockType, expiredToken))
+            assertNull(keyLock.tryLock(key, lockType), "The new owner must still hold the lock")
+
+            assertTrue(keyLock.unLock(key, lockType, newToken))
+            assertTrue(keyLock.tryLock(key, lockType) != null, "The released lock must be acquirable again")
         }
 
     private suspend fun doWork() = delay(100)

@@ -53,10 +53,9 @@ class RedisConfiguration {
     @Bean("redisOperationsForGlobalLock")
     fun reactiveRedisOperationsForGlobalLock(factory: ReactiveRedisConnectionFactory): ReactiveRedisOperations<String, String> {
         val keySerializer = StringRedisSerializer()
-        val valueSerializer =
-            Jackson2JsonRedisSerializer(String::class.java).apply {
-                setObjectMapper(objectMapper())
-            }
+        // The lock token has to be stored as a plain string: the compare-and-delete Lua script
+        // compares the stored value with the raw token it receives as a script argument.
+        val valueSerializer = StringRedisSerializer()
         val serializationContext =
             RedisSerializationContext
                 .newSerializationContext<String, String>(keySerializer)

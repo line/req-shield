@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
@@ -26,9 +27,12 @@ import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
@@ -61,27 +65,21 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ) {
         val lockType = LockType.UPDATE
+        val onlyCreateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE
 
-        fun executeAsyncTask() {
+        // ONLY_CREATE_CACHE collapses requests on cache creation only, so the update runs without a lock
+        val token = if (onlyCreateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
+
+        if (onlyCreateCache || token != null) {
             CompletableFuture.runAsync({
                 val reqShieldData =
                     buildReqShieldData(
-                        executeCallable({ callable.call() }, true, key, lockType),
+                        executeCallable(callable, key, lockType, token),
                         timeToLiveMillis,
                     )
-                setReqShieldData(
-                    reqShieldConfig.setCacheFunction,
-                    key,
-                    reqShieldData,
-                    lockType,
-                )
+                executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
             }, reqShieldConfig.executor)
-        }
-
-        if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE ||
-            reqShieldConfig.keyLock.tryLock(key, lockType)
-        ) {
-            return executeAsyncTask()
+                .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
         }
     }
 
@@ -91,11 +89,13 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
         val lockType = LockType.CREATE
+        val onlyUpdateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE
 
-        return if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE ||
-            reqShieldConfig.keyLock.tryLock(key, lockType)
-        ) {
-            createReqShieldData(key, callable, timeToLiveMillis, lockType)
+        // ONLY_UPDATE_CACHE collapses requests on cache update only, so the creation runs without a lock
+        val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
+
+        return if (onlyUpdateCache || token != null) {
+            createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
         } else {
             handleLockFailure(key, callable, timeToLiveMillis)
         }
@@ -106,32 +106,57 @@ class ReqShield<T>(
         callable: Callable<T?>,
         timeToLiveMillis: Long,
         lockType: LockType,
+        token: String?,
     ): ReqShieldData<T> {
         val reqShieldData =
             buildReqShieldData(
-                executeCallable({ callable.call() }, true, key, lockType),
+                executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
         CompletableFuture.runAsync({
-            setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType)
+            executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
         }, reqShieldConfig.executor)
+            .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
 
         return reqShieldData
     }
 
+    /**
+     * Another request holds the lock: poll the cache until that request publishes its result.
+     *
+     * The supplier is never called from the polling task - it is called on this thread only after
+     * the wait gave up, so at most one extra supplier call per waiting request happens.
+     */
     private fun handleLockFailure(
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val future = createFuture()
-        val counter = createCounter()
+        val future = CompletableFuture<ReqShieldData<T>?>()
+        val scheduled = scheduleTask(reqShieldConfig.executor, future, reqShieldConfig.getCacheFunction, key)
 
-        scheduleTask(reqShieldConfig.executor, future, counter, reqShieldConfig.getCacheFunction, callable, key)
+        // The polling task gives up on its own; this timeout only guards against a task that never runs
+        val waitTimeoutMillis =
+            reqShieldConfig.maxAttemptGetCache * GET_CACHE_INTERVAL_MILLIS + GET_CACHE_INTERVAL_MILLIS * 10
 
-        val result = future.get()
+        val cachedData =
+            try {
+                future.get(waitTimeoutMillis, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                log.warn("Timed out waiting for the cache to be created for key '{}', falling back to the supplier", key)
+                null
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = e)
+            } catch (e: ExecutionException) {
+                val cause = e.cause
+                throw if (cause is ClientException) cause else ClientException(ErrorCode.GET_CACHE_ERROR, cause = cause)
+            } finally {
+                scheduled.cancel(false)
+            }
 
-        return buildReqShieldData(result, timeToLiveMillis)
+        // No lock was acquired by this request, so there is nothing to release on failure
+        return cachedData ?: buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
     }
 
     private fun buildReqShieldData(
@@ -143,66 +168,52 @@ class ReqShield<T>(
             timeToLiveMillis = timeToLiveMillis,
         )
 
-    private fun setReqShieldData(
-        cacheSetter: (String, ReqShieldData<T>, Long) -> Boolean,
-        key: String,
-        reqShieldData: ReqShieldData<T>,
-        lockType: LockType,
-    ) {
-        executeSetCacheFunction(cacheSetter, key, reqShieldData, lockType)
-    }
-
-    private fun createFuture(): CompletableFuture<T> = CompletableFuture()
-
-    private fun createCounter(): AtomicInteger = AtomicInteger(0)
-
+    /**
+     * Polls the cache on a fixed delay and completes [future] with the cached data once it appears.
+     *
+     * The future is completed with null to signal "stop waiting, fall back to the supplier", which
+     * happens when [ReqShieldConfiguration.maxAttemptGetCache] successful-but-empty reads were made
+     * or when [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row (the cache looks unavailable).
+     */
     private fun scheduleTask(
         executor: ScheduledExecutorService,
-        future: CompletableFuture<T>,
-        counter: AtomicInteger,
+        future: CompletableFuture<ReqShieldData<T>?>,
         cacheGetter: (String) -> ReqShieldData<T>?,
-        callable: Callable<T?>,
         key: String,
-    ) {
+    ): ScheduledFuture<*> {
+        val attemptCount = AtomicInteger(0)
+        val consecutiveFailureCount = AtomicInteger(0)
+
         val scheduled: ScheduledFuture<*> =
-            executor.scheduleAtFixedRate({
+            executor.scheduleWithFixedDelay({
+                // Early exit if future is already completed to avoid unnecessary work
+                if (future.isDone) {
+                    return@scheduleWithFixedDelay
+                }
+
                 try {
-                    // Early exit if future is already completed to avoid unnecessary work
-                    if (future.isDone) {
-                        return@scheduleAtFixedRate
+                    val cachedData = cacheGetter.invoke(key)
+                    if (cachedData != null) {
+                        // complete() is a no-op when another thread already completed the future
+                        future.complete(cachedData)
+                        return@scheduleWithFixedDelay
                     }
 
-                    val funcResult = executeGetCacheFunction(cacheGetter, key)
-                    if (funcResult != null) {
-                        // Use CAS-like complete to handle race condition safely
-                        // If another thread already completed, this is a no-op
-                        future.complete(funcResult.value)
-                        return@scheduleAtFixedRate
-                    }
-
-                    // Increment first, then check - ensures atomic decision making
-                    val attempts = counter.incrementAndGet()
-                    if (attempts >= reqShieldConfig.maxAttemptGetCache && !future.isDone) {
-                        // Use complete() which handles concurrent completion safely
-                        // If another thread completed between our check and this call, it's ignored
-                        future.complete(executeCallable({ callable.call() }, false))
+                    consecutiveFailureCount.set(0)
+                    if (attemptCount.incrementAndGet() >= reqShieldConfig.maxAttemptGetCache) {
+                        future.complete(null)
                     }
                 } catch (e: Exception) {
-                    // Handle exception to prevent scheduleAtFixedRate from stopping
-                    // Fallback to callable to ensure service availability
-                    log.error("Error in scheduled cache getter for key '{}', falling back to callable", key, e)
-                    if (!future.isDone) {
-                        try {
-                            future.complete(executeCallable({ callable.call() }, false))
-                        } catch (fallbackException: Exception) {
-                            log.error("Fallback callable also failed for key '{}'", key, fallbackException)
-                            future.completeExceptionally(fallbackException)
-                        }
+                    log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
+                    if (consecutiveFailureCount.incrementAndGet() >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) {
+                        future.complete(null)
                     }
                 }
             }, GET_CACHE_INTERVAL_MILLIS, GET_CACHE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
 
         future.whenComplete { _, _ -> scheduled.cancel(false) }
+
+        return scheduled
     }
 
     private fun executeGetCacheFunction(
@@ -212,7 +223,7 @@ class ReqShield<T>(
         runCatching {
             getFunction.invoke(key)
         }.getOrElse {
-            throw ClientException(ErrorCode.GET_CACHE_ERROR, originErrorMessage = it.message)
+            throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = it)
         }
 
     private fun executeSetCacheFunction(
@@ -220,15 +231,16 @@ class ReqShield<T>(
         key: String,
         value: ReqShieldData<T>,
         lockType: LockType,
+        token: String?,
     ) {
         try {
             setFunction.invoke(key, value, value.timeToLiveMillis)
         } catch (e: Exception) {
-            throw ClientException(ErrorCode.SET_CACHE_ERROR, originErrorMessage = e.message)
+            throw ClientException(ErrorCode.SET_CACHE_ERROR, cause = e)
         } finally {
-            if (shouldAttemptUnlock(lockType)) {
+            if (token != null) {
                 // No retry needed: false means lock already released or expired (not an error)
-                val unlocked = reqShieldConfig.keyLock.unLock(key, lockType)
+                val unlocked = reqShieldConfig.keyLock.unLock(key, lockType, token)
                 if (!unlocked) {
                     log.debug("Lock already released or expired for key '{}'", key)
                 }
@@ -236,22 +248,30 @@ class ReqShield<T>(
         }
     }
 
+    /**
+     * Runs the client supplier, releasing the lock identified by [token] when it fails.
+     * A null [token] means this request holds no lock, so nothing is released.
+     */
     private fun executeCallable(
         callable: Callable<T?>,
-        isUnlockWhenException: Boolean,
-        key: String? = null,
-        lockType: LockType? = null,
+        key: String,
+        lockType: LockType?,
+        token: String?,
     ): T? =
         runCatching {
             callable.call()
         }.getOrElse {
-            if (isUnlockWhenException && key != null && lockType != null) {
-                reqShieldConfig.keyLock.unLock(key, lockType)
+            if (token != null && lockType != null) {
+                reqShieldConfig.keyLock.unLock(key, lockType, token)
             }
-            throw ClientException(ErrorCode.SUPPLIER_ERROR, originErrorMessage = it.message)
+            throw ClientException(ErrorCode.SUPPLIER_ERROR, cause = it)
         }
 
-    private fun shouldAttemptUnlock(lockType: LockType): Boolean =
-        (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) ||
-            (lockType == LockType.CREATE && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_UPDATE_CACHE)
+    private fun logAsyncFailure(
+        key: String,
+        throwable: Throwable,
+    ) {
+        val cause = if (throwable is CompletionException) throwable.cause ?: throwable else throwable
+        log.error("Asynchronous cache task failed for key '{}'", key, cause)
+    }
 }

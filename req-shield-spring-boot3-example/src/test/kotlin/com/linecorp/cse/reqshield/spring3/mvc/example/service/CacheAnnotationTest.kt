@@ -48,7 +48,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
-            assertNotNull(reqShieldCache.get("product-$testProductId"))
+            assertNotNull(reqShieldCache.get("product::product-$testProductId"))
         }
     }
 
@@ -69,7 +69,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(100, sampleService.getRequestCount())
-            assertNotNull(reqShieldCache.get("product-$testProductId"))
+            assertNotNull(reqShieldCache.get("productOnlyUpdateCache::product-$testProductId"))
         }
     }
 
@@ -92,7 +92,7 @@ class CacheAnnotationTest : AbstractRedisTest() {
 
         await().atMost(5, TimeUnit.SECONDS).untilAsserted {
             assertEquals(1, sampleService.getRequestCount())
-            assertNotNull(reqShieldCache.get("product-$testProductId"))
+            assertNotNull(reqShieldCache.get("product::product-$testProductId"))
         }
     }
 
@@ -103,19 +103,19 @@ class CacheAnnotationTest : AbstractRedisTest() {
         sampleService.getProduct(testProductId)
 
         await().atMost(5, TimeUnit.SECONDS).until {
-            runCatching { reqShieldCache.get("product-$testProductId") != null }.getOrDefault(false)
+            runCatching { reqShieldCache.get("product::product-$testProductId") != null }.getOrDefault(false)
         }
 
-        assertNotNull(reqShieldCache.get("product-$testProductId"))
+        assertNotNull(reqShieldCache.get("product::product-$testProductId"))
 
         // when
         sampleService.removeProduct(testProductId)
 
         // then
         await().atMost(5, TimeUnit.SECONDS).until {
-            runCatching { reqShieldCache.get("product-$testProductId") == null }.getOrDefault(false)
+            runCatching { reqShieldCache.get("product::product-$testProductId") == null }.getOrDefault(false)
         }
 
-        assertNull(reqShieldCache.get("product-$testProductId"))
+        assertNull(reqShieldCache.get("product::product-$testProductId"))
     }
 }

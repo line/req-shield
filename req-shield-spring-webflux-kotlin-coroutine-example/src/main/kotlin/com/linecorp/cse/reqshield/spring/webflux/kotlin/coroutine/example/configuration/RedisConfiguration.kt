@@ -69,10 +69,9 @@ class RedisConfiguration {
     @Bean("redisOperationsForGlobalLock")
     fun reactiveRedisOperationsForGlobalLock(factory: ReactiveRedisConnectionFactory): ReactiveRedisOperations<String, String> {
         val keySerializer = StringRedisSerializer()
-        val valueSerializer =
-            Jackson2JsonRedisSerializer(String::class.java).apply {
-                setObjectMapper(objectMapper())
-            }
+        // Lock values are raw ownership tokens, so they are stored verbatim: a JSON serializer would
+        // store them quoted, which only stays comparable while every access uses this same template.
+        val valueSerializer = StringRedisSerializer()
         val serializationContext =
             RedisSerializationContext
                 .newSerializationContext<String, String>(keySerializer)

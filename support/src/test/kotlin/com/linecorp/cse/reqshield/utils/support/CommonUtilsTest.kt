@@ -42,4 +42,40 @@ class CommonUtilsTest {
         val decide = decideToUpdateCache(createdAt.toInstant().toEpochMilli(), expireTime, 80)
         assertFalse(decide)
     }
+
+    @Test
+    fun `elapsed well past the threshold returns true`() {
+        val ttl = Duration.ofMinutes(1).toMillis()
+        // decisionForUpdate 50% of a 1-minute ttl is 30s, use a generous margin past that boundary.
+        val createdAt = System.currentTimeMillis() - Duration.ofSeconds(45).toMillis()
+
+        val decide = decideToUpdateCache(createdAt, ttl, 50)
+        assertTrue(decide)
+    }
+
+    @Test
+    fun `decisionForUpdate of zero returns true immediately`() {
+        val ttl = Duration.ofMinutes(10).toMillis()
+        val createdAt = System.currentTimeMillis()
+
+        val decide = decideToUpdateCache(createdAt, ttl, 0)
+        assertTrue(decide)
+    }
+
+    @Test
+    fun `decisionForUpdate of 100 with fresh createdAt returns false`() {
+        val ttl = Duration.ofMinutes(10).toMillis()
+        val createdAt = System.currentTimeMillis()
+
+        val decide = decideToUpdateCache(createdAt, ttl, 100)
+        assertFalse(decide)
+    }
+
+    @Test
+    fun `ttl of zero returns true`() {
+        val createdAt = System.currentTimeMillis()
+
+        val decide = decideToUpdateCache(createdAt, 0L, 80)
+        assertTrue(decide)
+    }
 }

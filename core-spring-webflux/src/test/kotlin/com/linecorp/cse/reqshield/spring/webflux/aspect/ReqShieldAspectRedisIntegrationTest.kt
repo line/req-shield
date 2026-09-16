@@ -19,12 +19,13 @@ package com.linecorp.cse.reqshield.spring.webflux.aspect
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
+import com.linecorp.cse.reqshield.spring.webflux.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.spring.webflux.config.LibAutoConfiguration
-import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import io.lettuce.core.RedisClient
 import io.lettuce.core.api.StatefulRedisConnection
 import io.lettuce.core.api.sync.RedisCommands
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -38,7 +39,10 @@ import org.springframework.test.context.junit.jupiter.SpringExtension
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+
+private const val CACHE_NAME = "it"
 
 @ExtendWith(SpringExtension::class)
 @ContextConfiguration(classes = [LibAutoConfiguration::class, ReqShieldAspectRedisIntegrationTest.TestConfig::class])
@@ -49,10 +53,15 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
     @Autowired
     private lateinit var asyncCache: AsyncCache<String>
 
+    @Autowired
+    private lateinit var lockSupport: GlobalLockSupport
+
     @BeforeEach
     fun resetCounter() {
         service.resetCounter()
     }
+
+    private fun cacheKey(key: String) = "$CACHE_NAME::$key"
 
     private fun awaitCachePut(
         key: String,
@@ -91,16 +100,49 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
     }
 
     @Test
+    fun shouldCollapseDuplicateRequestsWithRedisGlobalLock() {
+        val key = "dup-redis-global-${System.nanoTime()}" // Use unique key for test isolation
+        val attempts = 20
+
+        val result =
+            Flux
+                .range(1, attempts)
+                .flatMap { service.getWithGlobalLock(key).subscribeOn(Schedulers.boundedElastic()) }
+                .collectList()
+                .block()!!
+
+        assertTrue(
+            service.getRequestCount() == 1,
+            "Callable should be invoked only once. actual=${service.getRequestCount()}",
+        )
+        assertTrue(result.size == attempts && result.all { it != null }, "Expected all results to be valid")
+    }
+
+    @Test
     fun shouldEvictAndRecomputeWithRedis() {
         val key = "evict-redis-${System.nanoTime()}" // Use unique key for test isolation
         val v1 = service.get(key).block()
         // ReqShield stores cache asynchronously; wait until the cache write is observed.
-        assertTrue(awaitCachePut(key), "Timed out waiting for cache put for key=$key")
+        assertTrue(awaitCachePut(cacheKey(key)), "Timed out waiting for cache put for key=${cacheKey(key)}")
         val evicted = service.evict(key).block()
         val v2 = service.get(key).block()
 
         assertTrue(evicted == true, "Eviction should return true")
         assertTrue(v1 != null && v2 != null && v1 != v2, "Values should differ after eviction: v1=$v1, v2=$v2")
+    }
+
+    @Test
+    fun globalLockIsOnlyReleasedByTheTokenThatAcquiredIt() {
+        val lockKey = "lock-redis-${System.nanoTime()}"
+        val ownerToken = UUID.randomUUID().toString()
+        val otherToken = UUID.randomUUID().toString()
+
+        assertTrue(lockSupport.globalLock(lockKey, ownerToken, 5_000).block() == true, "The free lock should be acquired")
+        assertFalse(lockSupport.globalLock(lockKey, otherToken, 5_000).block() == true, "A held lock must not be acquired again")
+        assertFalse(lockSupport.globalUnLock(lockKey, otherToken).block() == true, "A foreign token must not release the lock")
+        assertTrue(lockSupport.globalUnLock(lockKey, ownerToken).block() == true, "The owner should release the lock")
+        assertFalse(lockSupport.globalUnLock(lockKey, ownerToken).block() == true, "Releasing twice should report false")
+        assertTrue(lockSupport.globalLock(lockKey, otherToken, 5_000).block() == true, "The released lock should be acquirable")
     }
 
     @Configuration
@@ -118,37 +160,12 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
         open fun redisConnection(redisClient: RedisClient): StatefulRedisConnection<String, String> = redisClient.connect()
 
         @Bean
-        open fun asyncCache(redisConnection: StatefulRedisConnection<String, String>): AsyncCache<String> {
+        open fun asyncCache(redisConnection: StatefulRedisConnection<String, String>): RedisAsyncCache {
             val sync: RedisCommands<String, String> = redisConnection.sync()
             // Ensure clean DB state for tests running in CI
             runCatching { sync.flushdb() }
 
-            return object : AsyncCache<String> {
-                override fun get(key: String): Mono<ReqShieldData<String>?> =
-                    Mono.fromCallable {
-                        sync.get(key)?.let { ReqShieldData(value = it, timeToLiveMillis = 10_000) }
-                    }
-
-                override fun put(
-                    key: String,
-                    value: ReqShieldData<String>,
-                    timeToLiveMillis: Long,
-                ): Mono<Boolean> =
-                    Mono.fromCallable {
-                        sync.psetex(key, timeToLiveMillis, value.value ?: "")
-                        true
-                    }
-
-                override fun evict(key: String): Mono<Boolean> = Mono.fromCallable { sync.del(key) > 0 }
-
-                override fun globalLock(
-                    key: String,
-                    timeToLiveMillis: Long,
-                ): Mono<Boolean> =
-                    Mono.fromCallable { sync.setnx("lock:$key", "1").also { if (it) sync.pexpire("lock:$key", timeToLiveMillis) } }
-
-                override fun globalUnLock(key: String): Mono<Boolean> = Mono.fromCallable { sync.del("lock:$key") >= 0 }
-            }
+            return RedisAsyncCache(sync, redisConnection.reactive())
         }
 
         @Bean
@@ -164,10 +181,13 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
 
         open fun getRequestCount(): Int = counter.get()
 
-        @ReqShieldCacheable(cacheName = "it", key = "#key", timeToLiveMillis = 10_000)
+        @ReqShieldCacheable(cacheName = CACHE_NAME, key = "#key", timeToLiveMillis = 10_000)
         open fun get(key: String): Mono<String> = Mono.fromCallable { "value-" + counter.incrementAndGet() }
 
-        @ReqShieldCacheEvict(cacheName = "it", key = "#key")
+        @ReqShieldCacheable(cacheName = CACHE_NAME, key = "#key", timeToLiveMillis = 10_000, isLocalLock = false)
+        open fun getWithGlobalLock(key: String): Mono<String> = Mono.fromCallable { "value-" + counter.incrementAndGet() }
+
+        @ReqShieldCacheEvict(cacheName = CACHE_NAME, key = "#key")
         open fun evict(key: String): Mono<Boolean> = Mono.just(true)
     }
 }

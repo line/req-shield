@@ -8,7 +8,7 @@ springBoot3 = "3.3.1"
 springBoot2 = "2.7.17"
 springDependency = "1.1.5"
 junit = "5.9.1"
-testcontainers = "1.18.1"
+testcontainers = "1.21.4"
 
 [libraries]
 # kotlin

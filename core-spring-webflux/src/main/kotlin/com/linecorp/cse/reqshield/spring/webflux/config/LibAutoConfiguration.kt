@@ -28,6 +28,12 @@ import reactor.core.scheduler.Schedulers
 @EnableAspectJAutoProxy(proxyTargetClass = true)
 @Import(ReqShieldAspect::class)
 open class LibAutoConfiguration {
-    @Bean
+    /**
+     * Scheduler shared by every [com.linecorp.cse.reqshield.reactor.ReqShield] the aspect creates, used for
+     * the asynchronous cache writes and for polling the cache while another request holds the lock.
+     *
+     * [Schedulers.boundedElastic] is Reactor's process-wide instance, so the container must never dispose it.
+     */
+    @Bean(destroyMethod = "")
     open fun reqShieldScheduler(): Scheduler = Schedulers.boundedElastic()
 }

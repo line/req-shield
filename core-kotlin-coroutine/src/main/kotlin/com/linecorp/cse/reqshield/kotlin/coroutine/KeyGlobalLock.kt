@@ -16,24 +16,25 @@
 
 package com.linecorp.cse.reqshield.kotlin.coroutine
 
+import java.util.UUID
+
 class KeyGlobalLock(
-    private val globalLockFunction: suspend (String, Long) -> Boolean,
-    private val globalUnLockFunction: suspend (String) -> Boolean,
+    private val globalLockFunction: suspend (String, String, Long) -> Boolean,
+    private val globalUnLockFunction: suspend (String, String) -> Boolean,
     private val lockTimeoutMillis: Long,
 ) : KeyLock {
     override suspend fun tryLock(
         key: String,
         lockType: LockType,
-    ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
-        return globalLockFunction(completeKey, lockTimeoutMillis)
+    ): String? {
+        // The token must be unique across every process sharing the lock store.
+        val token = UUID.randomUUID().toString()
+        return if (globalLockFunction(lockKeyOf(key, lockType), token, lockTimeoutMillis)) token else null
     }
 
     override suspend fun unLock(
         key: String,
         lockType: LockType,
-    ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
-        return globalUnLockFunction(completeKey)
-    }
+        token: String,
+    ): Boolean = globalUnLockFunction(lockKeyOf(key, lockType), token)
 }

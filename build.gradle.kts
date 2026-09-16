@@ -63,6 +63,26 @@ allprojects {
         }
     }
 
+    // Enforce the minimum line coverage documented in CLAUDE.md for library modules.
+    // Example applications (req-shield-*-example) are demos and are not held to the threshold.
+    if (project != rootProject && !project.name.startsWith("req-shield-")) {
+        tasks.withType<JacocoCoverageVerification> {
+            dependsOn(tasks.test)
+            violationRules {
+                rule {
+                    limit {
+                        counter = "LINE"
+                        value = "COVEREDRATIO"
+                        minimum = "0.80".toBigDecimal()
+                    }
+                }
+            }
+        }
+        tasks.named("check") {
+            dependsOn(tasks.withType<JacocoCoverageVerification>())
+        }
+    }
+
     jacoco {
         toolVersion = "0.8.12"
     }

@@ -58,15 +58,11 @@ class RedisConfiguration {
 
     @Bean
     fun redisTemplateForGlobalLock(connectionFactory: RedisConnectionFactory): RedisTemplate<String, String> {
-        val valueSerializer =
-            Jackson2JsonRedisSerializer(String::class.java).apply {
-                setObjectMapper(objectMapper())
-            }
-
         val redisTemplate = RedisTemplate<String, String>()
         redisTemplate.setConnectionFactory(connectionFactory)
         redisTemplate.keySerializer = StringRedisSerializer()
-        redisTemplate.valueSerializer = valueSerializer
+        // The lock token is stored as a plain string so the compare-and-delete script can compare it as is
+        redisTemplate.valueSerializer = StringRedisSerializer()
         return redisTemplate
     }
 

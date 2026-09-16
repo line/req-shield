@@ -16,6 +16,7 @@
 
 package com.linecorp.cse.reqshield
 
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import org.slf4j.LoggerFactory
@@ -25,6 +26,8 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
@@ -47,15 +50,27 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
          * check vs unLock, or monitor cleanup vs unLock).
          */
         val isHeld: AtomicBoolean = AtomicBoolean(false),
+        /**
+         * Ownership token of the current holder, null when the lock is not held.
+         * Only the holder presenting this token may release the lock, which keeps a holder
+         * whose lock expired from releasing the lock of the holder that took it over.
+         * @Volatile ensures visibility across threads when updated inside compute() and read by monitor.
+         */
+        @Volatile var token: String? = null,
     )
 
     companion object {
         // Global lockMap shared by all instances - CRITICAL FIX for request collapsing
         private val lockMap = ConcurrentHashMap<String, LockInfo>()
 
+        // Ownership tokens are only compared within this JVM, so a counter is enough (and cheaper than UUID)
+        private val tokenCounter = AtomicLong(0)
+
         // Single scheduler shared by all instances
         @Volatile
         private var sharedScheduler: ScheduledExecutorService? = null
+
+        private fun nextToken(): String = "local-${tokenCounter.incrementAndGet()}"
 
         // Thread-safe lazy initialization
         private fun getOrCreateScheduler(): ScheduledExecutorService {
@@ -96,6 +111,7 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
                                 // This handles the case where unlock() was missed due to exception.
                                 // CAS ensures safe release (no-op if already released).
                                 if (lockInfo.isHeld.compareAndSet(true, false)) {
+                                    lockInfo.token = null
                                     lockInfo.semaphore.release()
                                 }
                                 null // Atomic removal
@@ -144,10 +160,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
     override fun tryLock(
         key: String,
         lockType: LockType,
-    ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
+    ): String? {
+        val completeKey = buildLockKey(key, lockType)
         val now = nowToEpochTime()
-        val result = AtomicBoolean(false)
+        val acquiredToken = AtomicReference<String?>(null)
 
         // Use compute() for atomic lock acquisition.
         // This ensures mutual exclusion with cleanup - they cannot race on the same key.
@@ -158,44 +174,67 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
                 // Without CAS, if unLock() executes between isHeld.get() and release(),
                 // both threads would call release(), causing over-release (permits > 1).
                 if (now > existing.expiresAt && existing.isHeld.compareAndSet(true, false)) {
+                    // Clear the token so the previous holder can no longer release this lock
+                    existing.token = null
                     existing.semaphore.release()
                 }
 
                 // Existing entry: try to acquire semaphore
                 if (existing.semaphore.tryAcquire()) {
+                    val token = nextToken()
                     existing.isHeld.set(true)
+                    existing.token = token
                     existing.expiresAt = now + lockTimeoutMillis
-                    result.set(true)
+                    acquiredToken.set(token)
                 }
                 existing
             } else {
                 // New entry: create and acquire
+                val token = nextToken()
                 val newLock = LockInfo(Semaphore(1), now + lockTimeoutMillis)
                 newLock.semaphore.tryAcquire() // Always succeeds for new semaphore
                 newLock.isHeld.set(true)
-                result.set(true)
+                newLock.token = token
+                acquiredToken.set(token)
                 newLock
             }
         }
-        return result.get()
+        return acquiredToken.get()
     }
 
     override fun unLock(
         key: String,
         lockType: LockType,
+        token: String,
     ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
-        val lockInfo = lockMap[completeKey] ?: return false
+        val completeKey = buildLockKey(key, lockType)
+        val released = AtomicBoolean(false)
 
-        // Use CAS to prevent over-release: only release if we actually hold the lock
-        return if (lockInfo.isHeld.compareAndSet(true, false)) {
-            lockInfo.semaphore.release()
-            true
-        } else {
-            log.debug("Attempted to unlock key '{}' that is not held", completeKey)
-            false
+        // Release inside compute() so that ownership check and release are atomic with respect to
+        // tryLock() and the monitor cleanup. Reading the token outside compute() would allow
+        // "read token == mine -> lock expires and is reacquired by someone else -> release" and
+        // would therefore release the new owner's lock.
+        lockMap.compute(completeKey) { _, existing ->
+            if (existing == null) return@compute null
+
+            if (existing.token == token && existing.isHeld.compareAndSet(true, false)) {
+                existing.token = null
+                existing.semaphore.release()
+                released.set(true)
+            }
+            existing // Keep the entry, the monitor removes it once expired
         }
+
+        if (!released.get()) {
+            log.debug("Attempted to unlock key '{}' that is not held or is owned by another holder", completeKey)
+        }
+        return released.get()
     }
+
+    private fun buildLockKey(
+        key: String,
+        lockType: LockType,
+    ): String = "$LOCK_KEY_PREFIX${key}_${lockType.name}"
 
     fun shutdown() {
         // Shared scheduler is managed globally, no individual shutdown needed

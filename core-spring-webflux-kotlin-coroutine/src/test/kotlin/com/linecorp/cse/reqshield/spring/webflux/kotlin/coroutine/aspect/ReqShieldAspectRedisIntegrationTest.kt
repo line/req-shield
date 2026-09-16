@@ -19,10 +19,13 @@ package com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.aspect
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
+import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.config.LibAutoConfiguration
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.redis.AbstractRedisTest
 import io.lettuce.core.RedisClient
+import io.lettuce.core.ScriptOutputType
+import io.lettuce.core.SetArgs
 import io.lettuce.core.api.StatefulRedisConnection
 import io.lettuce.core.api.sync.RedisCommands
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +34,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -57,12 +62,15 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
         service.resetCounter()
     }
 
+    /** The aspect namespaces every key with the cache name of the annotation. */
+    private fun cacheKeyOf(key: String) = "$CACHE_NAME::$key"
+
     private suspend fun awaitCachePut(
         key: String,
         timeoutMillis: Long = 2_000,
     ): Boolean =
         withTimeoutOrNull(timeoutMillis) {
-            while (asyncCache.get(key) == null) {
+            while (asyncCache.get(cacheKeyOf(key)) == null) {
                 delay(10)
             }
             true
@@ -89,6 +97,21 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
         }
 
     @Test
+    fun shouldCollapseDuplicateRequestsWithRedisGlobalLock() =
+        runBlocking {
+            val key = "dup-global-${System.nanoTime()}"
+            val attempts = 20
+            val results = (1..attempts).map { async(Dispatchers.IO) { service.getWithGlobalLock(key) } }.awaitAll()
+
+            assertTrue(
+                service.getRequestCount() == 1,
+                "Callable should be invoked only once. actual=${service.getRequestCount()}",
+            )
+            assertTrue(results.all { it != null }, "Expected all results to be valid. results=$results")
+            assertTrue(awaitCachePut(key), "Timed out waiting for cache put for key=$key")
+        }
+
+    @Test
     fun shouldEvictAndRecomputeWithRedis() =
         runBlocking {
             val key = "evict-redis-${System.nanoTime()}" // Use unique key for test isolation
@@ -99,6 +122,23 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
             val v2 = service.get(key)
             assertTrue(evicted, "Eviction should return true")
             assertTrue(v1 != v2, "Values should differ after eviction: v1=$v1, v2=$v2")
+            assertNull(asyncCache.get(key), "The bare key must never hold an entry")
+        }
+
+    @Test
+    fun shouldReleaseTheGlobalLockOnlyForTheOwningToken() =
+        runBlocking {
+            val lockSupport = asyncCache as GlobalLockSupport
+            val lockKey = "lock-token-${System.nanoTime()}"
+
+            assertTrue(lockSupport.globalLock(lockKey, "owner", 10_000))
+            // SET NX: a second caller cannot take a held lock.
+            assertFalse(lockSupport.globalLock(lockKey, "intruder", 10_000))
+            // Compare-and-delete: a non-owner cannot release it either.
+            assertFalse(lockSupport.globalUnLock(lockKey, "intruder"))
+            assertTrue(lockSupport.globalUnLock(lockKey, "owner"))
+            // Released, so the next caller can take it.
+            assertTrue(lockSupport.globalLock(lockKey, "intruder", 10_000))
         }
 
     @Configuration
@@ -121,7 +161,9 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
             // Ensure clean DB state for tests running in CI
             runCatching { sync.flushdb() }
 
-            return object : AsyncCache<String> {
+            return object :
+                AsyncCache<String>,
+                GlobalLockSupport {
                 override suspend fun get(key: String): ReqShieldData<String>? =
                     sync.get(key)?.let { ReqShieldData(value = it, timeToLiveMillis = 10_000) }
 
@@ -137,11 +179,15 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
                 override suspend fun evict(key: String): Boolean = sync.del(key) > 0
 
                 override suspend fun globalLock(
-                    key: String,
+                    lockKey: String,
+                    token: String,
                     timeToLiveMillis: Long,
-                ): Boolean = sync.setnx("lock:$key", "1").also { if (it) sync.pexpire("lock:$key", timeToLiveMillis) }
+                ): Boolean = sync.set(lockKey, token, SetArgs.Builder.nx().px(timeToLiveMillis)) == "OK"
 
-                override suspend fun globalUnLock(key: String): Boolean = sync.del("lock:$key") >= 0
+                override suspend fun globalUnLock(
+                    lockKey: String,
+                    token: String,
+                ): Boolean = sync.eval<Long>(UNLOCK_SCRIPT, ScriptOutputType.INTEGER, arrayOf(lockKey), token) == 1L
             }
         }
 
@@ -159,7 +205,7 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
         open fun getRequestCount(): Int = counter.get()
 
         @ReqShieldCacheable(
-            cacheName = "it",
+            cacheName = CACHE_NAME,
             key = "#key",
             timeToLiveMillis = 10_000,
             // CI environments can be slow; give enough time for async cache put to be observed by waiters.
@@ -168,7 +214,25 @@ class ReqShieldAspectRedisIntegrationTest : AbstractRedisTest() {
         )
         open suspend fun get(key: String): String = "value-" + counter.incrementAndGet()
 
-        @ReqShieldCacheEvict(cacheName = "it", key = "#key")
+        @ReqShieldCacheable(
+            cacheName = CACHE_NAME,
+            key = "#key",
+            isLocalLock = false,
+            timeToLiveMillis = 10_000,
+            maxAttemptGetCache = 200,
+            lockTimeoutMillis = 10_000,
+        )
+        open suspend fun getWithGlobalLock(key: String): String = "value-" + counter.incrementAndGet()
+
+        @ReqShieldCacheEvict(cacheName = CACHE_NAME, key = "#key")
         open suspend fun evict(key: String): Boolean = true
+    }
+
+    companion object {
+        const val CACHE_NAME = "it"
+
+        /** Release the lock only when the caller still owns it, as one atomic step. */
+        const val UNLOCK_SCRIPT =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
     }
 }

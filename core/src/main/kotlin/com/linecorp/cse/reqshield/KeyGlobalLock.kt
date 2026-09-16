@@ -16,24 +16,39 @@
 
 package com.linecorp.cse.reqshield
 
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
+import java.util.UUID
+
+/**
+ * Lock backed by a shared store (for example Redis).
+ *
+ * @param globalLockFunction (lockKey, token, ttlMillis) -> acquired. Must store the token only when
+ *   the key is absent and must expire on its own, e.g. `SET key token NX PX ttl`.
+ * @param globalUnLockFunction (lockKey, token) -> released. Must delete the key only when its value
+ *   still equals the token (compare-and-delete).
+ */
 class KeyGlobalLock(
-    private val globalLockFunction: (String, Long) -> Boolean,
-    private val globalUnLockFunction: (String) -> Boolean,
+    private val globalLockFunction: (String, String, Long) -> Boolean,
+    private val globalUnLockFunction: (String, String) -> Boolean,
     private val lockTimeoutMillis: Long,
 ) : KeyLock {
     override fun tryLock(
         key: String,
         lockType: LockType,
-    ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
-        return globalLockFunction(completeKey, lockTimeoutMillis)
+    ): String? {
+        // Tokens are compared across processes, so they must be globally unique
+        val token = UUID.randomUUID().toString()
+        return if (globalLockFunction(buildLockKey(key, lockType), token, lockTimeoutMillis)) token else null
     }
 
     override fun unLock(
         key: String,
         lockType: LockType,
-    ): Boolean {
-        val completeKey = "${key}_${lockType.name}"
-        return globalUnLockFunction(completeKey)
-    }
+        token: String,
+    ): Boolean = globalUnLockFunction(buildLockKey(key, lockType), token)
+
+    private fun buildLockKey(
+        key: String,
+        lockType: LockType,
+    ): String = "$LOCK_KEY_PREFIX${key}_${lockType.name}"
 }

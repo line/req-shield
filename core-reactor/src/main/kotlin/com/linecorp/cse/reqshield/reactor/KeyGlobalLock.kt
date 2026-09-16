@@ -16,26 +16,34 @@
 
 package com.linecorp.cse.reqshield.reactor
 
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import reactor.core.publisher.Mono
+import java.util.UUID
 
 class KeyGlobalLock(
-    private val globalLockFunction: (String, Long) -> Mono<Boolean>,
-    private val globalUnLockFunction: (String) -> Mono<Boolean>,
+    private val globalLockFunction: (String, String, Long) -> Mono<Boolean>,
+    private val globalUnLockFunction: (String, String) -> Mono<Boolean>,
     private val lockTimeoutMillis: Long,
 ) : KeyLock {
     override fun tryLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean> {
-        val completeKey = "${key}_${lockType.name}"
-        return globalLockFunction(completeKey, lockTimeoutMillis)
-    }
+    ): Mono<String> =
+        Mono.defer {
+            // A fresh token per attempt: only this attempt may release the lock it acquired.
+            val token = UUID.randomUUID().toString()
+            globalLockFunction(completeKey(key, lockType), token, lockTimeoutMillis)
+                .flatMap { acquired -> if (acquired) Mono.just(token) else Mono.empty() }
+        }
 
     override fun unLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean> {
-        val completeKey = "${key}_${lockType.name}"
-        return globalUnLockFunction(completeKey)
-    }
+        token: String,
+    ): Mono<Boolean> = globalUnLockFunction(completeKey(key, lockType), token)
+
+    private fun completeKey(
+        key: String,
+        lockType: LockType,
+    ): String = "$LOCK_KEY_PREFIX${key}_${lockType.name}"
 }

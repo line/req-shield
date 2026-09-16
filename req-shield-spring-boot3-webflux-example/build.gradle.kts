@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.spring.dependency.management)
 }
 
+// Spring Boot's BOM pins an older Testcontainers whose Docker client is rejected by current Docker daemons
+// ("client version 1.32 is too old"); keep the version from the catalog instead.
+extra["testcontainers.version"] = libs.versions.testcontainers.get()
+
 group = "com.linecorp.cse.reqshield"
 version = "1.0.0"
 
