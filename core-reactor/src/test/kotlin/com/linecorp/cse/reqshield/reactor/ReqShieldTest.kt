@@ -35,12 +35,15 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import reactor.core.publisher.Mono
+import reactor.core.publisher.MonoSink
+import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -133,6 +136,144 @@ class ReqShieldTest : BaseReqShieldTest {
     /** Cached entry that is not yet old enough to be refreshed. */
     private fun freshReqShieldData(cachedValue: Product?): ReqShieldData<Product> =
         ReqShieldData(cachedValue, ReqShieldData.Status.NEW, nowToEpochTime(), timeToLiveMillis)
+
+    @Test
+    fun shouldReuseCacheWhenAnEarlierMissResumesAfterAnotherRequestFinishes() {
+        val cached = AtomicReference<ReqShieldData<Product>?>()
+        val reads = AtomicInteger()
+        val calls = AtomicInteger()
+        lateinit var delayedMiss: MonoSink<ReqShieldData<Product>?>
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(
+                    setCacheFunction = { _, data, _ ->
+                        Mono.fromCallable {
+                            cached.set(data)
+                            true
+                        }
+                    },
+                    getCacheFunction = {
+                        Mono.defer {
+                            if (reads.incrementAndGet() == 1) {
+                                // Hold a cache miss until the other request has stored its result and released the lock.
+                                Mono.create { delayedMiss = it }
+                            } else {
+                                Mono.justOrEmpty(cached.get())
+                            }
+                        }
+                    },
+                    scheduler = Schedulers.immediate(),
+                ),
+            )
+        val isolatedKey = "delayed-miss-${java.util.UUID.randomUUID()}"
+        val supplier =
+            Callable {
+                Mono.fromCallable<Product?> {
+                    calls.incrementAndGet()
+                    value
+                }
+            }
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis))
+            .then {
+                val winner = shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis).block()
+                assertEquals(value, winner?.value)
+                assertNotNull(cached.get())
+                delayedMiss.success()
+            }.expectNextMatches { it === cached.get() }
+            .verifyComplete()
+
+        assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun shouldReuseNullValuedCacheAfterAcquiringLocalLock() {
+        val cached = freshReqShieldData(null)
+        every { cacheGetter(key) } returnsMany listOf(Mono.empty(), Mono.just(cached))
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+
+        StepVerifier.create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNext(cached)
+            .verifyComplete()
+
+        verify(timeout = 1000, exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { callable.call() }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReuseCacheAfterAcquiringGlobalLockAndReleaseItsToken() {
+        val cached = freshReqShieldData(value)
+        every { cacheGetter(key) } returnsMany listOf(Mono.empty(), Mono.just(cached))
+        every { globalLockFunc(any(), any(), any()) } returns Mono.just(true)
+        every { globalUnLockFunc(any(), any()) } returns Mono.just(true)
+
+        StepVerifier.create(reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNext(cached)
+            .verifyComplete()
+
+        val owner = slot<String>()
+        val lockKey = "$LOCK_KEY_PREFIX${key}_${LockType.CREATE.name}"
+        verify(exactly = 1) { globalLockFunc(lockKey, capture(owner), 3000) }
+        verify(timeout = 1000, exactly = 1) { globalUnLockFunc(lockKey, owner.captured) }
+        verify(exactly = 0) { callable.call() }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReleaseLockWhenCacheRecheckFails() {
+        val failure = IllegalStateException("cache recheck failed")
+        every { cacheGetter(key) } returnsMany listOf(Mono.empty(), Mono.error(failure))
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+
+        StepVerifier.create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectErrorMatches { it is ClientException && it.errorCode == ErrorCode.GET_CACHE_ERROR && it.cause === failure }
+            .verify()
+
+        verify(timeout = 1000, exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldReleaseLockWhenCacheRecheckIsCancelled() {
+        every { cacheGetter(key) } returnsMany listOf(Mono.empty(), Mono.never())
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+
+        StepVerifier.create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .then { verify(timeout = 1000, exactly = 2) { cacheGetter(key) } }
+            .thenCancel()
+            .verify()
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() {
+        lateinit var pendingWrite: MonoSink<Boolean>
+        every { cacheGetter(key) } returns Mono.empty()
+        every { cacheSetter(key, any(), any()) } returns Mono.create { pendingWrite = it }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()),
+            )
+
+        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNextMatches { it.value == value }
+            .verifyComplete()
+
+        verify(exactly = 2) { cacheGetter(key) }
+        verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
+        pendingWrite.success(true)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 1) { callable.call() }
+    }
 
     /** Cached entry that has passed the decisionForUpdate threshold (90% of its TTL). */
     private fun updateTargetReqShieldData(cachedValue: Product?): ReqShieldData<Product> =

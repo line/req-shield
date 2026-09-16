@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -56,6 +57,7 @@ import org.junit.jupiter.api.assertThrows
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.test.assertFailsWith
@@ -158,6 +160,159 @@ class ReqShieldTest : BaseReqShieldTest {
         cachedValue: Product?,
         ttl: Long,
     ): ReqShieldData<Product> = cachedData(cachedValue, ttl, createdAt = nowToEpochTime() - (ttl * 0.9).toLong())
+
+    @Test
+    fun shouldReuseCacheWhenAnEarlierMissResumesAfterAnotherRequestFinishes() =
+        runTest {
+            val cached = AtomicReference<ReqShieldData<Product>?>()
+            var reads = 0
+            var calls = 0
+            val missObserved = CompletableDeferred<Unit>()
+            val resumeMiss = CompletableDeferred<Unit>()
+            val isolatedKey = "delayed-miss-${java.util.UUID.randomUUID()}"
+            val shield =
+                ReqShield(
+                    ReqShieldConfiguration(
+                        setCacheFunction = { _, data, _ ->
+                            cached.set(data)
+                            true
+                        },
+                        getCacheFunction = {
+                            if (++reads == 1) {
+                                // Resume this stale miss only after the winner has written the cache and unlocked.
+                                missObserved.complete(Unit)
+                                resumeMiss.await()
+                                null
+                            } else {
+                                cached.get()
+                            }
+                        },
+                        scope = this@ReqShieldTest.backgroundScope,
+                    ),
+                )
+            val supplier: suspend () -> Product? = {
+                calls++
+                value
+            }
+            val delayed = async { shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis) }
+
+            missObserved.await()
+            val winner = shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis)
+            awaitBackgroundWrites()
+            assertSame(winner, cached.get())
+            resumeMiss.complete(Unit)
+            val result = delayed.await()
+            awaitBackgroundWrites()
+            assertEquals(1, calls)
+            assertSame(winner, result)
+        }
+
+    @Test
+    fun shouldReuseNullValuedCacheAfterAcquiringLocalLock() =
+        runTest {
+            val cached = cachedData(null, timeToLiveMillis)
+            coEvery { cacheGetter(key) } returnsMany listOf(null, cached)
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } returns true
+
+            assertSame(cached, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+
+            coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+            coVerify(exactly = 0) { callable() }
+            coVerify(exactly = 0) { cacheSetter(any(), any(), any()) }
+        }
+
+    @Test
+    fun shouldReuseCacheAfterAcquiringGlobalLockAndReleaseItsToken() =
+        runTest {
+            val cached = cachedData(value, timeToLiveMillis)
+            coEvery { cacheGetter(key) } returnsMany listOf(null, cached)
+            coEvery { globalLockFunc(any(), any(), any()) } returns true
+            coEvery { globalUnLockFunc(any(), any()) } returns true
+
+            assertSame(cached, reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+
+            val owner = slot<String>()
+            coVerify(exactly = 1) { globalLockFunc(createLockKey, capture(owner), 3000) }
+            coVerify(exactly = 1) { globalUnLockFunc(createLockKey, owner.captured) }
+            coVerify(exactly = 0) { callable() }
+            coVerify(exactly = 0) { cacheSetter(any(), any(), any()) }
+        }
+
+    @Test
+    fun shouldReleaseLockWhenCacheRecheckFails() =
+        runTest {
+            val failure = IllegalStateException("cache recheck failed")
+            coEvery { cacheGetter(key) } returns null andThenThrows failure
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } returns true
+
+            val error = assertFailsWith<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+
+            assertEquals(ErrorCode.GET_CACHE_ERROR, error.errorCode)
+            assertSame(failure, error.cause)
+            coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+            coVerify(exactly = 0) { callable() }
+        }
+
+    @Test
+    fun shouldReleaseGlobalLockWhenCacheRecheckIsCancelled() =
+        runTest {
+            val recheckStarted = CompletableDeferred<Unit>()
+            var reads = 0
+            var unlockCompleted = false
+            coEvery { cacheGetter(key) } coAnswers {
+                if (++reads == 1) {
+                    null
+                } else {
+                    recheckStarted.complete(Unit)
+                    awaitCancellation()
+                }
+            }
+            coEvery { globalLockFunc(any(), any(), any()) } returns true
+            coEvery { globalUnLockFunc(any(), any()) } coAnswers {
+                // Cleanup must be able to suspend even when the caller has been cancelled.
+                delay(1)
+                unlockCompleted = true
+                true
+            }
+            val caller = launch { reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+
+            recheckStarted.await()
+            caller.cancelAndJoin()
+
+            assertTrue(caller.isCancelled)
+            assertTrue(unlockCompleted)
+            val owner = slot<String>()
+            coVerify(exactly = 1) { globalLockFunc(createLockKey, capture(owner), 3000) }
+            coVerify(exactly = 1) { globalUnLockFunc(createLockKey, owner.captured) }
+            coVerify(exactly = 0) { callable() }
+            coVerify(exactly = 0) { cacheSetter(any(), any(), any()) }
+        }
+
+    @Test
+    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() =
+        runTest {
+            val writeStarted = CompletableDeferred<Unit>()
+            val finishWrite = CompletableDeferred<Unit>()
+            coEvery { cacheGetter(key) } returns null
+            coEvery { cacheSetter(key, any(), any()) } coAnswers {
+                writeStarted.complete(Unit)
+                finishWrite.await()
+                true
+            }
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } returns true
+
+            assertEquals(value, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis).value)
+            writeStarted.await()
+            coVerify(exactly = 2) { cacheGetter(key) }
+            coVerify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+            finishWrite.complete(Unit)
+            awaitBackgroundWrites()
+            coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+            coVerify(exactly = 1) { callable() }
+        }
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() =

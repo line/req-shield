@@ -28,6 +28,7 @@ import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
 import java.time.Duration
 import java.util.concurrent.Callable
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
@@ -134,7 +135,27 @@ class ReqShield<T>(
 
         return reqShieldConfig.keyLock
             .tryLock(key, lockType)
-            .flatMap { token -> createReqShieldData(key, callable, timeToLiveMillis, lockType, token) }
+            .flatMap { token ->
+                val cacheCreationStarted = AtomicBoolean(false)
+                // Another request may have filled the cache between our initial miss and lock acquisition.
+                Mono.defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key) }
+                    // A global lock can emit on its client's event loop; keep cache reads off that thread.
+                    .subscribeOn(reqShieldConfig.scheduler)
+                    .flatMap { Mono.justOrEmpty(it) }
+                    .switchIfEmpty(
+                        Mono.defer {
+                            val creation = createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
+                            // The existing creation path releases the lock after its asynchronous cache write.
+                            cacheCreationStarted.set(true)
+                            creation
+                        },
+                    ).doFinally {
+                        // A cache hit, read failure, or cancellation during the recheck must release our token.
+                        if (!cacheCreationStarted.get()) {
+                            releaseLock(key, lockType, token)
+                        }
+                    }
+            }
             .switchIfEmpty(
                 Mono.defer {
                     handleLockFailure(key, callable, timeToLiveMillis)
@@ -280,19 +301,26 @@ class ReqShield<T>(
             .doFinally {
                 // Only the holder of a token took a lock, so only it may release one.
                 if (token != null) {
-                    // No retry needed: false means lock already released or expired (not an error)
-                    reqShieldConfig.keyLock
-                        .unLock(key, lockType, token)
-                        .doOnNext { unlocked ->
-                            if (!unlocked) {
-                                log.debug("Lock already released or expired for key '{}'", key)
-                            }
-                        }.subscribe(
-                            { /* success - no action needed */ },
-                            { e -> log.error("Failed to unlock key '{}': {}", key, e.message, e) },
-                        )
+                    releaseLock(key, lockType, token)
                 }
             }.subscribeOn(reqShieldConfig.scheduler)
+
+    private fun releaseLock(
+        key: String,
+        lockType: LockType,
+        token: String,
+    ) {
+        // No retry needed: false means lock already released or expired (not an error).
+        Mono.defer { reqShieldConfig.keyLock.unLock(key, lockType, token) }
+            .doOnNext { unlocked ->
+                if (!unlocked) {
+                    log.debug("Lock already released or expired for key '{}'", key)
+                }
+            }.subscribe(
+                { /* success - no action needed */ },
+                { e -> log.error("Failed to unlock key '{}': {}", key, e.message, e) },
+            )
+    }
 
     private fun executeCallable(
         callable: Callable<Mono<T?>>,

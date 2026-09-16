@@ -94,6 +94,21 @@ class ReqShield<T>(
         // ONLY_UPDATE_CACHE collapses requests on cache update only, so the creation runs without a lock
         val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
+        if (token != null) {
+            var cacheCreationRequired = false
+            try {
+                // Another request may have filled the cache between our initial miss and lock acquisition.
+                val cachedData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+                if (cachedData != null) return cachedData
+                cacheCreationRequired = true
+            } finally {
+                // On a miss, the existing creation path keeps the lock until its asynchronous write finishes.
+                if (!cacheCreationRequired) {
+                    reqShieldConfig.keyLock.unLock(key, lockType, token)
+                }
+            }
+        }
+
         return if (onlyUpdateCache || token != null) {
             createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
         } else {

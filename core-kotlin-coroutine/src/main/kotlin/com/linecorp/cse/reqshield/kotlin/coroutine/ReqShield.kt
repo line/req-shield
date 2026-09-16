@@ -98,6 +98,23 @@ class ReqShield<T>(
         val onlyUpdateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE
         val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
+        if (token != null) {
+            var cacheCreationRequired = false
+            try {
+                // Another request may have filled the cache between our initial miss and lock acquisition.
+                val cachedData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+                if (cachedData != null) return cachedData
+                cacheCreationRequired = true
+            } finally {
+                // A hit, read failure, or cancellation must release the token; creation owns it on a miss.
+                if (!cacheCreationRequired) {
+                    withContext(NonCancellable) {
+                        reqShieldConfig.keyLock.unLock(key, lockType, token)
+                    }
+                }
+            }
+        }
+
         return if (onlyUpdateCache || token != null) {
             createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
         } else {
