@@ -24,18 +24,23 @@ plugins {
     application
     `maven-publish`
     `java-library`
+    signing
+    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
 }
+
+val snapshotBuild = providers.gradleProperty("snapshotBuild").getOrElse("true").toBoolean()
 
 allprojects {
 
     group = "com.linecorp.cse.reqshield"
-    version = "1.0.0"
+    version = "1.0.0${if (snapshotBuild) "-SNAPSHOT" else ""}"
 
     apply {
         plugin("java-test-fixtures")
         plugin("maven-publish")
         plugin("java-library")
         plugin("jacoco")
+        plugin("signing")
     }
 
     repositories {
@@ -65,7 +70,7 @@ allprojects {
 
     // Enforce the minimum line coverage documented in CLAUDE.md for library modules.
     // Example applications (req-shield-*-example) are demos and are not held to the threshold.
-    if (project != rootProject && !project.name.startsWith("req-shield-")) {
+    if (project != rootProject && !project.name.endsWith("-example")) {
         tasks.withType<JacocoCoverageVerification> {
             dependsOn(tasks.test)
             violationRules {
@@ -100,6 +105,9 @@ subprojects {
         plugin("org.jlleitschuh.gradle.ktlint")
     }
     java {
+        withJavadocJar()
+        withSourcesJar()
+
         sourceCompatibility =
             when (project.name) {
                 in springBoot3ProjectNames -> JavaVersion.VERSION_17
@@ -113,37 +121,9 @@ subprojects {
     }
 
     afterEvaluate {
-        fun getProfile() = properties["PROFILE"] ?: System.getenv()["PROFILE"] ?: "local"
-
-        fun getVersion() = project.version.toString()
-
-        fun getSemanticPostfix() =
-            when (getProfile()) {
-                "real" -> ""
-                else -> "-SNAPSHOT"
-            }
-
-        version = "${getVersion()}${getSemanticPostfix()}"
+        if (project.name.endsWith("-example")) return@afterEvaluate
 
         publishing {
-            repositories {
-                maven {
-                    fun getUrl(): String =
-                        if (getProfile() == "real") {
-                            "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
-                        } else {
-                            "https://oss.sonatype.org/content/repositories/snapshots/"
-                        }
-
-                    url = uri(getUrl())
-
-                    credentials {
-                        username = System.getenv()["NEXUS_USER"]
-                        password = System.getenv()["NEXUS_PASS"]
-                    }
-                }
-            }
-
             publications {
                 register("mavenJava", MavenPublication::class) {
 
@@ -154,6 +134,14 @@ subprojects {
                         description.set("LINE Req-Shield")
                         url.set("https://github.com/line/req-shield.git")
 
+                        developers {
+                            developer {
+                                name.set("LINE Corporation")
+                                organization.set("LY Corporation")
+                                organizationUrl.set("https://www.lycorp.co.jp/en/")
+                            }
+                        }
+
                         licenses {
                             license {
                                 name.set("The Apache License, Version 2.0")
@@ -162,13 +150,32 @@ subprojects {
                         }
 
                         scm {
-                            url.set("scm:git@github.com:line/req-shield.git")
-                            connection.set("scm:git@github.com:line/req-shield.git")
-                            developerConnection.set("scm:git@github.com:line/req-shield.git")
+                            url.set("https://github.com/line/req-shield")
+                            connection.set("scm:git:https://github.com/line/req-shield.git")
+                            developerConnection.set("scm:git:ssh://git@github.com/line/req-shield.git")
                         }
                     }
                 }
             }
+        }
+
+        val signingKeyId = providers.gradleProperty("signingKeyId").orNull
+        val signingKey = providers.gradleProperty("signingKey").orNull
+        val signingPassword = providers.gradleProperty("signingPassword").orNull
+        if (signingKey != null) {
+            signing {
+                useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+                sign(publishing.publications["mavenJava"])
+            }
+        }
+    }
+}
+
+nexusPublishing {
+    repositories {
+        sonatype {
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
         }
     }
 }

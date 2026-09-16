@@ -21,6 +21,7 @@ import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
@@ -28,6 +29,7 @@ import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -43,9 +45,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 
 class ReqShieldTest : BaseReqShieldTest {
     private lateinit var reqShield: ReqShield<Product>
@@ -143,6 +147,142 @@ class ReqShieldTest : BaseReqShieldTest {
             createdAt = System.currentTimeMillis(),
             timeToLiveMillis = timeToLiveMillis,
         )
+
+    @Test
+    fun shouldReuseCacheWhenAnEarlierMissResumesAfterAnotherRequestFinishes() {
+        val cached = AtomicReference<ReqShieldData<Product>?>()
+        val reads = AtomicInteger()
+        val calls = AtomicInteger()
+        val missObserved = CountDownLatch(1)
+        val resumeMiss = CountDownLatch(1)
+        val callerExecutor = Executors.newSingleThreadExecutor()
+        val cacheExecutor = Executors.newSingleThreadScheduledExecutor()
+        val isolatedKey = "delayed-miss-${java.util.UUID.randomUUID()}"
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(
+                    setCacheFunction = { _, data, _ ->
+                        cached.set(data)
+                        true
+                    },
+                    getCacheFunction = {
+                        if (reads.incrementAndGet() == 1) {
+                            // Resume this stale miss only after the winner has written the cache and unlocked.
+                            missObserved.countDown()
+                            check(resumeMiss.await(2, TimeUnit.SECONDS))
+                            null
+                        } else {
+                            cached.get()
+                        }
+                    },
+                    executor = cacheExecutor,
+                ),
+            )
+        val supplier =
+            Callable {
+                calls.incrementAndGet()
+                value
+            }
+
+        try {
+            val delayed =
+                callerExecutor.submit<ReqShieldData<Product>> {
+                    shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis)
+                }
+            assertTrue(missObserved.await(2, TimeUnit.SECONDS))
+            val winner = shield.getAndSetReqShieldData(isolatedKey, supplier, timeToLiveMillis)
+            // A barrier on the single-thread executor also waits for the cache write's unlock.
+            cacheExecutor.submit {}.get(2, TimeUnit.SECONDS)
+            assertSame(winner, cached.get())
+            resumeMiss.countDown()
+            val result = delayed.get(2, TimeUnit.SECONDS)
+            assertEquals(1, calls.get())
+            assertSame(winner, result)
+        } finally {
+            resumeMiss.countDown()
+            callerExecutor.shutdownNow()
+            cacheExecutor.shutdownNow()
+            assertTrue(callerExecutor.awaitTermination(2, TimeUnit.SECONDS))
+            assertTrue(cacheExecutor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun shouldReuseNullValuedCacheAfterAcquiringLocalLock() {
+        val cached = freshData(null)
+        every { cacheGetter(key) } returnsMany listOf(null, cached)
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+
+        assertSame(cached, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+        verify(exactly = 0) { callable.call() }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReuseCacheAfterAcquiringGlobalLockAndReleaseItsToken() {
+        val cached = freshData(value)
+        every { cacheGetter(key) } returnsMany listOf(null, cached)
+        every { globalLockFunc(any(), any(), any()) } returns true
+        every { globalUnLockFunc(any(), any()) } returns true
+
+        assertSame(cached, reqShieldForGlobalLock.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+
+        val owner = slot<String>()
+        val lockKey = "$LOCK_KEY_PREFIX${key}_${LockType.CREATE.name}"
+        verify(exactly = 1) { globalLockFunc(lockKey, capture(owner), 3000) }
+        verify(exactly = 1) { globalUnLockFunc(lockKey, owner.captured) }
+        verify(exactly = 0) { callable.call() }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReleaseLockWhenCacheRecheckFails() {
+        val failure = IllegalStateException("cache recheck failed")
+        every { cacheGetter(key) } returns null andThenThrows failure
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+
+        val error = assertThrows<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+
+        assertEquals(ErrorCode.GET_CACHE_ERROR, error.errorCode)
+        assertSame(failure, error.cause)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() {
+        val writeStarted = CountDownLatch(1)
+        val finishWrite = CountDownLatch(1)
+        val cacheExecutor = Executors.newSingleThreadScheduledExecutor()
+        every { cacheGetter(key) } returns null
+        every { cacheSetter(key, any(), any()) } answers {
+            writeStarted.countDown()
+            check(finishWrite.await(2, TimeUnit.SECONDS))
+            true
+        }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = cacheExecutor))
+
+        try {
+            assertEquals(value, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis).value)
+            assertTrue(writeStarted.await(2, TimeUnit.SECONDS))
+            verify(exactly = 2) { cacheGetter(key) }
+            verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, createToken) }
+            finishWrite.countDown()
+            cacheExecutor.submit {}.get(2, TimeUnit.SECONDS)
+            verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+            verify(exactly = 1) { callable.call() }
+        } finally {
+            finishWrite.countDown()
+            cacheExecutor.shutdownNow()
+            assertTrue(cacheExecutor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
 
     @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() {
