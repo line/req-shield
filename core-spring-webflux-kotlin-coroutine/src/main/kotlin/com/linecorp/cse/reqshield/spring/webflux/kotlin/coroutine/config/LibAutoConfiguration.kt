@@ -31,7 +31,7 @@ import org.springframework.context.annotation.Import
 import kotlin.coroutines.CoroutineContext
 
 @Configuration
-@EnableAspectJAutoProxy(proxyTargetClass = true)
+@EnableAspectJAutoProxy
 @Import(ReqShieldAspect::class)
 open class LibAutoConfiguration {
     /**

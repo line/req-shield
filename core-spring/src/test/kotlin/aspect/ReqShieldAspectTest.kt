@@ -42,7 +42,6 @@ import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.cache.interceptor.KeyGenerator
-import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.util.ReflectionUtils
 import java.lang.reflect.Method
 import java.time.Duration
@@ -299,7 +298,8 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
         // when, then
         assertEquals(
-            "$cacheName::${SimpleKeyGenerator.generateKey(arrayOf(argument))}",
+            // SimpleKeyGenerator returns a single non-array argument as the key, so the key is the argument itself
+            "$cacheName::{x=paramX, y=paramY}",
             reqShieldAspect.getCacheableCacheKey(joinPoint),
         )
     }

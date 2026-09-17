@@ -18,6 +18,7 @@ package com.linecorp.cse.reqshield
 
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -37,7 +38,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
     override fun testConcurrencyWithOneKey() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
         val executorService = Executors.newFixedThreadPool(20)
-        val key = "myKey"
+        val key = "myKey-concurrency-one"
         val lockType = LockType.CREATE
         val lockAcquiredCount = AtomicInteger(0)
         val tasksCompletedCount = AtomicInteger(0)
@@ -115,7 +116,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
     @Test
     override fun testLockExpiration() {
         val keyLock = KeyLocalLock(lockTimeoutMillis)
-        val key = "myKey"
+        val key = "myKey-lock-expiration"
         val lockType = LockType.CREATE
 
         assertNotNull(keyLock.tryLock(key, lockType))
@@ -618,6 +619,56 @@ class KeyLocalLockTest : BaseKeyLockTest {
 
         keyLock.shutdown()
     }
+
+    /**
+     * The expired-lock monitor's only externally observable effect is that its entry disappears
+     * from the (otherwise private) global lockMap without anyone calling tryLock/unLock for that
+     * key. tryLock() itself force-releases an expired lock inline, so a test that only calls
+     * tryLock/unLock again cannot tell the monitor's removal apart from that inline force-release.
+     * Reflection into the companion's private lockMap is deliberate: it is the only way to prove
+     * the monitor itself, rather than tryLock's inline fallback, is what removes the entry.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun readLockMap(): Map<String, Any> {
+        // The companion's private val is compiled as a static field on the outer class, not on
+        // the Companion nested class.
+        val field = KeyLocalLock::class.java.getDeclaredField("lockMap")
+        field.isAccessible = true
+        return field.get(null) as Map<String, Any>
+    }
+
+    @Test
+    fun `expired-lock monitor removes entries from the shared lock map without any tryLock or unLock call`() {
+        val lockTimeout = 300L
+        val keyLock = KeyLocalLock(lockTimeout)
+        val keys = List(5) { "monitor-removal-test-$it-${java.util.UUID.randomUUID()}" }
+
+        // Given: several locks acquired and left held (never unlocked by this test).
+        keys.forEach { key -> assertNotNull(keyLock.tryLock(key, LockType.CREATE)) }
+        assertTrue(keys.all { readLockMap().containsKey(buildLockKeyForTest(it, LockType.CREATE)) })
+
+        // When: waiting past expiry + the monitor's sweep interval, with nobody calling
+        // tryLock/unLock for these keys in the meantime.
+        await()
+            .atMost(Duration.ofMillis(lockTimeout + LOCK_MONITOR_INTERVAL_MILLIS * 2 + 1000L))
+            .untilAsserted {
+                val map = readLockMap()
+                keys.forEach { key ->
+                    assertFalse(
+                        map.containsKey(buildLockKeyForTest(key, LockType.CREATE)),
+                        "Monitor should have removed the expired entry for $key",
+                    )
+                }
+            }
+
+        keyLock.shutdown()
+    }
+
+    /** Mirrors KeyLocalLock's private buildLockKey so the test can look up the same map key. */
+    private fun buildLockKeyForTest(
+        key: String,
+        lockType: LockType,
+    ) = "${com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX}${key}_${lockType.name}"
 
     private fun doWork() = Thread.sleep(1000)
 }

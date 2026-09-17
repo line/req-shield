@@ -579,6 +579,33 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
+    fun testSetMethodCacheExistsAndTheUpdateTargetButUpdateLockNotAcquired() {
+        timeToLiveMillis = 1000
+        val isolatedKey = "update-lock-not-acquired-${java.util.UUID.randomUUID()}"
+        val reqShieldData = updateTargetData(oldValue)
+        val cacheExecutor = Executors.newSingleThreadScheduledExecutor()
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = cacheExecutor))
+
+        every { cacheGetter.invoke(isolatedKey) } returns reqShieldData
+        every { keyLock.tryLock(isolatedKey, LockType.UPDATE) } returns null
+
+        try {
+            val result = shield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis)
+            // Flush the executor so any (wrongly) queued refresh work would have run by now.
+            cacheExecutor.submit {}.get(2, TimeUnit.SECONDS)
+
+            assertSame(reqShieldData, result)
+            verify { keyLock.tryLock(isolatedKey, LockType.UPDATE) }
+            verify(inverse = true) { keyLock.unLock(isolatedKey, LockType.UPDATE, any()) }
+            verify(inverse = true) { callable.call() }
+            verify(inverse = true) { cacheSetter.invoke(isolatedKey, any(), any()) }
+        } finally {
+            cacheExecutor.shutdownNow()
+            assertTrue(cacheExecutor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull() {
         timeToLiveMillis = 1000
         val reqShieldData = updateTargetData(value)

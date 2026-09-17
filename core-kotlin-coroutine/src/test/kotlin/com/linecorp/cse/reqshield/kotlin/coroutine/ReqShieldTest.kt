@@ -616,6 +616,27 @@ class ReqShieldTest : BaseReqShieldTest {
         }
 
     @Test
+    fun testSetMethodCacheExistsAndTheUpdateTargetButUpdateLockNotAcquired() =
+        runTest {
+            val timeToLiveMillis: Long = 1000
+            val isolatedKey = "update-lock-not-acquired-${java.util.UUID.randomUUID()}"
+            val reqShieldData = updateTargetData(oldValue, timeToLiveMillis)
+
+            coEvery { cacheGetter.invoke(isolatedKey) } returns reqShieldData
+            coEvery { keyLock.tryLock(isolatedKey, LockType.UPDATE) } returns null
+
+            val result = reqShield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis)
+            // Flush any (wrongly) queued refresh work on the background scope before asserting absence.
+            awaitBackgroundWrites()
+
+            assertSame(reqShieldData, result)
+            coVerify { keyLock.tryLock(isolatedKey, LockType.UPDATE) }
+            coVerify(inverse = true) { keyLock.unLock(isolatedKey, LockType.UPDATE, any()) }
+            coVerify(inverse = true) { callable() }
+            coVerify(inverse = true) { cacheSetter.invoke(isolatedKey, any(), any()) }
+        }
+
+    @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() =
         runTest {
             val timeToLiveMillis: Long = 1000

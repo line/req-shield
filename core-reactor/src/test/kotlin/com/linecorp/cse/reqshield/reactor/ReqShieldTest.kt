@@ -629,6 +629,36 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
+    fun testSetMethodCacheExistsAndTheUpdateTargetButUpdateLockNotAcquired() {
+        timeToLiveMillis = 1000
+        val reqShieldData = updateTargetReqShieldData(oldValue)
+        // Schedulers.immediate() makes the fire-and-forget refresh run synchronously (if it were
+        // triggered at all), so a zero-invocation assertion right after the call is conclusive.
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()),
+            )
+
+        every { cacheGetter.invoke(key) } returns Mono.just(reqShieldData)
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.empty()
+
+        val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        StepVerifier
+            .create(result)
+            .expectNextMatches {
+                assertEquals(reqShieldData, it)
+                true
+            }.expectComplete()
+            .verify()
+
+        verify { keyLock.tryLock(key, LockType.UPDATE) }
+        verify(inverse = true) { keyLock.unLock(key, LockType.UPDATE, any()) }
+        verify(inverse = true) { callable.call() }
+        verify(inverse = true) { cacheSetter.invoke(key, any(), any()) }
+    }
+
+    @Test
     override fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache() {
         timeToLiveMillis = 1000
         val reqShieldData = updateTargetReqShieldData(oldValue)

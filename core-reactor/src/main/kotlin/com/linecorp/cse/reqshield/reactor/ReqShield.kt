@@ -286,7 +286,9 @@ class ReqShield<T>(
         getFunction: (String) -> Mono<ReqShieldData<T>?>,
         key: String,
     ): Mono<ReqShieldData<T>?> =
-        getFunction(key)
+        // Deferred so a client function that throws synchronously fails as an onError signal.
+        Mono
+            .defer { getFunction(key) }
             .onErrorMap { e -> ClientException(ErrorCode.GET_CACHE_ERROR, cause = e) }
 
     private fun executeSetCacheFunction(
@@ -296,7 +298,10 @@ class ReqShield<T>(
         lockType: LockType,
         token: String?,
     ): Mono<Boolean> =
-        setFunction(key, value, value.timeToLiveMillis)
+        // Deferred so a client function that throws synchronously fails as an onError signal,
+        // which keeps the lock release in doFinally reachable.
+        Mono
+            .defer { setFunction(key, value, value.timeToLiveMillis) }
             .onErrorMap { e -> ClientException(ErrorCode.SET_CACHE_ERROR, cause = e) }
             .doFinally {
                 // Only the holder of a token took a lock, so only it may release one.
@@ -328,8 +333,10 @@ class ReqShield<T>(
         lockType: LockType?,
         token: String?,
     ): Mono<T?> =
-        callable
-            .call()
+        // Deferred so a supplier that throws synchronously fails as an onError signal,
+        // which keeps the lock release below reachable.
+        Mono
+            .defer { callable.call() }
             .doOnError { _ ->
                 // Only the holder of a token took a lock, so only it may release one.
                 if (lockType != null && token != null) {
