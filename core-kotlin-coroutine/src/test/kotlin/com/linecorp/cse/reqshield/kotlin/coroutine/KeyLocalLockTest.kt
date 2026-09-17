@@ -119,7 +119,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
     override fun testConcurrencyWithOneKey() =
         runBlocking {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
-            val key = "myKey"
+            val key = "myKey-concurrency-one"
             val lockType = LockType.CREATE
             val lockAcquiredCount = AtomicInteger(0)
             val tasksCompletedCount = AtomicInteger(0)
@@ -199,7 +199,7 @@ class KeyLocalLockTest : BaseKeyLockTest {
     override fun testLockExpiration() =
         runBlocking {
             val keyLock = KeyLocalLock(lockTimeoutMillis)
-            val key = "myKey"
+            val key = "myKey-lock-expiration"
             val lockType = LockType.CREATE
 
             assertNotNull(keyLock.tryLock(key, lockType))

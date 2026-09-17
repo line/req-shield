@@ -26,6 +26,7 @@ import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.reflect.MethodSignature
+import org.springframework.aop.support.AopUtils
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.BeanFactoryAware
 import org.springframework.beans.factory.annotation.Qualifier
@@ -129,7 +130,12 @@ class ReqShieldAspect<T>(
         return ReqShield(reqShieldConfiguration)
     }
 
-    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
+    /**
+     * A JDK dynamic proxy reports the interface method, which carries none of the annotations, so the
+     * implementation method is resolved from the target class instead.
+     */
+    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method =
+        AopUtils.getMostSpecificMethod((joinPoint.signature as MethodSignature).method, joinPoint.target?.javaClass)
 
     internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
         AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheable::class.java)
@@ -180,7 +186,7 @@ class ReqShieldAspect<T>(
                 getOrParseExpression(annotationCacheKey).getValue(context, String::class.java)
             } else {
                 val keyGenerator = getOrCreateKeyGenerator(annotationCacheKeyGenerator)
-                keyGenerator.generate(joinPoint.target, method, joinPoint.args).toString()
+                keyGenerator.generate(joinPoint.target, method, *joinPoint.args).toString()
             }
 
         require(!key.isNullOrBlank()) {

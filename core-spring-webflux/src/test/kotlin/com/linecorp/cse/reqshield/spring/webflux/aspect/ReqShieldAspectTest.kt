@@ -33,7 +33,6 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.cache.interceptor.KeyGenerator
-import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.util.ReflectionUtils
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
@@ -55,7 +54,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val cacheKeyGenerator = "customGenerator"
     private val spelEvaluatedKey = "$cacheName::paramXparamY"
     private val keyGeneratorKey = "$cacheName::KeyGeneratedByGenerator"
-    private val defaultGeneratedKey = "$cacheName::${SimpleKeyGenerator.generateKey(arrayOf(argument))}"
+
+    // SimpleKeyGenerator returns a single non-array argument as the key, so the key is the argument itself
+    private val defaultGeneratedKey = "$cacheName::{x=paramX, y=paramY}"
 
     private val beanFactory = mockk<BeanFactory>()
 

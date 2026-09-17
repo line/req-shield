@@ -25,7 +25,7 @@ import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 
 @Configuration
-@EnableAspectJAutoProxy(proxyTargetClass = true)
+@EnableAspectJAutoProxy
 @Import(ReqShieldAspect::class)
 open class LibAutoConfiguration {
     /**

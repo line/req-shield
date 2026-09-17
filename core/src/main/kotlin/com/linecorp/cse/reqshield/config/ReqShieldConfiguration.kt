@@ -51,12 +51,7 @@ data class ReqShieldConfiguration<T>(
      */
     val executor: ScheduledExecutorService = sharedExecutor,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
-    val keyLock: KeyLock =
-        if (isLocalLock) {
-            KeyLocalLock(lockTimeoutMillis)
-        } else {
-            KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
-        },
+    val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 ) {
@@ -89,6 +84,28 @@ data class ReqShieldConfiguration<T>(
         }
     }
 }
+
+/**
+ * Builds the [KeyLock] used when the caller does not pass one.
+ *
+ * A default parameter expression is evaluated before the init block, so the global lock functions
+ * must be validated here as well to report a missing one as an [IllegalArgumentException].
+ */
+private fun defaultKeyLock(
+    isLocalLock: Boolean,
+    globalLockFunction: ((String, String, Long) -> Boolean)?,
+    globalUnLockFunction: ((String, String) -> Boolean)?,
+    lockTimeoutMillis: Long,
+): KeyLock =
+    if (isLocalLock) {
+        KeyLocalLock(lockTimeoutMillis)
+    } else {
+        KeyGlobalLock(
+            requireNotNull(globalLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_LOCK_FUNCTION.message },
+            requireNotNull(globalUnLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_UNLOCK_FUNCTION.message },
+            lockTimeoutMillis,
+        )
+    }
 
 enum class ReqShieldWorkMode {
     CREATE_AND_UPDATE_CACHE,
