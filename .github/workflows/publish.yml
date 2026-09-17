@@ -48,12 +48,6 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Run tests
-        run: ./gradlew test
-        env:
-          TEST_REDIS_HOST: localhost
-          TEST_REDIS_PORT: 6379
-
       - name: Set snapshot version
         if: inputs.target == 'dev'
         run: sed -i 's/snapshotBuild=false/snapshotBuild=true/' gradle.properties
@@ -64,6 +58,9 @@ jobs:
 
       - name: Build with Gradle
         run: ./gradlew build
+        env:
+          TEST_REDIS_HOST: localhost
+          TEST_REDIS_PORT: 6379
 
       - name: Publish Dev Snapshot to Sonatype
         if: inputs.target == 'dev'
