@@ -16,6 +16,7 @@
 
 package com.linecorp.cse.reqshield
 
+import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
@@ -51,9 +52,11 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
          */
         val isHeld: AtomicBoolean = AtomicBoolean(false),
         /**
-         * Ownership token of the current holder, null when the lock is not held.
+         * Ownership token of the current holder.
          * Only the holder presenting this token may release the lock, which keeps a holder
          * whose lock expired from releasing the lock of the holder that took it over.
+         * It is null only while the entry is being built inside compute(): unLock and the monitor
+         * drop the whole entry instead of clearing the token, so every entry in the map is held.
          * @Volatile ensures visibility across threads when updated inside compute() and read by monitor.
          */
         @Volatile var token: String? = null,
@@ -189,6 +192,15 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
                 }
                 existing
             } else {
+                // At the cap, hand out a permit that no map entry backs instead of refusing.
+                // The caller then takes its normal path and writes the cache; making it wait
+                // would stall it on a holder that does not exist. Only this key's collapsing
+                // is lost, and the later unLock simply finds nothing to release.
+                if (LocalLockLimit.rejectsNewEntry(lockMap.mappingCount())) {
+                    acquiredToken.set(nextToken())
+                    return@compute null
+                }
+
                 // New entry: create and acquire
                 val token = nextToken()
                 val newLock = LockInfo(Semaphore(1), now + lockTimeoutMillis)
@@ -210,19 +222,22 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
         val completeKey = buildLockKey(key, lockType)
         val released = AtomicBoolean(false)
 
-        // Release inside compute() so that ownership check and release are atomic with respect to
-        // tryLock() and the monitor cleanup. Reading the token outside compute() would allow
-        // "read token == mine -> lock expires and is reacquired by someone else -> release" and
-        // would therefore release the new owner's lock.
+        // Release inside compute() so that the ownership check, the release and the removal are
+        // atomic with respect to tryLock() and the monitor cleanup. Reading the token outside
+        // compute() would allow "read token == mine -> lock expires and is reacquired by someone
+        // else -> release" and would therefore release the new owner's lock.
         lockMap.compute(completeKey) { _, existing ->
             if (existing == null) return@compute null
 
             if (existing.token == token && existing.isHeld.compareAndSet(true, false)) {
-                existing.token = null
                 existing.semaphore.release()
                 released.set(true)
+                // Drop the entry immediately rather than leaving it for the monitor. No reference
+                // to it escapes this lambda, and the next tryLock() just creates a fresh one, so
+                // keeping it would only pin the key until its lockTimeoutMillis runs out.
+                return@compute null
             }
-            existing // Keep the entry, the monitor removes it once expired
+            existing
         }
 
         if (!released.get()) {

@@ -17,6 +17,8 @@
 package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
+import com.linecorp.cse.reqshield.support.config.LocalLockLimit
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -391,6 +393,115 @@ class KeyLocalLockTest : BaseKeyLockTest {
             )
 
             keyLock.cancel()
+        }
+
+    /**
+     * The lock map is private to the companion, so reflection is the only way to observe that
+     * unLock really drops the entry rather than leaving it for the expiry monitor.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun readLockMap(): Map<String, Any> {
+        // The companion's private val is compiled as a static field on the outer class.
+        val field = KeyLocalLock::class.java.getDeclaredField("lockMap")
+        field.isAccessible = true
+        return field.get(null) as Map<String, Any>
+    }
+
+    @Test
+    fun `unLock removes the map entry right away instead of leaving it until expiry`() =
+        runBlocking {
+            // A long lock timeout rules the monitor out as the remover: were the entry kept by
+            // unLock, it would still be in the map for the next 60 seconds.
+            val keyLock = KeyLocalLock(60_000L)
+            val key = "unlock-removal-test-${java.util.UUID.randomUUID()}"
+            val mapKey = lockKeyOf(key, LockType.CREATE)
+
+            val token = assertNotNull(keyLock.tryLock(key, LockType.CREATE))
+            assertTrue(readLockMap().containsKey(mapKey), "A held lock must have an entry in the map")
+
+            assertTrue(keyLock.unLock(key, LockType.CREATE, token))
+            assertFalse(readLockMap().containsKey(mapKey), "unLock must drop the entry, not wait for the monitor")
+
+            keyLock.cancel()
+        }
+
+    @Test
+    fun `at the cap tryLock still grants a permit but stops adding map entries`() =
+        runBlocking {
+            val keyLock = KeyLocalLock(60_000L)
+            val first = "cap-test-first-${java.util.UUID.randomUUID()}"
+            val second = "cap-test-second-${java.util.UUID.randomUUID()}"
+
+            // Taken while still uncapped, so it always succeeds. Its 60s timeout keeps the entry
+            // in the map for the rest of the test, which is what makes a cap of one deterministic
+            // here: the map can only grow from this point, never shrink below one.
+            val firstToken = assertNotNull(keyLock.tryLock(first, LockType.CREATE))
+            assertTrue(readLockMap().containsKey(lockKeyOf(first, LockType.CREATE)))
+
+            LocalLockLimit.maxEntries = 1
+            try {
+                val secondToken =
+                    assertNotNull(
+                        keyLock.tryLock(second, LockType.CREATE),
+                        "past the cap the caller must still get a permit, so it writes the cache " +
+                            "instead of waiting for a holder that does not exist",
+                    )
+                assertFalse(
+                    readLockMap().containsKey(lockKeyOf(second, LockType.CREATE)),
+                    "a permit handed out past the cap must not add a map entry",
+                )
+                assertFalse(
+                    keyLock.unLock(second, LockType.CREATE, secondToken),
+                    "the permit is backed by no entry, so releasing it finds nothing",
+                )
+
+                // Losing collapsing for that key is exactly what the cap costs.
+                assertNotNull(
+                    keyLock.tryLock(second, LockType.CREATE),
+                    "past the cap a second caller for the same key is not collapsed either",
+                )
+            } finally {
+                LocalLockLimit.maxEntries = UNLIMITED_LOCK_ENTRIES
+            }
+
+            keyLock.unLock(first, LockType.CREATE, firstToken)
+            keyLock.cancel()
+        }
+
+    /**
+     * Only this module and the reactor one can pin this: reaching the existing-entry branch needs
+     * an expired entry that nothing sweeps, which means stopping the monitor. The core module has
+     * no equivalent hook, so the same case stays uncovered there.
+     */
+    @Test
+    fun `an entry already in the map is reacquired even when the map is at its cap`() =
+        runBlocking {
+            // Construct both locks first - each constructor restarts the monitor - then stop it,
+            // so the expired entry below survives for the rest of the test.
+            val shortLock = KeyLocalLock(1L)
+            val longLock = KeyLocalLock(60_000L)
+            KeyLocalLock.stopMonitoring()
+
+            val key = "cap-existing-${java.util.UUID.randomUUID()}"
+            assertNotNull(shortLock.tryLock(key, LockType.CREATE))
+            delay(20L) // the lock has timed out, and with the monitor stopped nothing removes it
+
+            LocalLockLimit.maxEntries = readLockMap().size.toLong() // exactly full
+            try {
+                val reacquired =
+                    assertNotNull(
+                        longLock.tryLock(key, LockType.CREATE),
+                        "an entry already in the map must not be subject to the cap",
+                    )
+                // A real lock, not a cap permit: it excludes the next caller and releases cleanly.
+                assertNull(longLock.tryLock(key, LockType.CREATE))
+                assertTrue(longLock.unLock(key, LockType.CREATE, reacquired))
+            } finally {
+                LocalLockLimit.maxEntries = UNLIMITED_LOCK_ENTRIES
+            }
+
+            shortLock.cancel()
+            longLock.cancel()
         }
 
     private suspend fun doWork() = delay(1000)

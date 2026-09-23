@@ -100,6 +100,44 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - The example modules contain working implementations for `RedisTemplate`, `ReactiveRedisTemplate` and the coroutine
   extensions.
 
+### Local lock map size
+
+- The local lock (`isLocalLock = true`, the default) keeps one entry per `(cache key, lock type)` it is currently
+  locking, in a map shared by the whole JVM. A cache key that is both created and refreshed therefore uses up to two
+  entries.
+- An entry is dropped as soon as the lock is released; an entry whose holder never released it is dropped by the
+  cleanup monitor once `lockTimeoutMillis` has passed, which runs on a 1 s interval and so can lag by up to that much.
+  The map's size therefore tracks how many keys are being locked **at the same time**, not how many distinct keys the
+  application sees. A service with 50 ms of supplier latency at 10k rps holds roughly 500 locks at once.
+- The map is uncapped by default. To bound it, set `req-shield.lock.max-entries`; `0` (the default) means uncapped.
+  Size it against concurrent lock ownership, not key cardinality.
+
+  ```yaml
+  # Spring modules: read from the Environment, so application.yml works
+  req-shield:
+    lock:
+      max-entries: 2000
+  ```
+
+  ```bash
+  # core / core-reactor / core-kotlin-coroutine used directly: system property
+  java -Dreq-shield.lock.max-entries=2000 -jar app.jar
+  ```
+
+  The Spring modules read the same key from the `Environment`, so a `-D` override still outranks the yml entry there,
+  and `REQ_SHIELD_LOCK_MAX_ENTRIES` works as an environment variable.
+- Once the map is full, a request for a **new** key is handed a permit that no map entry backs. It then runs exactly as
+  if it had taken the lock - it calls the supplier and writes the cache - so what the cap costs is request collapsing
+  for that key, and nothing else: no added latency, and the cache still gets populated. Keys whose entry is already in
+  the map are not subject to the cap at all.
+- The cap is a soft one. The size check is an estimate and is not atomic with the insertion it guards, so concurrent
+  callers can push the map slightly past the configured number.
+- The first refusal and every 1000th after it are logged at WARN.
+- A value that cannot be read as a non-negative number is logged at WARN and ignored, leaving the current cap
+  unchanged. This is deliberate in both directions: a class initializer that throws would poison the library for the
+  whole JVM, and an application context should not fail to start over a tuning knob typo. Setting the cap
+  programmatically (`LocalLockLimit.maxEntries = -1`) still fails fast, because there the stack trace is actionable.
+
 ### Cache eviction semantics
 
 - `@ReqShieldCacheEvict` evicts **after** the annotated method completes successfully (Spring's `@CacheEvict` default).

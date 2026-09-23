@@ -18,7 +18,9 @@ package com.linecorp.cse.reqshield
 
 import com.linecorp.cse.reqshield.support.BaseKeyLockTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
+import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -661,6 +663,65 @@ class KeyLocalLockTest : BaseKeyLockTest {
                 }
             }
 
+        keyLock.shutdown()
+    }
+
+    @Test
+    fun `unLock removes the map entry right away instead of leaving it until expiry`() {
+        // A long lock timeout rules the monitor out as the remover: were the entry kept by unLock,
+        // it would still be in the map for the next 60 seconds.
+        val keyLock = KeyLocalLock(60_000L)
+        val key = "unlock-removal-test-${java.util.UUID.randomUUID()}"
+        val mapKey = buildLockKeyForTest(key, LockType.CREATE)
+
+        val token = assertNotNull(keyLock.tryLock(key, LockType.CREATE))
+        assertTrue(readLockMap().containsKey(mapKey), "A held lock must have an entry in the map")
+
+        assertTrue(keyLock.unLock(key, LockType.CREATE, token))
+        assertFalse(readLockMap().containsKey(mapKey), "unLock must drop the entry, not wait for the monitor")
+
+        keyLock.shutdown()
+    }
+
+    @Test
+    fun `at the cap tryLock still grants a permit but stops adding map entries`() {
+        val keyLock = KeyLocalLock(60_000L)
+        val first = "cap-test-first-${java.util.UUID.randomUUID()}"
+        val second = "cap-test-second-${java.util.UUID.randomUUID()}"
+
+        // Taken while still uncapped, so it always succeeds. Its 60s timeout keeps the entry in
+        // the map for the rest of the test, which is what makes a cap of one deterministic here:
+        // the map can only grow from this point, never shrink below one.
+        val firstToken = assertNotNull(keyLock.tryLock(first, LockType.CREATE))
+        assertTrue(readLockMap().containsKey(buildLockKeyForTest(first, LockType.CREATE)))
+
+        LocalLockLimit.maxEntries = 1
+        try {
+            val secondToken =
+                assertNotNull(
+                    keyLock.tryLock(second, LockType.CREATE),
+                    "past the cap the caller must still get a permit, so it writes the cache " +
+                        "instead of waiting for a holder that does not exist",
+                )
+            assertFalse(
+                readLockMap().containsKey(buildLockKeyForTest(second, LockType.CREATE)),
+                "a permit handed out past the cap must not add a map entry",
+            )
+            assertFalse(
+                keyLock.unLock(second, LockType.CREATE, secondToken),
+                "the permit is backed by no entry, so releasing it finds nothing",
+            )
+
+            // Losing collapsing for that key is exactly what the cap costs.
+            assertNotNull(
+                keyLock.tryLock(second, LockType.CREATE),
+                "past the cap a second caller for the same key is not collapsed either",
+            )
+        } finally {
+            LocalLockLimit.maxEntries = UNLIMITED_LOCK_ENTRIES
+        }
+
+        keyLock.unLock(first, LockType.CREATE, firstToken)
         keyLock.shutdown()
     }
 
