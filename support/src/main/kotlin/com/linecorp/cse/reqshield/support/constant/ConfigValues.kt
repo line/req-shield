@@ -34,4 +34,14 @@ object ConfigValues {
 
     /** Prefix applied to every lock key so lock entries can never collide with cache entries. */
     const val LOCK_KEY_PREFIX = "reqshield:lock:"
+
+    /**
+     * Caps how many entries the local lock map may hold. The core modules read it from the system
+     * properties; the Spring modules read the same key from the Environment, which also covers
+     * application.yml and REQ_SHIELD_LOCK_MAX_ENTRIES.
+     */
+    const val MAX_LOCK_ENTRIES_PROPERTY = "req-shield.lock.max-entries"
+
+    /** Value of [MAX_LOCK_ENTRIES_PROPERTY] that leaves the local lock map uncapped. */
+    const val UNLIMITED_LOCK_ENTRIES = 0L
 }
