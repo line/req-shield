@@ -20,7 +20,6 @@ import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
-import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -759,7 +758,9 @@ class ReqShieldTest : BaseReqShieldTest {
 
     @Test
     fun `should keep waiting when cache read failures are not consecutive`() {
-        val maxAttemptGetCache = 5
+        // 9 polls alternate empty/failed, so without the reset the counter would reach the
+        // 3-failure limit on the 6th poll and the wait would stop early.
+        val maxAttemptGetCache = 9
         val reqShieldSmallAttempt =
             ReqShield(
                 ReqShieldConfiguration(
@@ -784,11 +785,8 @@ class ReqShieldTest : BaseReqShieldTest {
 
         assertEquals(value, result.value)
         verify(exactly = 1) { callable.call() }
-        // 1 initial read + 5 empty polls + 4 interleaved failures; bailing out early would read less
-        assertTrue(
-            getCount >= 1 + maxAttemptGetCache * 2 - 1,
-            "Expected at least ${1 + maxAttemptGetCache * 2 - 1} cache reads but was $getCount",
-        )
+        // A failed read counts as an attempt, so the wait is bounded by maxAttemptGetCache polls
+        assertEquals(1 + maxAttemptGetCache, getCount)
     }
 
     @Test
@@ -819,23 +817,20 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldCancelQueuedPollingWhenWaitingTimesOut() {
+    fun `should keep polling on the caller thread even when the executor is saturated`() {
         val executor = Executors.newSingleThreadScheduledExecutor()
         val releaseExecutor = CountDownLatch(1)
         val executorBlocked = CountDownLatch(1)
+        val cachedData = freshData(value)
         val reads = AtomicInteger()
         every { keyLock.tryLock(key, LockType.CREATE) } returns null
         val shield =
             ReqShield(
                 ReqShieldConfiguration(
                     setCacheFunction = cacheSetter,
-                    getCacheFunction = {
-                        reads.incrementAndGet()
-                        null
-                    },
+                    getCacheFunction = { if (reads.incrementAndGet() >= 3) cachedData else null },
                     keyLock = keyLock,
                     executor = executor,
-                    maxAttemptGetCache = 1,
                 ),
             )
 
@@ -848,12 +843,9 @@ class ReqShieldTest : BaseReqShieldTest {
 
             val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
 
-            assertEquals(value, result.value)
-            verify(exactly = 1) { callable.call() }
-            releaseExecutor.countDown()
-            // The barrier runs after the queued poll would have become eligible.
-            executor.schedule({}, GET_CACHE_INTERVAL_MILLIS * 2, TimeUnit.MILLISECONDS).get(2, TimeUnit.SECONDS)
-            assertEquals(1, reads.get(), "Only the initial cache read should run")
+            // The wait runs on the caller thread, so a busy executor cannot stop it from seeing the write
+            assertEquals(cachedData, result)
+            verify(exactly = 0) { callable.call() }
         } finally {
             releaseExecutor.countDown()
             executor.shutdownNow()

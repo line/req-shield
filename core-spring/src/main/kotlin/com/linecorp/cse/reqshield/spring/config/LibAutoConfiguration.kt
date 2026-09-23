@@ -21,8 +21,8 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
 import org.springframework.context.annotation.Import
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicLong
 
 @Configuration
@@ -31,13 +31,14 @@ import java.util.concurrent.atomic.AtomicLong
 open class LibAutoConfiguration {
     /**
      * Pool shared by every [com.linecorp.cse.reqshield.ReqShield] the aspect creates, used for the
-     * asynchronous cache writes and for polling the cache while another request holds the lock.
+     * asynchronous cache writes.
      *
-     * Spring's inferred destroy method calls [ScheduledExecutorService.shutdown] when the context is
-     * closed; the threads are daemons anyway so a pending task can never block JVM shutdown.
+     * Declared as an [ExecutorService] because this pool is owned by the context: Spring's inferred
+     * destroy method calls [ExecutorService.shutdown] when the context is closed. The threads are
+     * daemons anyway so a pending task can never block JVM shutdown.
      */
     @Bean
-    open fun reqShieldExecutor(): ScheduledExecutorService {
+    open fun reqShieldExecutor(): ExecutorService {
         val threadCounter = AtomicLong(0)
 
         return Executors.newScheduledThreadPool(

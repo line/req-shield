@@ -116,8 +116,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Thread pools and schedulers
 
-- `core` uses a `ScheduledExecutorService`. The default is a shared daemon pool; the Spring adapter exposes it as the
-  `reqShieldExecutor` bean, which you can override.
+- `core` accepts any `java.util.concurrent.Executor` for its background cache writes; only `execute` is called and the
+  library never shuts a caller-supplied pool down. The default is a shared daemon pool; the Spring adapter exposes it as
+  the `reqShieldExecutor` bean (an `ExecutorService` the context shuts down), which you can override.
 - `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter exposes it as the
   `reqShieldScheduler` bean.
 - `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on

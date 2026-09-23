@@ -35,8 +35,8 @@ import org.springframework.context.annotation.Configuration
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -65,7 +65,7 @@ class ReqShieldAspectIntegrationTest {
 
     @Test
     fun executorBeanShouldBeProvidedByTheAutoConfiguration() {
-        assertNotNull(context.getBean("reqShieldExecutor", ScheduledExecutorService::class.java))
+        assertNotNull(context.getBean("reqShieldExecutor", ExecutorService::class.java))
     }
 
     @Test

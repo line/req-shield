@@ -28,12 +28,6 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
@@ -139,39 +133,51 @@ class ReqShield<T>(
     /**
      * Another request holds the lock: poll the cache until that request publishes its result.
      *
-     * The supplier is never called from the polling task - it is called on this thread only after
-     * the wait gave up, so at most one extra supplier call per waiting request happens.
+     * Polling runs on the caller's thread, which is blocked for the duration of the wait either way.
+     * Keeping it here gives the wait a single termination condition and means a saturated executor
+     * cannot stall it. The supplier is never called from the polling loop - it is called on this
+     * thread only after the wait gave up, so at most one extra supplier call per waiting request
+     * happens.
+     *
+     * The wait ends after [ReqShieldConfiguration.maxAttemptGetCache] polls, or earlier when
+     * [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row (the cache looks unavailable).
+     * A poll whose cache read fails still counts as an attempt, so the wait stays bounded.
      */
     private fun handleLockFailure(
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
-        val future = CompletableFuture<ReqShieldData<T>?>()
-        val scheduled = scheduleTask(reqShieldConfig.executor, future, reqShieldConfig.getCacheFunction, key)
+        var attempts = 0
+        var consecutiveFailures = 0
 
-        // The polling task gives up on its own; this timeout only guards against a task that never runs
-        val waitTimeoutMillis =
-            reqShieldConfig.maxAttemptGetCache * GET_CACHE_INTERVAL_MILLIS + GET_CACHE_INTERVAL_MILLIS * 10
+        while (attempts < reqShieldConfig.maxAttemptGetCache) {
+            attempts++
+            sleepBetweenPolls(key)
 
-        val cachedData =
             try {
-                future.get(waitTimeoutMillis, TimeUnit.MILLISECONDS)
-            } catch (e: TimeoutException) {
-                log.warn("Timed out waiting for the cache to be created for key '{}', falling back to the supplier", key)
-                null
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = e)
-            } catch (e: ExecutionException) {
-                val cause = e.cause
-                throw if (cause is ClientException) cause else ClientException(ErrorCode.GET_CACHE_ERROR, cause = cause)
-            } finally {
-                scheduled.cancel(false)
+                val cachedData = reqShieldConfig.getCacheFunction.invoke(key)
+                if (cachedData != null) return cachedData
+
+                consecutiveFailures = 0
+            } catch (e: Exception) {
+                log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
+                if (++consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) break
             }
+        }
 
         // No lock was acquired by this request, so there is nothing to release on failure
-        return cachedData ?: buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
+        return buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
+    }
+
+    private fun sleepBetweenPolls(key: String) {
+        try {
+            Thread.sleep(GET_CACHE_INTERVAL_MILLIS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            log.warn("Interrupted while waiting for the cache to be created for key '{}'", key)
+            throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = e)
+        }
     }
 
     private fun buildReqShieldData(
@@ -182,54 +188,6 @@ class ReqShield<T>(
             value = value,
             timeToLiveMillis = timeToLiveMillis,
         )
-
-    /**
-     * Polls the cache on a fixed delay and completes [future] with the cached data once it appears.
-     *
-     * The future is completed with null to signal "stop waiting, fall back to the supplier", which
-     * happens when [ReqShieldConfiguration.maxAttemptGetCache] successful-but-empty reads were made
-     * or when [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row (the cache looks unavailable).
-     */
-    private fun scheduleTask(
-        executor: ScheduledExecutorService,
-        future: CompletableFuture<ReqShieldData<T>?>,
-        cacheGetter: (String) -> ReqShieldData<T>?,
-        key: String,
-    ): ScheduledFuture<*> {
-        val attemptCount = AtomicInteger(0)
-        val consecutiveFailureCount = AtomicInteger(0)
-
-        val scheduled: ScheduledFuture<*> =
-            executor.scheduleWithFixedDelay({
-                // Early exit if future is already completed to avoid unnecessary work
-                if (future.isDone) {
-                    return@scheduleWithFixedDelay
-                }
-
-                try {
-                    val cachedData = cacheGetter.invoke(key)
-                    if (cachedData != null) {
-                        // complete() is a no-op when another thread already completed the future
-                        future.complete(cachedData)
-                        return@scheduleWithFixedDelay
-                    }
-
-                    consecutiveFailureCount.set(0)
-                    if (attemptCount.incrementAndGet() >= reqShieldConfig.maxAttemptGetCache) {
-                        future.complete(null)
-                    }
-                } catch (e: Exception) {
-                    log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
-                    if (consecutiveFailureCount.incrementAndGet() >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) {
-                        future.complete(null)
-                    }
-                }
-            }, GET_CACHE_INTERVAL_MILLIS, GET_CACHE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
-
-        future.whenComplete { _, _ -> scheduled.cancel(false) }
-
-        return scheduled
-    }
 
     private fun executeGetCacheFunction(
         getFunction: (String) -> ReqShieldData<T>?,
