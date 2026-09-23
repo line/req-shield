@@ -42,12 +42,12 @@ import org.springframework.util.StringUtils
 import org.springframework.util.function.SingletonSupplier
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.Executor
 
 @Aspect
 class ReqShieldAspect<T>(
     private val reqShieldCache: ReqShieldCache<T>,
-    @Qualifier("reqShieldExecutor") private val executor: ScheduledExecutorService,
+    @Qualifier("reqShieldExecutor") private val executor: Executor,
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
     private val spelParser = SpelExpressionParser()

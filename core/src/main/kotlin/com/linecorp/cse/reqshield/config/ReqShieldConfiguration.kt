@@ -24,6 +24,7 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIM
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicLong
@@ -46,10 +47,11 @@ data class ReqShieldConfiguration<T>(
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     /**
-     * Executor used for the asynchronous cache writes and for polling the cache while another
-     * request holds the lock. Defaults to a single pool shared by every configuration instance.
+     * Executor used for the asynchronous cache writes. Only [Executor.execute] is called, so any
+     * pool works, and the library never shuts the pool down - a caller-supplied one stays the
+     * caller's to manage. Defaults to a single pool shared by every configuration instance.
      */
-    val executor: ScheduledExecutorService = sharedExecutor,
+    val executor: Executor = sharedExecutor,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
