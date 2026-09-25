@@ -30,7 +30,6 @@ import org.aspectj.lang.reflect.MethodSignature
 import org.springframework.aop.support.AopUtils
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.BeanFactoryAware
-import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
@@ -43,15 +42,27 @@ import org.springframework.util.StringUtils
 import org.springframework.util.function.SingletonSupplier
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
+import reactor.core.scheduler.Schedulers
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
 @Aspect
 open class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
-    @Qualifier("reqShieldScheduler") private val scheduler: Scheduler,
 ) : BeanFactoryAware {
     private lateinit var beanFactory: BeanFactory
+
+    /**
+     * Runs the asynchronous cache writes and the cache polling of every ReqShield this aspect creates: the
+     * application's bean named `reqShieldScheduler` when there is one, otherwise Reactor's process-wide
+     * [Schedulers.boundedElastic], which is shared and therefore never disposed here.
+     *
+     * The library registers no bean of its own, so an application bean of that name replaces the default instead of
+     * clashing with it. Resolved in [setBeanFactory], at startup, so that a bean of that name which is not a
+     * `Scheduler` fails the context refresh instead of being ignored.
+     */
+    private lateinit var scheduler: Scheduler
+
     private val spelParser = SpelExpressionParser()
     private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
     private val defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
@@ -251,5 +262,17 @@ open class ReqShieldAspect<T>(
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory
+        scheduler =
+            if (beanFactory.containsBean(SCHEDULER_BEAN_NAME)) {
+                // Throws BeanNotOfRequiredTypeException for a bean of another type
+                beanFactory.getBean(SCHEDULER_BEAN_NAME, Scheduler::class.java)
+            } else {
+                Schedulers.boundedElastic()
+            }
+    }
+
+    companion object {
+        /** Name of the optional application bean that replaces the shared boundedElastic scheduler. */
+        internal const val SCHEDULER_BEAN_NAME = "reqShieldScheduler"
     }
 }

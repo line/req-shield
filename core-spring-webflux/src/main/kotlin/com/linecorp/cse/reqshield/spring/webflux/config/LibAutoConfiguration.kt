@@ -19,13 +19,10 @@ package com.linecorp.cse.reqshield.spring.webflux.config
 import com.linecorp.cse.reqshield.spring.webflux.aspect.ReqShieldAspect
 import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_LOCK_ENTRIES_PROPERTY
-import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.EnableAspectJAutoProxy
 import org.springframework.context.annotation.Import
 import org.springframework.core.env.Environment
-import reactor.core.scheduler.Scheduler
-import reactor.core.scheduler.Schedulers
 
 @Configuration
 @EnableAspectJAutoProxy
@@ -41,13 +38,4 @@ open class LibAutoConfiguration(
         // of failing the context refresh the way Environment's own Long conversion would.
         LocalLockLimit.applyConfiguredValue(environment.getProperty(MAX_LOCK_ENTRIES_PROPERTY))
     }
-
-    /**
-     * Scheduler shared by every [com.linecorp.cse.reqshield.reactor.ReqShield] the aspect creates, used for
-     * the asynchronous cache writes and for polling the cache while another request holds the lock.
-     *
-     * [Schedulers.boundedElastic] is Reactor's process-wide instance, so the container must never dispose it.
-     */
-    @Bean(destroyMethod = "")
-    open fun reqShieldScheduler(): Scheduler = Schedulers.boundedElastic()
 }

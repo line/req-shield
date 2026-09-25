@@ -20,9 +20,13 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.config.LibAutoConfiguration
+import com.linecorp.cse.reqshield.support.spring.withNamedBean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
@@ -35,12 +39,16 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
+import org.springframework.beans.factory.BeanCreationException
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.test.context.ContextConfiguration
 import org.springframework.test.context.junit.jupiter.SpringExtension
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
 
@@ -54,17 +62,18 @@ class ReqShieldAspectIntegrationTest {
     private lateinit var asyncCache: AsyncCache<String>
 
     @Autowired
-    private lateinit var reqShieldCoroutineScope: CoroutineScope
+    private lateinit var applicationContext: ApplicationContext
 
     /** The aspect namespaces every key with the cache name of the annotation. */
     private fun cacheKeyOf(key: String) = "$CACHE_NAME::$key"
 
     private suspend fun awaitCachePut(
         key: String,
+        cache: AsyncCache<*> = asyncCache,
         timeoutMillis: Long = 1_000,
     ): Boolean =
         withTimeoutOrNull(timeoutMillis) {
-            while (asyncCache.get(cacheKeyOf(key)) == null) {
+            while (cache.get(cacheKeyOf(key)) == null) {
                 delay(5)
             }
             true
@@ -134,18 +143,78 @@ class ReqShieldAspectIntegrationTest {
         }
 
     @Test
-    fun shouldWireTheCoroutineScopeBeanAndCancelItOnShutdown() {
-        // The autowired bean proves LibAutoConfiguration alone provides the scope (no component scan).
-        assertFalse(reqShieldCoroutineScope.coroutineContext[Job]!!.isCancelled)
-
-        val context = AnnotationConfigApplicationContext(LibAutoConfiguration::class.java, TestConfig::class.java)
-        val scope = context.getBean("reqShieldCoroutineScope", CoroutineScope::class.java)
-        assertFalse(scope.coroutineContext[Job]!!.isCancelled)
-
-        context.close()
-
-        assertTrue(scope.coroutineContext[Job]?.isCancelled == true)
+    fun libraryShouldNotRegisterACoroutineScopeBean() {
+        // A library bean would clash with an application bean of the same name
+        assertTrue(applicationContext.getBeansOfType(CoroutineScope::class.java).isEmpty())
     }
+
+    @Test
+    fun ownedScopeShouldRunCacheWritesAndBeCancelledWhenTheContextCloses() =
+        runBlocking {
+            val context = AnnotationConfigApplicationContext(*CONFIGURATIONS)
+            val key = "owned-scope-${System.nanoTime()}"
+            context.getBean(TestService::class.java).get(key)
+            val cache = context.getBean(InMemoryAsyncCache::class.java)
+
+            assertTrue(awaitCachePut(key, cache), "Timed out waiting for cache put for key=$key")
+            assertEquals(ReqShieldAspect.OWNED_SCOPE_NAME, cache.lastWriterCoroutineName)
+
+            val ownedScope = context.getBean(ReqShieldAspect::class.java).ownedScope!!
+            assertFalse(ownedScope.coroutineContext[Job]!!.isCancelled)
+            context.close()
+            assertTrue(ownedScope.coroutineContext[Job]!!.isCancelled)
+        }
+
+    @Test
+    fun coroutineScopeBeanNamedReqShieldCoroutineScopeShouldReplaceTheDefault() {
+        val userDispatcher = namedDispatcher("user-scope")
+        val userScope = CoroutineScope(SupervisorJob() + userDispatcher)
+        withNamedBean("reqShieldCoroutineScope", userScope, *CONFIGURATIONS) { userContext ->
+            runBlocking {
+                val key = "user-scope-${System.nanoTime()}"
+                userContext.getBean(TestService::class.java).get(key)
+                val userCache = userContext.getBean(InMemoryAsyncCache::class.java)
+
+                assertTrue(awaitCachePut(key, userCache), "Timed out waiting for cache put for key=$key")
+                // Coroutine debug mode appends " @coroutine#N" to the thread name
+                assertTrue(userCache.lastWriterThread!!.startsWith("user-scope"), userCache.lastWriterThread)
+                assertNull(userContext.getBean(ReqShieldAspect::class.java).ownedScope)
+            }
+        }
+        // The scope belongs to the application, so the library must leave it active
+        assertFalse(userScope.coroutineContext[Job]!!.isCancelled)
+        userDispatcher.close()
+    }
+
+    @Test
+    fun beanNamedReqShieldCoroutineScopeOfAnotherTypeShouldFailTheRefresh() {
+        val error =
+            assertFailsWith<BeanCreationException> {
+                withNamedBean("reqShieldCoroutineScope", "not a scope", *CONFIGURATIONS) { }
+            }
+
+        assertTrue(error.mostSpecificCause is BeanNotOfRequiredTypeException, error.toString())
+    }
+
+    @Test
+    fun coroutineScopeBeansWithOtherNamesShouldBeIgnored() {
+        val otherDispatcher = namedDispatcher("other-scope")
+        withNamedBean("otherCoroutineScope", CoroutineScope(SupervisorJob() + otherDispatcher), *CONFIGURATIONS) { otherContext ->
+            runBlocking {
+                val key = "other-scope-${System.nanoTime()}"
+                otherContext.getBean(TestService::class.java).get(key)
+                val otherCache = otherContext.getBean(InMemoryAsyncCache::class.java)
+
+                assertTrue(awaitCachePut(key, otherCache), "Timed out waiting for cache put for key=$key")
+                assertEquals(ReqShieldAspect.OWNED_SCOPE_NAME, otherCache.lastWriterCoroutineName)
+            }
+        }
+        otherDispatcher.close()
+    }
+
+    /** Single daemon thread named [name], so a cache write shows which scope ran it. */
+    private fun namedDispatcher(name: String): ExecutorCoroutineDispatcher =
+        Executors.newSingleThreadExecutor { Thread(it, name).apply { isDaemon = true } }.asCoroutineDispatcher()
 
     @Configuration
     open class TestConfig {
@@ -171,5 +240,7 @@ class ReqShieldAspectIntegrationTest {
 
     companion object {
         const val CACHE_NAME = "it"
+
+        private val CONFIGURATIONS = arrayOf(LibAutoConfiguration::class.java, TestConfig::class.java)
     }
 }

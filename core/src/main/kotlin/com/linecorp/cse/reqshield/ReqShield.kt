@@ -28,6 +28,7 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.RejectedExecutionException
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
@@ -65,15 +66,14 @@ class ReqShield<T>(
         val token = if (onlyCreateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
         if (onlyCreateCache || token != null) {
-            CompletableFuture.runAsync({
+            runInBackground(key, lockType, token) {
                 val reqShieldData =
                     buildReqShieldData(
                         executeCallable(callable, key, lockType, token),
                         timeToLiveMillis,
                     )
                 executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
-            }, reqShieldConfig.executor)
-                .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
+            }
         }
     }
 
@@ -122,12 +122,39 @@ class ReqShield<T>(
                 executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
-        CompletableFuture.runAsync({
+        runInBackground(key, lockType, token) {
             executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
-        }, reqShieldConfig.executor)
-            .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
+        }
 
         return reqShieldData
+    }
+
+    /**
+     * Runs [task] on the configured executor. The task releases the lock identified by [token] itself, so when the
+     * executor rejects it - a saturated bounded pool, or one already shut down - the lock is released here instead.
+     * Only that background cache write or refresh is dropped: the caller still gets its data.
+     */
+    private fun runInBackground(
+        key: String,
+        lockType: LockType,
+        token: String?,
+        task: () -> Unit,
+    ) {
+        try {
+            CompletableFuture
+                .runAsync(task, reqShieldConfig.executor)
+                .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
+        } catch (e: RejectedExecutionException) {
+            log.warn("Executor rejected the background cache task for key '{}', so it is skipped", key, e)
+            if (token != null) {
+                // A failed release must not cost the caller its data; the lock then expires on its own
+                try {
+                    reqShieldConfig.keyLock.unLock(key, lockType, token)
+                } catch (unlockError: Exception) {
+                    log.error("Failed to unlock key '{}' after the executor rejected its task", key, unlockError)
+                }
+            }
+        }
     }
 
     /**

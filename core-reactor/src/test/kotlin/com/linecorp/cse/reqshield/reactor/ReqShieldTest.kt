@@ -29,19 +29,25 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import reactor.core.Disposable
 import reactor.core.publisher.Mono
 import reactor.core.publisher.MonoSink
+import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
 import java.util.concurrent.Callable
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertNotNull
@@ -253,6 +259,62 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
+    fun shouldReleaseLockWhenCallerCancelsWhileSupplierRuns() {
+        every { cacheGetter(key) } returns Mono.empty()
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        every { callable.call() } returns Mono.never()
+
+        StepVerifier.create(reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .then { verify(timeout = 1000, exactly = 1) { callable.call() } }
+            .thenCancel()
+            .verify()
+
+        verify(timeout = 1000, exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldFreeLocalLockForNextRequestWhenCallerTimesOutWhileSupplierRuns() {
+        val cancelKey = "cancel-${System.nanoTime()}"
+        val localLock = KeyLocalLock(60_000)
+        val shield = ReqShield(ReqShieldConfiguration<Product>({ _, _, _ -> Mono.just(true) }, { Mono.empty() }, keyLock = localLock))
+
+        StepVerifier.create(
+            shield
+                .getAndSetReqShieldData(cancelKey, Callable { Mono.never<Product?>() }, timeToLiveMillis)
+                .timeout(Duration.ofMillis(100)),
+        ).expectError(TimeoutException::class.java)
+            .verify()
+
+        // Without the release, the lock would stay held for its whole 60s timeout
+        await().atMost(Duration.ofSeconds(1)).until { localLock.tryLock(cancelKey, LockType.CREATE).block() != null }
+    }
+
+    @Test
+    fun shouldReleaseLockOnlyAfterCacheWriteWhenCallerCancelsAfterValueIsEmitted() {
+        lateinit var pendingWrite: MonoSink<Boolean>
+        every { cacheGetter(key) } returns Mono.empty()
+        every { cacheSetter(key, any(), any()) } returns Mono.create { pendingWrite = it }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()),
+            )
+
+        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNextMatches { it.value == value }
+            .thenCancel()
+            .verify()
+
+        // The write already owns the lock, so the cancellation must not release it early
+        verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
+        pendingWrite.success(true)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+    }
+
+    @Test
     fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() {
         lateinit var pendingWrite: MonoSink<Boolean>
         every { cacheGetter(key) } returns Mono.empty()
@@ -273,6 +335,66 @@ class ReqShieldTest : BaseReqShieldTest {
         pendingWrite.success(true)
         verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
         verify(exactly = 1) { callable.call() }
+    }
+
+    @Test
+    fun shouldReturnComputedDataAndReleaseLockWhenSchedulerRejectsTheCacheWrite() {
+        val scheduler = RejectingScheduler()
+        every { cacheGetter(key) } returns Mono.empty()
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        // Built outside answers {}, whose scope has its own `value`
+        val supplied = Mono.just<Product?>(value)
+        // The supplier runs right before the write is scheduled, so only the write is rejected
+        every { callable.call() } answers {
+            scheduler.rejecting.set(true)
+            supplied
+        }
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = scheduler))
+
+        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNextMatches { it.value == value }
+            .verifyComplete()
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReturnCachedDataAndReleaseLockWhenSchedulerRejectsTheRefreshWrite() {
+        val scheduler = RejectingScheduler()
+        val cached = updateTargetReqShieldData(oldValue)
+        every { cacheGetter(key) } returns Mono.just(cached)
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.UPDATE, token) } returns Mono.just(true)
+        val supplied = Mono.just<Product?>(value)
+        every { callable.call() } answers {
+            scheduler.rejecting.set(true)
+            supplied
+        }
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = scheduler))
+
+        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNext(cached)
+            .verifyComplete()
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.UPDATE, token) }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    /** Runs tasks inline until [rejecting] is set, then rejects them the way a disposed or saturated scheduler does. */
+    private class RejectingScheduler : Scheduler by Schedulers.immediate() {
+        val rejecting = AtomicBoolean(false)
+
+        override fun createWorker(): Scheduler.Worker {
+            val delegate = Schedulers.immediate().createWorker()
+            return object : Scheduler.Worker by delegate {
+                override fun schedule(task: Runnable): Disposable {
+                    if (rejecting.get()) throw RejectedExecutionException("rejected by test")
+                    return delegate.schedule(task)
+                }
+            }
+        }
     }
 
     /** Cached entry that has passed the decisionForUpdate threshold (90% of its TTL). */

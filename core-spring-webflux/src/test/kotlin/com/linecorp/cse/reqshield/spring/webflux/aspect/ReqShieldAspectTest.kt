@@ -46,7 +46,7 @@ import kotlin.test.assertTrue
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val asyncCache: AsyncCache<Product> = InMemoryAsyncCache()
     private val joinPoint = mockk<ProceedingJoinPoint>()
-    private val reqShieldAspect = spyk(ReqShieldAspect(asyncCache, Schedulers.boundedElastic()))
+    private val reqShieldAspect = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
 
@@ -66,6 +66,8 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     fun setUp() {
         every { joinPoint.args } returns arrayOf(argument)
         every { joinPoint.target } returns targetObject
+        // No application scheduler bean, so the aspect falls back to the shared boundedElastic
+        every { beanFactory.containsBean("reqShieldScheduler") } returns false
 
         reqShieldAspect.setBeanFactory(beanFactory)
     }
@@ -302,7 +304,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
     @Test
     fun globalLockRequiresTheCacheToImplementGlobalLockSupport() {
-        val localOnlyAspect = spyk(ReqShieldAspect<Product>(LocalOnlyAsyncCache(), Schedulers.boundedElastic()))
+        val localOnlyAspect = spyk(ReqShieldAspect<Product>(LocalOnlyAsyncCache()))
         localOnlyAspect.setBeanFactory(beanFactory)
         every { localOnlyAspect.getTargetMethod(joinPoint) } returns
             findTestBeanMethod(TestBean::cacheableWithGlobalLock.name)

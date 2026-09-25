@@ -22,25 +22,31 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.reactor.awaitSingleOrNull
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.reflect.MethodSignature
+import org.slf4j.LoggerFactory
 import org.springframework.aop.support.AopUtils
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.BeanFactoryAware
-import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.beans.factory.DisposableBean
 import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
 import org.springframework.core.DefaultParameterNameDiscoverer
-import org.springframework.core.SpringVersion
 import org.springframework.core.annotation.AnnotationUtils
 import org.springframework.expression.EvaluationContext
 import org.springframework.expression.Expression
 import org.springframework.expression.spel.standard.SpelExpressionParser
+import org.springframework.util.ClassUtils
 import org.springframework.util.StringUtils
 import org.springframework.util.function.SingletonSupplier
 import reactor.core.publisher.Mono
@@ -51,10 +57,34 @@ import kotlin.coroutines.Continuation
 @Aspect
 open class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
-    @Qualifier("reqShieldCoroutineScope") private val scope: CoroutineScope,
-) : BeanFactoryAware {
+) : BeanFactoryAware,
+    DisposableBean {
     private lateinit var beanFactory: BeanFactory
-    private val springVersion = SpringVersion.getVersion()
+
+    /** Set only when no `reqShieldCoroutineScope` bean exists, so [destroy] never cancels an application's scope. */
+    internal var ownedScope: CoroutineScope? = null
+        private set
+
+    /**
+     * Runs the fire-and-forget cache writes of every ReqShield this aspect creates: the application's bean named
+     * `reqShieldCoroutineScope` when there is one, otherwise a scope owned by this aspect.
+     *
+     * The library registers no bean of its own, so an application bean of that name replaces the default instead of
+     * clashing with it. Resolved in [setBeanFactory], at startup, so that a bean of that name which is not a
+     * `CoroutineScope` fails the context refresh instead of being ignored.
+     */
+    private lateinit var scope: CoroutineScope
+
+    /**
+     * Spring 6.1+ drops the trailing Continuation of a suspend function itself, in both SimpleKeyGenerator
+     * and MethodBasedEvaluationContext, so the aspect must pass the raw arguments there and filter them itself
+     * only on older versions. Detected by a class added in 6.1 instead of SpringVersion, which is null when the
+     * jar manifest lacks Implementation-Version (e.g. shaded jars): guessing wrong there would drop the real
+     * last argument from the cache key and make different calls share one entry.
+     */
+    private val springDropsContinuationArgument =
+        ClassUtils.isPresent("org.springframework.aop.framework.CoroutinesUtils", ReqShieldAspect::class.java.classLoader)
+
     private val spelParser = SpelExpressionParser()
     private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
     private var defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
@@ -166,7 +196,7 @@ open class ReqShieldAspect<T>(
     ): String {
         val method = getTargetMethod(joinPoint)
         val args =
-            if (isCoroutineSupportedSpringVersion()) {
+            if (springDropsContinuationArgument) {
                 joinPoint.args
             } else {
                 joinPoint.args.filter { it !is Continuation<*> }.toTypedArray()
@@ -268,16 +298,41 @@ open class ReqShieldAspect<T>(
         }
     }
 
-    private fun isCoroutineSupportedSpringVersion(): Boolean {
-        val version = springVersion ?: return false
-        val parts = version.split(".")
-        val major = parts.getOrNull(0)?.toIntOrNull() ?: return false
-        val minor = parts.getOrNull(1)?.toIntOrNull() ?: return false
-
-        return major > 6 || (major == 6 && minor >= 1)
-    }
-
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory
+        scope =
+            if (beanFactory.containsBean(SCOPE_BEAN_NAME)) {
+                // Throws BeanNotOfRequiredTypeException for a bean of another type
+                beanFactory.getBean(SCOPE_BEAN_NAME, CoroutineScope::class.java)
+            } else {
+                createOwnedScope().also { ownedScope = it }
+            }
+    }
+
+    /** Closing the application context cancels the owned scope and with it every pending cache write. */
+    override fun destroy() {
+        ownedScope?.cancel()
+    }
+
+    /**
+     * SupervisorJob keeps one failed write from cancelling the others, and the exception handler is the last-resort
+     * backstop for anything the write path did not already log. The name tells its writes apart from those of the
+     * core default scope, which also runs on Dispatchers.IO.
+     */
+    private fun createOwnedScope(): CoroutineScope =
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.IO + CoroutineName(OWNED_SCOPE_NAME) +
+                CoroutineExceptionHandler { _, e ->
+                    log.error("[Req-Shield] background task failed", e)
+                },
+        )
+
+    companion object {
+        private val log = LoggerFactory.getLogger(ReqShieldAspect::class.java)
+
+        /** Name of the optional application bean that replaces the scope owned by the aspect. */
+        internal const val SCOPE_BEAN_NAME = "reqShieldCoroutineScope"
+
+        internal const val OWNED_SCOPE_NAME = "req-shield-aspect"
     }
 }

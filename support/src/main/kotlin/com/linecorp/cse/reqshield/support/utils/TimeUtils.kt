@@ -16,7 +16,8 @@
 
 package com.linecorp.cse.reqshield.support.utils
 
-import java.time.LocalDateTime
-import java.time.ZoneId
-
-fun nowToEpochTime() = LocalDateTime.now().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+/**
+ * Current time in epoch milliseconds, read straight from the system clock. Going through LocalDateTime and the default
+ * zone instead would pick the earlier offset during a DST fall-back overlap and run an hour behind for that hour.
+ */
+fun nowToEpochTime() = System.currentTimeMillis()

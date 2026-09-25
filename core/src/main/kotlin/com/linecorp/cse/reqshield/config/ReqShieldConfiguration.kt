@@ -49,7 +49,9 @@ data class ReqShieldConfiguration<T>(
     /**
      * Executor used for the asynchronous cache writes. Only [Executor.execute] is called, so any
      * pool works, and the library never shuts the pool down - a caller-supplied one stays the
-     * caller's to manage. Defaults to a single pool shared by every configuration instance.
+     * caller's to manage. A task the pool rejects (bounded queue full, or pool shut down) only
+     * skips that cache write or refresh; the request still gets its data and the lock is released.
+     * Defaults to a single pool shared by every configuration instance.
      */
     val executor: Executor = sharedExecutor,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,

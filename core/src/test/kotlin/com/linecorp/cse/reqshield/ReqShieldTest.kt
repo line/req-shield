@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.BaseReqShieldTest.Companion.AWAIT_TIMEOUT
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIMEOUT_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -41,7 +42,9 @@ import java.lang.reflect.Method
 import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -65,6 +68,7 @@ class ReqShieldTest : BaseReqShieldTest {
     private val value = Product("testId", "testName")
     private val callable: Callable<Product?> = mockk()
     private val createToken = "create-token"
+    private val rejectingExecutor = Executor { throw RejectedExecutionException("rejected by test") }
     private val updateToken = "update-token"
 
     private var timeToLiveMillis: Long = 10000
@@ -281,6 +285,91 @@ class ReqShieldTest : BaseReqShieldTest {
             cacheExecutor.shutdownNow()
             assertTrue(cacheExecutor.awaitTermination(2, TimeUnit.SECONDS))
         }
+    }
+
+    @Test
+    fun shouldReturnComputedDataAndReleaseLockWhenExecutorRejectsTheCacheWrite() {
+        every { cacheGetter(key) } returns null
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
+
+        val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        assertEquals(value, result.value)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReturnCachedDataAndReleaseLockWhenExecutorRejectsTheRefresh() {
+        val cached = updateTargetData(oldValue)
+        every { cacheGetter(key) } returns cached
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns updateToken
+        every { keyLock.unLock(key, LockType.UPDATE, updateToken) } returns true
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
+
+        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        verify(exactly = 1) { keyLock.unLock(key, LockType.UPDATE, updateToken) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldReturnComputedDataWhenExecutorRejectsTheCacheWriteAndTheUnlockFails() {
+        every { cacheGetter(key) } returns null
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } throws IllegalStateException("lock store down")
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
+
+        val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        assertEquals(value, result.value)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+    }
+
+    @Test
+    fun shouldReturnCachedDataWhenExecutorRejectsTheRefreshAndTheUnlockFails() {
+        val cached = updateTargetData(oldValue)
+        every { cacheGetter(key) } returns cached
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns updateToken
+        every { keyLock.unLock(key, LockType.UPDATE, updateToken) } throws IllegalStateException("lock store down")
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
+
+        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        verify(exactly = 1) { keyLock.unLock(key, LockType.UPDATE, updateToken) }
+    }
+
+    @Test
+    fun shouldReturnCachedDataWithoutTouchingLocksWhenExecutorRejectsAnUnlockedRefresh() {
+        val cached = updateTargetData(oldValue)
+        every { cacheGetter(key) } returns cached
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(
+                    cacheSetter,
+                    cacheGetter,
+                    keyLock = keyLock,
+                    executor = rejectingExecutor,
+                    reqShieldWorkMode = ReqShieldWorkMode.ONLY_CREATE_CACHE,
+                ),
+            )
+
+        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        verify(exactly = 0) { keyLock.tryLock(any(), any()) }
+        verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldFreeTheLocalLockRightAwayWhenTheExecutorIsShutDown() {
+        val isolatedKey = "rejected-write-${java.util.UUID.randomUUID()}"
+        val shutDownExecutor = Executors.newSingleThreadExecutor().apply { shutdown() }
+        val shield = ReqShield(ReqShieldConfiguration<Product>({ _, _, _ -> true }, { null }, executor = shutDownExecutor))
+
+        assertEquals(value, shield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis).value)
+
+        // A leaked lock would stay held for lockTimeoutMillis and make the next request wait out its polling budget
+        assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.CREATE))
     }
 
     @Test

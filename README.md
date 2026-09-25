@@ -155,13 +155,27 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 ### Thread pools and schedulers
 
 - `core` accepts any `java.util.concurrent.Executor` for its background cache writes; only `execute` is called and the
-  library never shuts a caller-supplied pool down. The default is a shared daemon pool; the Spring adapter exposes it as
-  the `reqShieldExecutor` bean (an `ExecutorService` the context shuts down), which you can override.
-- `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter exposes it as the
-  `reqShieldScheduler` bean.
+  library never shuts a caller-supplied pool down. The default is a shared daemon pool. The Spring adapter runs the
+  writes on a daemon pool of its own that is shut down with the context, and registers no `Executor` bean, so Spring
+  Boot keeps its `applicationTaskExecutor`. To use your own pool, define an `Executor` bean named `reqShieldExecutor`;
+  its lifecycle stays yours, and like any `Executor` bean it makes Spring Boot skip `applicationTaskExecutor`.
+- `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter uses the shared
+  `boundedElastic` too and never disposes it; to use your own, define a `Scheduler` bean named `reqShieldScheduler`.
 - `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
-  `Dispatchers.IO`). The coroutine Spring adapter exposes it as the `reqShieldCoroutineScope` bean and cancels it on
-  context shutdown.
+  `Dispatchers.IO`). The coroutine Spring adapter runs them on a supervisor scope of its own on `Dispatchers.IO` and
+  cancels it on context shutdown; to use your own, define a `CoroutineScope` bean named `reqShieldCoroutineScope`.
+- The Spring adapters register none of these beans themselves, so an application bean of the same name replaces the
+  default instead of clashing with it, and its lifecycle stays with the application. A bean of one of these names
+  that is not of the expected type fails the application startup instead of being ignored.
+
+### WebFlux adapter
+
+- `@ReqShieldCacheable` / `@ReqShieldCacheEvict` from `core-spring-webflux` require methods that return `Mono`. The
+  aspect hands back a lazy `Mono`, and other return types are not rejected up front:
+    - On a `void` (`Unit`) method Spring discards that `Mono`, so the method body never runs and nothing is evicted,
+      without any error. Return `Mono<Void>` from eviction methods instead.
+    - Any other return type fails with a `ClassCastException` at the call site.
+- Use `core-spring` for blocking methods and `core-spring-webflux-kotlin-coroutine` for `suspend` functions.
 
 ### Kotlin coroutine adapter
 
