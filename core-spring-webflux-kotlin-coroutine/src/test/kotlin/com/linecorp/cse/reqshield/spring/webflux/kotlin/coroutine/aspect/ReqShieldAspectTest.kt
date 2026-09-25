@@ -63,7 +63,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val asyncCache: AsyncCache<Product> = InMemoryAsyncCache()
     private val joinPoint: ProceedingJoinPoint = mockk<ProceedingJoinPoint>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache, scope))
+    private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
     private val mockContinuation = mockk<Continuation<Any?>>()
@@ -83,6 +83,9 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         every { mockContinuation.context } returns EmptyCoroutineContext
         every { joinPoint.args } returns arrayOf(argument, mockContinuation)
         every { joinPoint.target } returns targetObject
+        // The aspect resolves the application's scope bean when the bean factory is set
+        every { beanFactory.containsBean("reqShieldCoroutineScope") } returns true
+        every { beanFactory.getBean("reqShieldCoroutineScope", CoroutineScope::class.java) } returns scope
 
         reqShieldAspect.setBeanFactory(beanFactory)
     }
@@ -266,7 +269,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     fun globalLockRequiresTheCacheToImplementGlobalLockSupport() =
         runTest {
             val plainCache = mockk<AsyncCache<Product>>()
-            val aspect = spyk(ReqShieldAspect(plainCache, scope))
+            val aspect = spyk(ReqShieldAspect(plainCache))
             aspect.setBeanFactory(beanFactory)
             every { aspect.getTargetMethod(joinPoint) } returns methodOf(TestBean::cacheableWithGlobalLock.name)
 
@@ -289,14 +292,13 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             coEvery { lockableCache.globalLock(any(), capture(tokenSlot), any()) } returns true
             coEvery { lockableCache.globalUnLock(any(), any()) } returns true
 
-            val lockScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            val aspect = spyk(ReqShieldAspect(lockableCache, lockScope))
+            val aspect = spyk(ReqShieldAspect(lockableCache))
             aspect.setBeanFactory(beanFactory)
             every { aspect.getTargetMethod(joinPoint) } returns methodOf(TestBean::cacheableWithGlobalLock.name)
             coEvery { joinPoint.proceed(any<Array<Any?>>()) } coAnswers { targetObject.cacheableWithGlobalLock(argument) }
 
             aspect.aroundReqShieldCacheable(joinPoint)
-            lockScope.awaitBackgroundWrites()
+            scope.awaitBackgroundWrites()
 
             val expectedLockKey = "$LOCK_KEY_PREFIX${namespacedSpelKey}_CREATE"
             assertTrue(tokenSlot.isCaptured, "the aspect never called globalLock")

@@ -34,7 +34,9 @@ import org.aspectj.lang.ProceedingJoinPoint
 import org.awaitility.Awaitility
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -47,6 +49,7 @@ import java.lang.reflect.Method
 import java.time.Duration
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -54,9 +57,10 @@ private val log = LoggerFactory.getLogger(ReqShieldAspectTest::class.java)
 
 class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val executor = Executors.newScheduledThreadPool(2)
+
     private val reqShieldCache: ReqShieldCache<Product> = mockk()
     private val joinPoint = mockk<ProceedingJoinPoint>()
-    private val reqShieldAspect = spyk(ReqShieldAspect(reqShieldCache, executor))
+    private val reqShieldAspect = spyk(ReqShieldAspect(reqShieldCache))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
 
@@ -73,8 +77,20 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     fun setUp() {
         every { joinPoint.target } returns targetObject
         every { joinPoint.args } returns arrayOf(argument)
+        // The aspect resolves the application's executor bean when the bean factory is set
+        every { beanFactory.containsBean("reqShieldExecutor") } returns true
+        every { beanFactory.getBean("reqShieldExecutor", Executor::class.java) } returns executor
 
         reqShieldAspect.setBeanFactory(beanFactory)
+    }
+
+    @Test
+    fun destroyShouldLeaveTheApplicationPoolRunning() {
+        reqShieldAspect.destroy()
+
+        // The pool belongs to the application, so only the application may shut it down
+        assertNull(reqShieldAspect.ownedExecutor)
+        assertFalse(executor.isShutdown)
     }
 
     @AfterEach
@@ -235,7 +251,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     fun globalLockShouldBeAcquiredAndReleasedWithTheSameToken() {
         // given
         val globalLockCache = GlobalLockReqShieldCache()
-        val aspect = spyk(ReqShieldAspect(globalLockCache, executor))
+        val aspect = spyk(ReqShieldAspect(globalLockCache))
         aspect.setBeanFactory(beanFactory)
         every { joinPoint.proceed() } returns methodReturn
         stubTargetMethod(TestBean::cacheableWithGlobalLock.name, aspect)

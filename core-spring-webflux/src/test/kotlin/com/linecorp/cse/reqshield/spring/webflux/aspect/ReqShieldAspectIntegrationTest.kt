@@ -21,22 +21,30 @@ import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.config.LibAutoConfiguration
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import com.linecorp.cse.reqshield.support.spring.withNamedBean
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
+import org.springframework.beans.factory.BeanCreationException
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.test.context.ContextConfiguration
 import org.springframework.test.context.junit.jupiter.SpringExtension
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
+import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
 private const val INTEGRATION_CACHE_NAME = "it"
@@ -49,6 +57,9 @@ class ReqShieldAspectIntegrationTest {
 
     @Autowired
     private lateinit var asyncCache: AsyncCache<String>
+
+    @Autowired
+    private lateinit var applicationContext: ApplicationContext
 
     private fun cacheKey(key: String) = "$INTEGRATION_CACHE_NAME::$key"
 
@@ -138,6 +149,61 @@ class ReqShieldAspectIntegrationTest {
         assertEquals(1, service.getGlobalLockCount(), "The backend should be called once")
     }
 
+    @Test
+    fun libraryShouldNotRegisterASchedulerBean() {
+        // A library bean would clash with an application bean of the same name
+        assertTrue(applicationContext.getBeansOfType(Scheduler::class.java).isEmpty())
+    }
+
+    @Test
+    fun cacheWritesShouldRunOnTheSharedBoundedElasticSchedulerByDefault() {
+        val key = "default-scheduler-${System.nanoTime()}"
+        service.get(key).block()
+
+        assertTrue(awaitCachePut(cacheKey(key)))
+        assertTrue((asyncCache as InMemoryAsyncCache).lastWriterThread!!.startsWith("boundedElastic-"))
+    }
+
+    @Test
+    fun schedulerBeanNamedReqShieldSchedulerShouldReplaceTheDefault() {
+        val userScheduler = Schedulers.newSingle("user-scheduler", true)
+        withNamedBean("reqShieldScheduler", userScheduler, *CONFIGURATIONS) { userContext ->
+            val key = "user-scheduler-${System.nanoTime()}"
+            userContext.getBean(TestService::class.java).get(key).block()
+            val userCache = userContext.getBean(InMemoryAsyncCache::class.java)
+
+            await().atMost(Duration.ofSeconds(5)).until { userCache.get(cacheKey(key)).block() != null }
+            assertTrue(userCache.lastWriterThread!!.startsWith("user-scheduler"))
+        }
+        // The scheduler belongs to the application, so the library must leave it running
+        assertFalse(userScheduler.isDisposed)
+        userScheduler.dispose()
+    }
+
+    @Test
+    fun beanNamedReqShieldSchedulerOfAnotherTypeShouldFailTheRefresh() {
+        val error =
+            assertThrows<BeanCreationException> {
+                withNamedBean("reqShieldScheduler", "not a scheduler", *CONFIGURATIONS) { }
+            }
+
+        assertTrue(error.mostSpecificCause is BeanNotOfRequiredTypeException, error.toString())
+    }
+
+    @Test
+    fun schedulerBeansWithOtherNamesShouldBeIgnored() {
+        val otherScheduler = Schedulers.newSingle("other-scheduler", true)
+        withNamedBean("otherScheduler", otherScheduler, *CONFIGURATIONS) { otherContext ->
+            val key = "other-scheduler-${System.nanoTime()}"
+            otherContext.getBean(TestService::class.java).get(key).block()
+            val otherCache = otherContext.getBean(InMemoryAsyncCache::class.java)
+
+            await().atMost(Duration.ofSeconds(5)).until { otherCache.get(cacheKey(key)).block() != null }
+            assertTrue(otherCache.lastWriterThread!!.startsWith("boundedElastic-"))
+        }
+        otherScheduler.dispose()
+    }
+
     @Configuration
     open class TestConfig {
         @Bean
@@ -171,6 +237,10 @@ class ReqShieldAspectIntegrationTest {
 
         @ReqShieldCacheEvict(cacheName = INTEGRATION_CACHE_NAME, key = "#key")
         open fun evictFailing(key: String): Mono<Boolean> = Mono.error(IllegalStateException("eviction must not happen"))
+    }
+
+    companion object {
+        private val CONFIGURATIONS = arrayOf(LibAutoConfiguration::class.java, TestConfig::class.java)
     }
 }
 

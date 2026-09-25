@@ -19,6 +19,8 @@ package com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.aspect
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.currentCoroutineContext
 import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryAsyncCache<T> :
@@ -31,6 +33,14 @@ class InMemoryAsyncCache<T> :
     private val store = ConcurrentHashMap<String, Entry<T>>()
     private val locks = ConcurrentHashMap<String, Lock>()
 
+    /** Name of the thread that ran the most recent write, to tell which scope performed it. */
+    @Volatile
+    var lastWriterThread: String? = null
+
+    /** [CoroutineName] of the most recent write, for scopes that share a dispatcher. */
+    @Volatile
+    var lastWriterCoroutineName: String? = null
+
     override suspend fun get(key: String): ReqShieldData<T>? {
         val now = System.currentTimeMillis()
         return store[key]?.let { e -> if (now <= e.expiresAt) e.data else null }
@@ -41,6 +51,8 @@ class InMemoryAsyncCache<T> :
         value: ReqShieldData<T>,
         timeToLiveMillis: Long,
     ): Boolean {
+        lastWriterThread = Thread.currentThread().name
+        lastWriterCoroutineName = currentCoroutineContext()[CoroutineName]?.name
         val expiresAt = System.currentTimeMillis() + timeToLiveMillis
         store[key] = Entry(value, expiresAt)
         return true

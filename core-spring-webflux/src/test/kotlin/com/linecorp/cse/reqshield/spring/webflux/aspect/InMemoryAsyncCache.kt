@@ -36,6 +36,10 @@ class InMemoryAsyncCache<T> :
     private val store = ConcurrentHashMap<String, Entry<T>>()
     private val locks = ConcurrentHashMap<String, Lock>()
 
+    /** Name of the thread that ran the most recent write, to tell which scheduler performed it. */
+    @Volatile
+    var lastWriterThread: String? = null
+
     override fun get(key: String): Mono<ReqShieldData<T>?> =
         Mono.fromCallable {
             val now = System.currentTimeMillis()
@@ -48,6 +52,7 @@ class InMemoryAsyncCache<T> :
         timeToLiveMillis: Long,
     ): Mono<Boolean> =
         Mono.fromCallable {
+            lastWriterThread = Thread.currentThread().name
             val expiresAt = System.currentTimeMillis() + timeToLiveMillis
             store[key] = Entry(value, expiresAt)
             true

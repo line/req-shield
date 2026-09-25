@@ -29,7 +29,7 @@ import org.aspectj.lang.reflect.MethodSignature
 import org.springframework.aop.support.AopUtils
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.BeanFactoryAware
-import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.beans.factory.DisposableBean
 import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
@@ -43,13 +43,33 @@ import org.springframework.util.function.SingletonSupplier
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 @Aspect
 class ReqShieldAspect<T>(
     private val reqShieldCache: ReqShieldCache<T>,
-    @Qualifier("reqShieldExecutor") private val executor: Executor,
-) : BeanFactoryAware {
+) : BeanFactoryAware,
+    DisposableBean {
     private lateinit var beanFactory: BeanFactory
+
+    /** Set only when no `reqShieldExecutor` bean exists, so [destroy] never shuts down an application's pool. */
+    internal var ownedExecutor: ExecutorService? = null
+        private set
+
+    /**
+     * Runs the asynchronous cache writes of every ReqShield this aspect creates: the application's bean named
+     * `reqShieldExecutor` when there is one, otherwise a pool owned by this aspect.
+     *
+     * The library deliberately registers no `Executor` bean of its own. Spring Boot backs off its
+     * `applicationTaskExecutor` when another `Executor` bean exists, so a library bean could silently change
+     * the executor behind `@Async` in applications that merely have req-shield on the classpath.
+     * Resolved in [setBeanFactory], at startup, so that a bean of that name which is not an `Executor` fails the
+     * context refresh instead of being ignored.
+     */
+    private lateinit var executor: Executor
+
     private val spelParser = SpelExpressionParser()
     private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
     private val defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
@@ -230,5 +250,35 @@ class ReqShieldAspect<T>(
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory
+        executor =
+            if (beanFactory.containsBean(EXECUTOR_BEAN_NAME)) {
+                // Throws BeanNotOfRequiredTypeException for a bean of another type
+                beanFactory.getBean(EXECUTOR_BEAN_NAME, Executor::class.java)
+            } else {
+                createOwnedExecutor().also { ownedExecutor = it }
+            }
+    }
+
+    override fun destroy() {
+        ownedExecutor?.shutdown()
+    }
+
+    private fun createOwnedExecutor(): ExecutorService {
+        val threadCounter = AtomicLong(0)
+
+        // Daemon threads, so a pending cache write can never block JVM shutdown.
+        // Named apart from the core default pool so a thread dump shows which one ran a write.
+        return Executors.newScheduledThreadPool(
+            maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
+        ) { runnable ->
+            Thread(runnable, "req-shield-aspect-executor-${threadCounter.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+    }
+
+    companion object {
+        /** Name of the optional application bean that replaces the pool owned by the aspect. */
+        internal const val EXECUTOR_BEAN_NAME = "reqShieldExecutor"
     }
 }

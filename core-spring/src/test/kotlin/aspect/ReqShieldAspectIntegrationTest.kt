@@ -18,9 +18,11 @@ package aspect
 
 import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable
+import com.linecorp.cse.reqshield.spring.aspect.ReqShieldAspect
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
 import com.linecorp.cse.reqshield.spring.config.LibAutoConfiguration
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import com.linecorp.cse.reqshield.support.spring.withNamedBean
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -29,20 +31,23 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+import org.springframework.beans.factory.BeanCreationException
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException
 import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Wires the aspect the way a consumer does - through [LibAutoConfiguration] only - so it also proves
- * that the `@Import` of the aspect and the `reqShieldExecutor` bean work without component scanning.
+ * that the `@Import` of the aspect works without component scanning.
  *
  * spring-test is not a test dependency of this module, so the context is driven directly.
  */
@@ -53,7 +58,7 @@ class ReqShieldAspectIntegrationTest {
 
     @BeforeEach
     fun setUp() {
-        context = AnnotationConfigApplicationContext(LibAutoConfiguration::class.java, TestConfig::class.java)
+        context = AnnotationConfigApplicationContext(*CONFIGURATIONS)
         service = context.getBean(TestService::class.java)
         cache = context.getBean(InMemoryReqShieldCache::class.java)
     }
@@ -64,8 +69,62 @@ class ReqShieldAspectIntegrationTest {
     }
 
     @Test
-    fun executorBeanShouldBeProvidedByTheAutoConfiguration() {
-        assertNotNull(context.getBean("reqShieldExecutor", ExecutorService::class.java))
+    fun libraryShouldNotRegisterAnyExecutorBean() {
+        // Spring Boot can back off its applicationTaskExecutor when another Executor bean exists
+        assertTrue(context.getBeansOfType(Executor::class.java).isEmpty())
+    }
+
+    @Test
+    fun cacheWritesShouldRunOnThePoolOwnedByTheAspectAndStopWithTheContext() {
+        service.get("owned-pool")
+
+        await().atMost(Duration.ofSeconds(5)).until { cache.get("integration::owned-pool") != null }
+        assertTrue(cache.lastWriterThread!!.startsWith(OWNED_POOL_THREAD_PREFIX), cache.lastWriterThread)
+
+        val ownedExecutor = context.getBean(ReqShieldAspect::class.java).ownedExecutor
+        assertNotNull(ownedExecutor)
+        context.close()
+        assertTrue(ownedExecutor!!.isShutdown)
+    }
+
+    @Test
+    fun executorBeanNamedReqShieldExecutorShouldReplaceTheOwnedPool() {
+        val userPool = Executors.newSingleThreadExecutor { Thread(it, "user-pool") }
+        // A plain Executor view, so closing the context does not shut the pool down on its own
+        val userExecutor = Executor { userPool.execute(it) }
+        withNamedBean("reqShieldExecutor", userExecutor, *CONFIGURATIONS) { userContext ->
+            userContext.getBean(TestService::class.java).get("user-pool")
+            val userCache = userContext.getBean(InMemoryReqShieldCache::class.java)
+
+            await().atMost(Duration.ofSeconds(5)).until { userCache.get("integration::user-pool") != null }
+            assertEquals("user-pool", userCache.lastWriterThread)
+            assertNull(userContext.getBean(ReqShieldAspect::class.java).ownedExecutor)
+        }
+        // The aspect only ever sees the wrapper here; ReqShieldAspectTest checks that destroy() leaves the pool running
+        userPool.shutdown()
+    }
+
+    @Test
+    fun beanNamedReqShieldExecutorOfAnotherTypeShouldFailTheRefresh() {
+        val error =
+            assertThrows<BeanCreationException> {
+                withNamedBean("reqShieldExecutor", "not an executor", *CONFIGURATIONS) { }
+            }
+
+        assertTrue(error.mostSpecificCause is BeanNotOfRequiredTypeException, error.toString())
+    }
+
+    @Test
+    fun executorBeansWithOtherNamesShouldBeIgnored() {
+        val otherPool = Executors.newSingleThreadExecutor { Thread(it, "other-pool") }
+        withNamedBean("applicationTaskExecutor", Executor { otherPool.execute(it) }, *CONFIGURATIONS) { otherContext ->
+            otherContext.getBean(TestService::class.java).get("other-pool")
+            val otherCache = otherContext.getBean(InMemoryReqShieldCache::class.java)
+
+            await().atMost(Duration.ofSeconds(5)).until { otherCache.get("integration::other-pool") != null }
+            assertTrue(otherCache.lastWriterThread!!.startsWith(OWNED_POOL_THREAD_PREFIX), otherCache.lastWriterThread)
+        }
+        otherPool.shutdown()
     }
 
     @Test
@@ -135,8 +194,19 @@ class ReqShieldAspectIntegrationTest {
         }
     }
 
+    companion object {
+        private val CONFIGURATIONS = arrayOf(LibAutoConfiguration::class.java, TestConfig::class.java)
+
+        /** Threads of the pool owned by the aspect, named apart from the core default pool. */
+        private const val OWNED_POOL_THREAD_PREFIX = "req-shield-aspect-executor-"
+    }
+
     class InMemoryReqShieldCache : ReqShieldCache<String> {
         private val store = ConcurrentHashMap<String, ReqShieldData<String>>()
+
+        /** Name of the thread that ran the most recent write, to tell which executor performed it. */
+        @Volatile
+        var lastWriterThread: String? = null
 
         override fun get(key: String): ReqShieldData<String>? = store[key]
 
@@ -145,6 +215,7 @@ class ReqShieldAspectIntegrationTest {
             value: ReqShieldData<String>,
             timeToLiveMillis: Long,
         ) {
+            lastWriterThread = Thread.currentThread().name
             store[key] = value
         }
 

@@ -151,6 +151,7 @@ class ReqShield<T>(
                         },
                     ).doFinally {
                         // A cache hit, read failure, or cancellation during the recheck must release our token.
+                        // Once creation started, createReqShieldData releases it (error, cancel or after the write).
                         if (!cacheCreationStarted.get()) {
                             releaseLock(key, lockType, token)
                         }
@@ -169,10 +170,14 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
         lockType: LockType,
         token: String?,
-    ): Mono<ReqShieldData<T>> =
-        executeCallable({ callable.call() }, key, lockType, token)
+    ): Mono<ReqShieldData<T>> {
+        // Set once the lock is handed to the asynchronous cache write, which releases it after writing
+        val lockHandedToCacheWrite = AtomicBoolean(false)
+
+        return executeCallable({ callable.call() }, key, lockType, token)
             .map { data -> buildReqShieldData(data, timeToLiveMillis) }
             .doOnNext { reqShieldData ->
+                lockHandedToCacheWrite.set(true)
                 // Async fire-and-forget cache storage (matches coroutine implementation)
                 setReqShieldData(
                     reqShieldConfig.setCacheFunction,
@@ -180,13 +185,13 @@ class ReqShield<T>(
                     reqShieldData,
                     lockType,
                     token,
-                ).subscribeOn(reqShieldConfig.scheduler)
-                    .subscribe(
-                        { /* success - no action needed */ },
-                        { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
-                    )
+                ).subscribe(
+                    { /* success - no action needed */ },
+                    { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+                )
             }.switchIfEmpty(
                 Mono.defer {
+                    lockHandedToCacheWrite.set(true)
                     val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
                     // Async fire-and-forget cache storage (matches coroutine implementation)
                     setReqShieldData(
@@ -195,14 +200,20 @@ class ReqShield<T>(
                         reqShieldData,
                         lockType,
                         token,
-                    ).subscribeOn(reqShieldConfig.scheduler)
-                        .subscribe(
-                            { /* success - no action needed */ },
-                            { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
-                        )
+                    ).subscribe(
+                        { /* success - no action needed */ },
+                        { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+                    )
                     Mono.just(reqShieldData)
                 },
-            )
+            ).doOnCancel {
+                // A caller cancelled while the supplier runs (client disconnect, timeout()) never reaches
+                // the cache write, so the lock is released here instead of lingering until it expires.
+                if (token != null && !lockHandedToCacheWrite.get()) {
+                    releaseLock(key, lockType, token)
+                }
+            }
+    }
 
     /**
      * Waits for the request that owns the lock to fill the cache.
@@ -303,12 +314,15 @@ class ReqShield<T>(
         Mono
             .defer { setFunction(key, value, value.timeToLiveMillis) }
             .onErrorMap { e -> ClientException(ErrorCode.SET_CACHE_ERROR, cause = e) }
+            .subscribeOn(reqShieldConfig.scheduler)
             .doFinally {
                 // Only the holder of a token took a lock, so only it may release one.
+                // Placed after subscribeOn: a scheduler that rejects the write (disposed or saturated) never
+                // subscribes the operators above it, so a release there would never run.
                 if (token != null) {
                     releaseLock(key, lockType, token)
                 }
-            }.subscribeOn(reqShieldConfig.scheduler)
+            }
 
     private fun releaseLock(
         key: String,
