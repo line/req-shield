@@ -315,6 +315,88 @@ class ReqShieldTest : BaseReqShieldTest {
         }
 
     @Test
+    fun shouldReturnCachedDataAndSkipTheRefreshWhenTheUpdateLockCallFails() =
+        runTest {
+            val cached = updateTargetData(oldValue, timeToLiveMillis)
+            coEvery { cacheGetter(key) } returns cached
+            coEvery { keyLock.tryLock(key, LockType.UPDATE) } throws IllegalStateException("lock store down")
+
+            assertSame(cached, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            awaitBackgroundWrites()
+
+            coVerify(exactly = 1) { keyLock.tryLock(key, LockType.UPDATE) }
+            coVerify(exactly = 0) { callable() }
+            coVerify(exactly = 0) { cacheSetter(any(), any(), any()) }
+            coVerify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
+        }
+
+    @Test
+    fun shouldReturnRecheckedDataWhenTheUnlockAfterTheRecheckFails() =
+        runTest {
+            val cached = cachedData(value, timeToLiveMillis)
+            coEvery { cacheGetter(key) } returnsMany listOf(null, cached)
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } throws IllegalStateException("lock store down")
+
+            assertSame(cached, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+
+            coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+            coVerify(exactly = 0) { callable() }
+        }
+
+    @Test
+    fun shouldReportTheSupplierErrorWhenTheSupplierAndTheUnlockBothFail() =
+        runTest {
+            val failure = IllegalStateException("supplier failed")
+            coEvery { cacheGetter(key) } returns null
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } throws IllegalStateException("lock store down")
+            coEvery { callable() } throws failure
+
+            val error = assertFailsWith<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+
+            assertEquals(ErrorCode.SUPPLIER_ERROR, error.errorCode)
+            assertSame(failure, error.cause)
+            coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+        }
+
+    @Test
+    fun shouldEndWithTheCancellationWhenTheUnlockAfterACancelledRecheckFails() =
+        runTest {
+            val recheckStarted = CompletableDeferred<Unit>()
+            var reads = 0
+            coEvery { cacheGetter(key) } coAnswers {
+                if (++reads == 1) {
+                    null
+                } else {
+                    recheckStarted.complete(Unit)
+                    awaitCancellation()
+                }
+            }
+            coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
+            coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } throws IllegalStateException("lock store down")
+            val cancellation = CancellationException("request cancelled")
+            var propagated: Throwable? = null
+            val taskScope = CoroutineScope(coroutineContext + SupervisorJob())
+
+            try {
+                val caller = taskScope.launch { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+                caller.invokeOnCompletion { propagated = it }
+                recheckStarted.await()
+
+                caller.cancel(cancellation)
+                caller.join()
+
+                // The failed release must neither replace nor wrap the caller's own cancellation.
+                assertSame(cancellation, propagated)
+                coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+                coVerify(exactly = 0) { callable() }
+            } finally {
+                taskScope.cancel()
+            }
+        }
+
+    @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() =
         runTest {
             coEvery { cacheGetter.invoke(key) } returns null

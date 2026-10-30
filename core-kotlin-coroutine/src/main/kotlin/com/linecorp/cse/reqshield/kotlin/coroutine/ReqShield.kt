@@ -68,7 +68,20 @@ class ReqShield<T>(
         val lockType = LockType.UPDATE
         // ONLY_CREATE_CACHE collapses requests on creation only, so the update runs without a lock.
         val onlyCreateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE
-        val token = if (onlyCreateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
+        val token =
+            if (onlyCreateCache) {
+                null
+            } else {
+                try {
+                    reqShieldConfig.keyLock.tryLock(key, lockType)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // The caller already has its data: a failing lock store only skips this refresh
+                    log.warn("[Req-Shield] failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
+                    return
+                }
+            }
 
         if (!onlyCreateCache && token == null) return
 
@@ -108,9 +121,7 @@ class ReqShield<T>(
             } finally {
                 // A hit, read failure, or cancellation must release the token; creation owns it on a miss.
                 if (!cacheCreationRequired) {
-                    withContext(NonCancellable) {
-                        reqShieldConfig.keyLock.unLock(key, lockType, token)
-                    }
+                    releaseQuietly(key, lockType, token, "after the cache recheck")
                 }
             }
         }
@@ -243,11 +254,29 @@ class ReqShield<T>(
         } catch (e: Exception) {
             // Release the lock only when this call actually acquired one.
             if (token != null && lockType != null) {
-                withContext(NonCancellable) {
-                    reqShieldConfig.keyLock.unLock(key, lockType, token)
-                }
+                releaseQuietly(key, lockType, token, "after the supplier failed")
             }
             if (e is CancellationException) throw e
             throw ClientException(ErrorCode.SUPPLIER_ERROR, cause = e)
         }
+
+    /**
+     * Releases the lock identified by [token], even when the caller is cancelled. A failed release must not cost the
+     * caller a result it already has (its data, the error it is about to get, or its cancellation), so it is only
+     * logged; the lock then expires on its own.
+     */
+    private suspend fun releaseQuietly(
+        key: String,
+        lockType: LockType,
+        token: String,
+        situation: String,
+    ) {
+        try {
+            withContext(NonCancellable) {
+                reqShieldConfig.keyLock.unLock(key, lockType, token)
+            }
+        } catch (unlockError: Exception) {
+            log.error("[Req-Shield] failed to unlock key '{}' {}", key, situation, unlockError)
+        }
+    }
 }
