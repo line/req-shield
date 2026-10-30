@@ -397,6 +397,39 @@ class ReqShieldTest : BaseReqShieldTest {
         }
 
     @Test
+    fun shouldEndWithTheCancellationWhenTheRefreshLockCallIsCancelled() =
+        runTest {
+            val lockStarted = CompletableDeferred<Unit>()
+            coEvery { cacheGetter(key) } returns updateTargetData(oldValue, timeToLiveMillis)
+            coEvery { keyLock.tryLock(key, LockType.UPDATE) } coAnswers {
+                lockStarted.complete(Unit)
+                awaitCancellation()
+            }
+            val cancellation = CancellationException("request cancelled")
+            var propagated: Throwable? = null
+            var result: ReqShieldData<Product>? = null
+            val taskScope = CoroutineScope(coroutineContext + SupervisorJob())
+
+            try {
+                val caller = taskScope.launch { result = reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+                caller.invokeOnCompletion { propagated = it }
+                lockStarted.await()
+
+                caller.cancel(cancellation)
+                caller.join()
+                awaitBackgroundWrites()
+
+                // A cancelled lock call is not a lock store failure: the caller ends with its cancellation, not the cached data.
+                assertSame(cancellation, propagated)
+                assertNull(result)
+                coVerify(exactly = 0) { callable() }
+                coVerify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
+            } finally {
+                taskScope.cancel()
+            }
+        }
+
+    @Test
     override fun testSetMethodCacheNotExistsAndLocalLockAcquired() =
         runTest {
             coEvery { cacheGetter.invoke(key) } returns null
