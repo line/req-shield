@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.reactivestreams.Subscription
+import reactor.core.CoreSubscriber
 import reactor.core.Disposable
 import reactor.core.publisher.Mono
 import reactor.core.publisher.MonoSink
@@ -380,6 +382,131 @@ class ReqShieldTest : BaseReqShieldTest {
 
         verify(exactly = 1) { keyLock.unLock(key, LockType.UPDATE, token) }
         verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldPollTheCacheOnlyMaxAttemptGetCacheTimesBeforeTheFallback() {
+        val getCacheInvocations = AtomicInteger(0)
+        every { cacheGetter.invoke(key) } answers {
+            getCacheInvocations.incrementAndGet()
+            Mono.empty()
+        }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.empty()
+
+        StepVerifier
+            .create(reqShieldWithMaxAttempt(1).getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .assertNext { assertEquals(value, it.value) }
+            .verifyComplete()
+
+        // 1 initial read + maxAttemptGetCache (1) poll
+        assertEquals(2, getCacheInvocations.get())
+        verify(exactly = 1) { callable.call() }
+    }
+
+    @Test
+    fun shouldKeepTheCacheHitWhenTheRefreshLockCallThrows() {
+        val cached = updateTargetReqShieldData(oldValue)
+        every { cacheGetter(key) } returns Mono.just(cached)
+        every { keyLock.tryLock(key, LockType.UPDATE) } throws IllegalStateException("lock store down")
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNext(cached)
+            .verifyComplete()
+
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldReleaseTheLockOnceWhenTheRecheckCompletesAfterTheCancel() {
+        val recheck = LateMono<ReqShieldData<Product>?>()
+        every { cacheGetter(key) } returnsMany listOf(Mono.empty(), recheck)
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .then { verify(exactly = 2) { cacheGetter(key) } }
+            .thenCancel()
+            .verify()
+        // The recheck's empty completion was already on its way when the caller cancelled
+        recheck.complete()
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldNotWriteTheCacheWhenTheSupplierValueArrivesAfterTheCancel() {
+        val supplied = LateMono<Product?>()
+        every { cacheGetter(key) } returns Mono.empty()
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        every { callable.call() } returns supplied
+        every { cacheSetter(key, any(), any()) } returns Mono.just(true)
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .then { verify(exactly = 1) { callable.call() } }
+            .thenCancel()
+            .verify()
+        // The supplier's value was already on its way when the caller cancelled and the lock was released
+        supplied.emit(value)
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReleaseTheLockOnceWhenTheSupplierFailsAfterTheCancel() {
+        val supplied = LateMono<Product?>()
+        every { cacheGetter(key) } returns Mono.empty()
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        every { callable.call() } returns supplied
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .then { verify(exactly = 1) { callable.call() } }
+            .thenCancel()
+            .verify()
+        // The supplier's failure was already on its way when the caller cancelled and the lock was released
+        supplied.fail(IllegalStateException("supplier failed"))
+
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+    }
+
+    /**
+     * A Mono whose signal is already on its way when its subscriber cancels: it ignores cancel and signals when told to.
+     * Reactive Streams only asks a publisher to stop signaling eventually after a cancel (rule 3.12), so a signal that
+     * races the cancel on another thread arrives like this.
+     */
+    private class LateMono<T> : Mono<T>() {
+        private lateinit var subscriber: CoreSubscriber<in T>
+
+        override fun subscribe(actual: CoreSubscriber<in T>) {
+            subscriber = actual
+            actual.onSubscribe(
+                object : Subscription {
+                    override fun request(n: Long) = Unit
+
+                    override fun cancel() = Unit
+                },
+            )
+        }
+
+        fun complete() = subscriber.onComplete()
+
+        fun emit(value: T & Any) {
+            subscriber.onNext(value)
+            subscriber.onComplete()
+        }
+
+        fun fail(error: Throwable) = subscriber.onError(error)
     }
 
     /** Runs tasks inline until [rejecting] is set, then rejects them the way a disposed or saturated scheduler does. */
@@ -955,8 +1082,8 @@ class ReqShieldTest : BaseReqShieldTest {
             ).assertNext { assertEquals(value, it.value) }
             .verifyComplete()
 
-        // Every poll was attempted: 1 initial read + first poll + maxAttemptGetCache retries
-        assertEquals(2 + maxAttemptGetCache, getCacheInvocations.get())
+        // Every poll was attempted: 1 initial read + maxAttemptGetCache polls
+        assertEquals(1 + maxAttemptGetCache, getCacheInvocations.get())
         verify(exactly = 1) { callable.call() }
     }
 
