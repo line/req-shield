@@ -20,23 +20,12 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * Guards the two auto-configuration registration files shipped in `src/main/resources` against a
- * silent typo: nothing else in the build loads them, so a broken class name would only surface at
+ * Guards the auto-configuration registration file shipped in `src/main/resources` against a
+ * silent typo: nothing else in the build loads it, so a broken class name would only surface at
  * runtime in a consuming application.
  */
 class AutoConfigurationResourcesTest {
     private val expectedClassName = LibAutoConfiguration::class.java.name
-
-    @Test
-    fun `spring factories names the module's LibAutoConfiguration`() {
-        val names = readClasspathResourceLines("META-INF/spring.factories")
-
-        assertTrue(
-            names.any { it.contains(expectedClassName) },
-            "spring.factories should reference $expectedClassName, but was: $names",
-        )
-        assertClassLoadable(expectedClassName)
-    }
 
     @Test
     fun `Boot 3 AutoConfiguration imports names the module's LibAutoConfiguration`() {

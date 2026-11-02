@@ -67,10 +67,10 @@ Please report features you would like to see added to github issues.
 ## Developer Guide
 
 ### Development languages
-* Kotlin 1.6.0 or later
+* Kotlin (the build uses the Kotlin 2.4 compiler; see `libs.versions.toml`)
 
 ### Build Requirements
-* JDK 8 or later
+* JDK 17 or later
 
 ### How To Build
 * We use Gradle to build Req-Shield. The following command will compile Req-Shield.

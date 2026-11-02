@@ -340,6 +340,48 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
+    fun shouldReturnCachedDataAndSkipTheRefreshWhenTheUpdateLockCallFails() {
+        val cached = updateTargetData(oldValue)
+        every { cacheGetter(key) } returns cached
+        every { keyLock.tryLock(key, LockType.UPDATE) } throws IllegalStateException("lock store down")
+        // Run submitted tasks inline so the zero-call checks cannot race with a refresh.
+        val directExecutor = Executor { it.run() }
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = directExecutor))
+
+        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        verify(exactly = 0) { callable.call() }
+        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
+        verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
+    }
+
+    @Test
+    fun shouldReturnRecheckedDataWhenTheUnlockAfterTheRecheckFails() {
+        val cached = freshData(value)
+        every { cacheGetter(key) } returnsMany listOf(null, cached)
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } throws IllegalStateException("lock store down")
+
+        assertSame(cached, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+        verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldReportTheSupplierErrorWhenTheSupplierAndTheUnlockBothFail() {
+        val failure = IllegalStateException("supplier failed")
+        every { cacheGetter(key) } returns null
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } throws IllegalStateException("lock store down")
+        every { callable.call() } throws failure
+
+        val error = assertThrows<ClientException> { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
+
+        assertEquals(ErrorCode.SUPPLIER_ERROR, error.errorCode)
+        assertSame(failure, error.cause)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
+    }
+
+    @Test
     fun shouldReturnCachedDataWithoutTouchingLocksWhenExecutorRejectsAnUnlockedRefresh() {
         val cached = updateTargetData(oldValue)
         every { cacheGetter(key) } returns cached

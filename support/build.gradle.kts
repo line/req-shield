@@ -28,11 +28,9 @@ dependencies {
     testFixturesImplementation(rootProject.libs.spring.context)
     testFixturesImplementation(rootProject.libs.spring.test)
     testFixturesImplementation(rootProject.libs.spring.boot.test)
-}
 
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        freeCompilerArgs = listOf("-Xjsr305=strict")
-        jvmTarget = JavaVersion.VERSION_1_8.toString()
+    constraints {
+        // Testcontainers 1.21.4 (the latest 1.x) brings commons-compress 1.24.0 (CVE-2024-25710, CVE-2024-26308).
+        testFixturesApi(rootProject.libs.commons.compress)
     }
 }

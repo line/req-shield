@@ -6,9 +6,10 @@ A lib that regulates the cache-based requests an application receives in terms o
 
 ## Requirements
 
-- Java 8 or later if you are a user.
-- Kotlin 1.8 or later if you are a user.
-- (If link this lib with Spring) Spring Boot 2.7 (Spring Framework 5.3) or later if you are a user.
+- Java 17 or later if you are a user.
+- Kotlin 1.9 or later if you are a user.
+- (If link this lib with Spring) Spring Boot 3.5 (Spring Framework 6.2) or later if you are a user.
+- (If you use the Reactor modules) Project Reactor 3.7 or later; (if you use the coroutine modules) kotlinx.coroutines 1.8 or later.
 
 ## Usage
 
@@ -69,6 +70,15 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
     - A working local Docker daemon with network access to pull `redis:6.2.7-alpine` on first run.
     - Sufficient permissions to start containers from tests.
 - If you need to temporarily bypass Redis ITs locally (e.g., no Docker), run specific unit-test-only tasks or exclude the example modules when invoking Gradle.
+
+### Kotlin with Reactor 3.8 (Spring Boot 4)
+
+- Reactor 3.8 declares `Mono`'s type parameter non-null with JSpecify annotations, and the Kotlin compiler reports
+  violations as errors by default. The Reactor-based API still uses nullable type arguments such as
+  `Mono<ReqShieldData<T>?>` (`AsyncCache.get`, `ReqShieldConfiguration.getCacheFunction`), so Kotlin code that
+  implements or calls it fails to compile on Reactor 3.8.
+- Until the API changes, compile such Kotlin code with `-Xjspecify-annotations=warn`, as
+  `req-shield-spring-boot4-webflux-example` does. Java callers and the coroutine modules are not affected.
 
 ### WebFlux null handling
 

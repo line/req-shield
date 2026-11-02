@@ -46,7 +46,6 @@ import org.springframework.core.annotation.AnnotationUtils
 import org.springframework.expression.EvaluationContext
 import org.springframework.expression.Expression
 import org.springframework.expression.spel.standard.SpelExpressionParser
-import org.springframework.util.ClassUtils
 import org.springframework.util.StringUtils
 import org.springframework.util.function.SingletonSupplier
 import reactor.core.publisher.Mono
@@ -74,16 +73,6 @@ open class ReqShieldAspect<T>(
      * `CoroutineScope` fails the context refresh instead of being ignored.
      */
     private lateinit var scope: CoroutineScope
-
-    /**
-     * Spring 6.1+ drops the trailing Continuation of a suspend function itself, in both SimpleKeyGenerator
-     * and MethodBasedEvaluationContext, so the aspect must pass the raw arguments there and filter them itself
-     * only on older versions. Detected by a class added in 6.1 instead of SpringVersion, which is null when the
-     * jar manifest lacks Implementation-Version (e.g. shaded jars): guessing wrong there would drop the real
-     * last argument from the cache key and make different calls share one entry.
-     */
-    private val springDropsContinuationArgument =
-        ClassUtils.isPresent("org.springframework.aop.framework.CoroutinesUtils", ReqShieldAspect::class.java.classLoader)
 
     private val spelParser = SpelExpressionParser()
     private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
@@ -195,12 +184,9 @@ open class ReqShieldAspect<T>(
         joinPoint: ProceedingJoinPoint,
     ): String {
         val method = getTargetMethod(joinPoint)
-        val args =
-            if (springDropsContinuationArgument) {
-                joinPoint.args
-            } else {
-                joinPoint.args.filter { it !is Continuation<*> }.toTypedArray()
-            }
+        // Spring 6.1+ (the supported minimum is 6.2) drops the trailing Continuation of a suspend function itself,
+        // in both SimpleKeyGenerator and MethodBasedEvaluationContext, so the raw arguments are passed on.
+        val args = joinPoint.args
 
         val context: EvaluationContext =
             MethodBasedEvaluationContext(joinPoint.target, method, args, parameterNameDiscoverer)

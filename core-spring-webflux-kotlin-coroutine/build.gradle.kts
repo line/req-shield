@@ -38,10 +38,3 @@ dependencies {
     testImplementation(rootProject.libs.aspectj)
     testImplementation(rootProject.libs.lettuce)
 }
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        freeCompilerArgs = listOf("-Xjsr305=strict")
-        jvmTarget = JavaVersion.VERSION_1_8.toString()
-    }
-}

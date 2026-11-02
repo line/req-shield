@@ -59,9 +59,12 @@ The library is organized into several core modules:
 
 ### Running Examples
 ```bash
-./gradlew :req-shield-spring-boot3-example:bootRun
-./gradlew :req-shield-spring-webflux-example:bootRun
-./gradlew :req-shield-spring-webflux-kotlin-coroutine-example:bootRun
+./gradlew :req-shield-spring-boot3-example:bootRun                       # Spring Boot 3.5 (the supported minimum)
+./gradlew :req-shield-spring-boot3-webflux-example:bootRun
+./gradlew :req-shield-spring-boot3-webflux-kotlin-coroutine-example:bootRun
+./gradlew :req-shield-spring-boot4-example:bootRun                       # Spring Boot 4.1
+./gradlew :req-shield-spring-boot4-webflux-example:bootRun
+./gradlew :req-shield-spring-boot4-webflux-kotlin-coroutine-example:bootRun
 ```
 
 ## Module Structure
@@ -129,12 +132,25 @@ Contains shared:
 ## Version Compatibility
 
 ### Java/Kotlin Compatibility
-- **Core modules**: Java 8+, Kotlin 1.8+
-- **Spring Boot 3 examples**: Java 17+
-- **Spring Boot 2 examples**: Java 8+
+- **All modules**: Java 17+; library consumers need Kotlin 1.9+
+- **Example applications**: `req-shield-spring-boot3-*` run on Spring Boot 3.5 (the supported minimum),
+  `req-shield-spring-boot4-*` run the same code on Spring Boot 4.1
+
+### Kotlin Toolchain
+- The build uses the Kotlin 2.4 compiler (K2), set by `kotlin` in `libs.versions.toml`.
+- Library modules compile with `languageVersion`/`apiVersion` 2.0 and publish `kotlin-stdlib`/`kotlin-reflect` at
+  `kotlinApi` (2.0.21) instead of the compiler's version (`kotlin.stdlib.default.dependency=false`). This keeps the
+  published metadata and stdlib readable by consumers on Kotlin 1.9+, the default Kotlin of Spring Boot 3.5. Kotlin
+  documents that 1.9 reads most 2.0 binaries; kotlinc 1.9.25 and 2.0.21 consumers were checked (1.8.22 also worked,
+  but no Kotlin guarantee covers it, so 1.8 is not supported).
+  Raising either value raises the minimum Kotlin version of consumers. Kotlin 2.4 already reports language version
+  2.0 as deprecated, so a later Kotlin upgrade may force a higher value and a higher consumer minimum.
+- Example applications are not published and use the compiler's stdlib.
+- The stdlib is an `api` dependency of the library modules, so it stays in the POM's compile scope for Java callers.
 
 ### Framework Support
-- Spring Boot 2.7+ (Spring Framework 5.3+)
-- Spring Boot 3.3+
-- Project Reactor 3.4+
-- Kotlin Coroutines 1.7+
+- Spring Boot 3.5+ (Spring Framework 6.2+)
+- Project Reactor 3.7+
+- Kotlin Coroutines 1.8+
+- The library compiles and runs its tests against these minimums. The boot3 examples run it on Spring Boot 3.5 and
+  the boot4 examples on Spring Boot 4.1; keep the two sets in sync when changing one.

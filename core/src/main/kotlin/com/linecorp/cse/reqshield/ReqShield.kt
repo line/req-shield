@@ -63,7 +63,18 @@ class ReqShield<T>(
         val onlyCreateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE
 
         // ONLY_CREATE_CACHE collapses requests on cache creation only, so the update runs without a lock
-        val token = if (onlyCreateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
+        val token =
+            if (onlyCreateCache) {
+                null
+            } else {
+                try {
+                    reqShieldConfig.keyLock.tryLock(key, lockType)
+                } catch (e: Exception) {
+                    // The caller already has its data: a failing lock store only skips this refresh
+                    log.warn("Failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
+                    return
+                }
+            }
 
         if (onlyCreateCache || token != null) {
             runInBackground(key, lockType, token) {
@@ -98,7 +109,7 @@ class ReqShield<T>(
             } finally {
                 // On a miss, the existing creation path keeps the lock until its asynchronous write finishes.
                 if (!cacheCreationRequired) {
-                    reqShieldConfig.keyLock.unLock(key, lockType, token)
+                    releaseQuietly(key, lockType, token, "after the cache recheck")
                 }
             }
         }
@@ -147,12 +158,7 @@ class ReqShield<T>(
         } catch (e: RejectedExecutionException) {
             log.warn("Executor rejected the background cache task for key '{}', so it is skipped", key, e)
             if (token != null) {
-                // A failed release must not cost the caller its data; the lock then expires on its own
-                try {
-                    reqShieldConfig.keyLock.unLock(key, lockType, token)
-                } catch (unlockError: Exception) {
-                    log.error("Failed to unlock key '{}' after the executor rejected its task", key, unlockError)
-                }
+                releaseQuietly(key, lockType, token, "after the executor rejected its task")
             }
         }
     }
@@ -262,10 +268,27 @@ class ReqShield<T>(
             callable.call()
         }.getOrElse {
             if (token != null && lockType != null) {
-                reqShieldConfig.keyLock.unLock(key, lockType, token)
+                releaseQuietly(key, lockType, token, "after the supplier failed")
             }
             throw ClientException(ErrorCode.SUPPLIER_ERROR, cause = it)
         }
+
+    /**
+     * Releases the lock identified by [token]. A failed release must not cost the caller a result it already has
+     * (its data, or the error it is about to get), so it is only logged; the lock then expires on its own.
+     */
+    private fun releaseQuietly(
+        key: String,
+        lockType: LockType,
+        token: String,
+        situation: String,
+    ) {
+        try {
+            reqShieldConfig.keyLock.unLock(key, lockType, token)
+        } catch (unlockError: Exception) {
+            log.error("Failed to unlock key '{}' {}", key, situation, unlockError)
+        }
+    }
 
     private fun logAsyncFailure(
         key: String,

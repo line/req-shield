@@ -28,8 +28,8 @@ import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
 import java.time.Duration
 import java.util.concurrent.Callable
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
@@ -39,6 +39,13 @@ private val log = LoggerFactory.getLogger(ReqShield::class.java)
  * supplier fallback. Stack trace is disabled because it carries no diagnostic value.
  */
 private class GetCacheUnavailableException : RuntimeException(null, null, false, false)
+
+/**
+ * The owner of an acquired creation lock. The caller can cancel on another thread while a signal is still on its way,
+ * so the recheck, the creation and the cancel hooks each take the lock over with compareAndSet: exactly one of them
+ * releases it or hands it to the cache write.
+ */
+private enum class LockOwner { RECHECK, CREATION, CACHE_WRITE, RELEASED }
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
@@ -108,8 +115,9 @@ class ReqShield<T>(
                 processMono(null)
             } else {
                 // Empty means another request already holds the update lock: nothing to do here.
-                reqShieldConfig.keyLock
-                    .tryLock(key, lockType)
+                // Deferred so a lock call that throws fails this refresh only, not the caller's cache hit.
+                Mono
+                    .defer { reqShieldConfig.keyLock.tryLock(key, lockType) }
                     .flatMap { token -> processMono(token) }
             }
 
@@ -130,13 +138,13 @@ class ReqShield<T>(
 
         if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE) {
             // This mode never creates a cache entry through the lock, so no token is taken.
-            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null)
+            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null, null)
         }
 
         return reqShieldConfig.keyLock
             .tryLock(key, lockType)
             .flatMap { token ->
-                val cacheCreationStarted = AtomicBoolean(false)
+                val owner = AtomicReference(LockOwner.RECHECK)
                 // Another request may have filled the cache between our initial miss and lock acquisition.
                 Mono.defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key) }
                     // A global lock can emit on its client's event loop; keep cache reads off that thread.
@@ -144,15 +152,17 @@ class ReqShield<T>(
                     .flatMap { Mono.justOrEmpty(it) }
                     .switchIfEmpty(
                         Mono.defer {
-                            val creation = createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
-                            // The existing creation path releases the lock after its asynchronous cache write.
-                            cacheCreationStarted.set(true)
-                            creation
+                            // A cancel that already released the lock leaves nothing to create.
+                            if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.CREATION)) {
+                                createReqShieldData(key, callable, timeToLiveMillis, lockType, token, owner)
+                            } else {
+                                Mono.empty()
+                            }
                         },
                     ).doFinally {
                         // A cache hit, read failure, or cancellation during the recheck must release our token.
-                        // Once creation started, createReqShieldData releases it (error, cancel or after the write).
-                        if (!cacheCreationStarted.get()) {
+                        // Once creation owns it, createReqShieldData releases it (error, cancel or after the write).
+                        if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.RELEASED)) {
                             releaseLock(key, lockType, token)
                         }
                     }
@@ -170,55 +180,60 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
         lockType: LockType,
         token: String?,
+        // The owner of [token] (null without a lock): the cache write, the error and the cancel take it over once.
+        owner: AtomicReference<LockOwner>?,
     ): Mono<ReqShieldData<T>> {
-        // Set once the lock is handed to the asynchronous cache write, which releases it after writing
-        val lockHandedToCacheWrite = AtomicBoolean(false)
+        // Hands the lock to the asynchronous cache write, which releases it after writing. False when a cancel
+        // already released it: the write is then skipped, because it would run without the lock.
+        fun handToCacheWrite(): Boolean = owner == null || owner.compareAndSet(LockOwner.CREATION, LockOwner.CACHE_WRITE)
 
-        return executeCallable({ callable.call() }, key, lockType, token)
+        fun releaseUnlessHandedOver() {
+            if (token != null && owner != null && owner.compareAndSet(LockOwner.CREATION, LockOwner.RELEASED)) {
+                releaseLock(key, lockType, token)
+            }
+        }
+
+        fun writeCache(reqShieldData: ReqShieldData<T>) {
+            // Async fire-and-forget cache storage (matches coroutine implementation)
+            setReqShieldData(
+                reqShieldConfig.setCacheFunction,
+                key,
+                reqShieldData,
+                lockType,
+                token,
+            ).subscribe(
+                { /* success - no action needed */ },
+                { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+            )
+        }
+
+        // The supplier error releases below, through the owner, instead of inside executeCallable.
+        return executeCallable({ callable.call() }, key, null, null)
+            .doOnError { releaseUnlessHandedOver() }
             .map { data -> buildReqShieldData(data, timeToLiveMillis) }
             .doOnNext { reqShieldData ->
-                lockHandedToCacheWrite.set(true)
-                // Async fire-and-forget cache storage (matches coroutine implementation)
-                setReqShieldData(
-                    reqShieldConfig.setCacheFunction,
-                    key,
-                    reqShieldData,
-                    lockType,
-                    token,
-                ).subscribe(
-                    { /* success - no action needed */ },
-                    { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
-                )
+                if (handToCacheWrite()) {
+                    writeCache(reqShieldData)
+                }
             }.switchIfEmpty(
                 Mono.defer {
-                    lockHandedToCacheWrite.set(true)
                     val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
-                    // Async fire-and-forget cache storage (matches coroutine implementation)
-                    setReqShieldData(
-                        reqShieldConfig.setCacheFunction,
-                        key,
-                        reqShieldData,
-                        lockType,
-                        token,
-                    ).subscribe(
-                        { /* success - no action needed */ },
-                        { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
-                    )
+                    if (handToCacheWrite()) {
+                        writeCache(reqShieldData)
+                    }
                     Mono.just(reqShieldData)
                 },
             ).doOnCancel {
                 // A caller cancelled while the supplier runs (client disconnect, timeout()) never reaches
                 // the cache write, so the lock is released here instead of lingering until it expires.
-                if (token != null && !lockHandedToCacheWrite.get()) {
-                    releaseLock(key, lockType, token)
-                }
+                releaseUnlessHandedOver()
             }
     }
 
     /**
      * Waits for the request that owns the lock to fill the cache.
      *
-     * The cache is polled up to `maxAttemptGetCache` times. A read failure is logged and counted;
+     * The cache is polled up to `maxAttemptGetCache` times, the first time at once. A read failure is logged and counted;
      * [MAX_CONSECUTIVE_GET_CACHE_FAILURES] consecutive failures are treated as a cache outage and
      * stop the polling immediately. Once polling gives up, the supplier is called directly, and a
      * failing supplier surfaces as `ClientException(SUPPLIER_ERROR)` instead of a null-valued entry.
@@ -229,14 +244,23 @@ class ReqShield<T>(
         timeToLiveMillis: Long,
     ): Mono<ReqShieldData<T>> {
         val consecutiveGetCacheFailures = AtomicInteger(0)
+        val maxAttempts = reqShieldConfig.maxAttemptGetCache.toLong()
+        val polls =
+            if (maxAttempts <= 0) {
+                Mono.empty()
+            } else {
+                Mono
+                    .defer { getCacheWhileWaitingForLock(key, consecutiveGetCacheFailures) }
+                    // The companion emits the index of each empty poll; maxAttempts - 1 repeats make maxAttempts polls.
+                    .repeatWhenEmpty { companion ->
+                        companion
+                            .takeWhile { index -> index < maxAttempts - 1 }
+                            .delayElements(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
+                    }
+            }
 
-        return Mono
-            .defer { getCacheWhileWaitingForLock(key, consecutiveGetCacheFailures) }
-            .repeatWhenEmpty { companion ->
-                companion
-                    .take(reqShieldConfig.maxAttemptGetCache.toLong())
-                    .delayElements(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
-            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.empty() }
+        return polls
+            .onErrorResume(GetCacheUnavailableException::class.java) { Mono.empty() }
             .switchIfEmpty(
                 Mono.defer {
                     executeCallable({ callable.call() }, key, null, null)
