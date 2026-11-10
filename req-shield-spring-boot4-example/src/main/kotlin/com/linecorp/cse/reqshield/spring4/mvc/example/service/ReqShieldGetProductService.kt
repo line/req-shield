@@ -42,7 +42,7 @@ class ReqShieldGetProductService(
         val returnValue =
             reqShield
                 .getAndSetReqShieldData(
-                    "productCacheKey",
+                    "productCacheKey_$productId",
                     {
                         Thread.sleep(500)
                         log.info("get product with 3s delay (Simulate db request) / productId : $productId")
