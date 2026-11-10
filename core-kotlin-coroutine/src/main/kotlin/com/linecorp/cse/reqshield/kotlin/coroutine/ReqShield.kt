@@ -32,6 +32,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
@@ -75,9 +76,8 @@ class ReqShield<T>(
             } else {
                 try {
                     reqShieldConfig.keyLock.tryLock(key, lockType)
-                } catch (e: CancellationException) {
-                    throw e
                 } catch (e: Exception) {
+                    rethrowIfCallerCancelled(e)
                     // The caller already has its data: a failing lock store only skips this refresh
                     log.warn("[Req-Shield] failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
                     return
@@ -218,9 +218,8 @@ class ReqShield<T>(
     ): ReqShieldData<T>? =
         try {
             getFunction(key)
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
+            rethrowIfCallerCancelled(e)
             throw ClientException(ErrorCode.GET_CACHE_ERROR, cause = e)
         }
 
@@ -234,9 +233,8 @@ class ReqShield<T>(
         try {
             currentCoroutineContext().ensureActive()
             setFunction(key, value, value.timeToLiveMillis)
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
+            rethrowIfCallerCancelled(e)
             throw ClientException(ErrorCode.SET_CACHE_ERROR, cause = e)
         } finally {
             // Only the holder of a token has a lock to release.
@@ -262,9 +260,20 @@ class ReqShield<T>(
             if (token != null && lockType != null) {
                 releaseQuietly(key, lockType, token, "after the supplier failed")
             }
-            if (e is CancellationException) throw e
+            rethrowIfCallerCancelled(e)
             throw ClientException(ErrorCode.SUPPLIER_ERROR, cause = e)
         }
+
+    /**
+     * Rethrows [e] when it is the cancellation of the coroutine that called the client function.
+     *
+     * A client function can also throw a [CancellationException] while its caller is still active: a `withTimeout`
+     * inside a supplier, or a job the function started and cancelled. That is a failure of the function, so the
+     * caller of this method goes on to report it as one instead of ending an active caller like a cancelled one.
+     */
+    private suspend fun rethrowIfCallerCancelled(e: Exception) {
+        if (e is CancellationException && !currentCoroutineContext().isActive) throw e
+    }
 
     /**
      * Releases the lock identified by [token], even when the caller is cancelled. A failed release must not cost the

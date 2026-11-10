@@ -184,6 +184,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   cache outage and the request falls back to calling the supplier itself right away.
 - When the attempts are exhausted the request calls the supplier once. A supplier failure is propagated as a
   `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
+- In `core-kotlin-coroutine`, a `CancellationException` thrown by a client function while the calling coroutine is
+  still active (a `withTimeout` inside the supplier, for example) is a failure of that function. It is reported as
+  `ClientException` like any other failure. Only the cancellation of the calling coroutine itself propagates unwrapped.
 
 ### Thread pools and schedulers
 
