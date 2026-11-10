@@ -161,6 +161,11 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - `@ReqShieldCacheEvict` evicts **after** the annotated method completes successfully (Spring's `@CacheEvict` default).
   If the method throws, nothing is evicted; if the eviction itself fails, that failure propagates to the caller.
 - In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
+- **Known limitation:** a value that is computed before an eviction can be written after it. A request returns its
+  data first and writes the cache asynchronously, and a background refresh can be in flight, so an entry evicted in
+  that window comes back with the old value until its TTL ends. The eviction and the write can run on different
+  nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
+  version of the data in the cache key.
 
 ### Background refresh and the caller's context
 
