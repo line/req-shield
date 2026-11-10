@@ -94,6 +94,14 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - Lock keys are derived from that namespaced key and prefixed with `reqshield:lock:`, so two caches that happen to use the
   same raw key never share a lock or an entry.
 - If you call `ReqShield` directly (core / core-reactor / core-kotlin-coroutine), the key you pass is used as is.
+- Without `key` and `keyGenerator`, the key is built from the method arguments in the layout of Spring's
+  `SimpleKeyGenerator`: no argument gives `SimpleKey []`, one argument gives its `toString()`, several give
+  `SimpleKey [a, b]`. So that two different argument lists of a method never share an entry, the separator characters
+  (`,` `[` `]` `{` `}` `=`) and the backslash inside a value are escaped with a backslash, a single argument escapes
+  only the backslash, `null` is written as `\0`, and arrays, collections and maps are written by content.
+- A key object whose class does not override `toString()` fails the call with an `IllegalArgumentException` before the
+  method runs, because its text would be only the class name and the hash code. This applies to a method argument on
+  the default path, to the result of a SpEL `key`, and to the result of a `keyGenerator` bean.
 
 ### Global lock guidance
 

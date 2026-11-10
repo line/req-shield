@@ -22,6 +22,8 @@ import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
+import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
+import com.linecorp.cse.reqshield.support.utils.requireOwnToString
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
@@ -31,15 +33,14 @@ import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.BeanFactoryAware
 import org.springframework.beans.factory.DisposableBean
 import org.springframework.cache.interceptor.KeyGenerator
-import org.springframework.cache.interceptor.SimpleKeyGenerator
 import org.springframework.context.expression.MethodBasedEvaluationContext
 import org.springframework.core.DefaultParameterNameDiscoverer
 import org.springframework.core.annotation.AnnotationUtils
+import org.springframework.core.convert.TypeDescriptor
 import org.springframework.expression.EvaluationContext
 import org.springframework.expression.Expression
 import org.springframework.expression.spel.standard.SpelExpressionParser
 import org.springframework.util.StringUtils
-import org.springframework.util.function.SingletonSupplier
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
@@ -72,7 +73,6 @@ class ReqShieldAspect<T>(
 
     private val spelParser = SpelExpressionParser()
     private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
-    private val defaultKeyGenerator = SingletonSupplier.of<KeyGenerator> { SimpleKeyGenerator() }
 
     /** Global locking is only available when the cache implementation opts in to it. */
     private val lockSupport = reqShieldCache as? GlobalLockSupport
@@ -203,10 +203,11 @@ class ReqShieldAspect<T>(
 
         val key =
             if (StringUtils.hasText(annotationCacheKey)) {
-                getOrParseExpression(annotationCacheKey).getValue(context, String::class.java)
+                evaluateKeyExpression(getOrParseExpression(annotationCacheKey), context)
+            } else if (StringUtils.hasText(annotationCacheKeyGenerator)) {
+                generateKey(annotationCacheKeyGenerator, joinPoint, method)
             } else {
-                val keyGenerator = getOrCreateKeyGenerator(annotationCacheKeyGenerator)
-                keyGenerator.generate(joinPoint.target, method, *joinPoint.args).toString()
+                cacheKeyOfArguments(joinPoint.args)
             }
 
         require(!key.isNullOrBlank()) {
@@ -238,15 +239,36 @@ class ReqShieldAspect<T>(
             spelParser.parseExpression(it)
         }
 
-    private fun getOrCreateKeyGenerator(keyGeneratorBeanName: String?): KeyGenerator {
-        if (keyGeneratorBeanName.isNullOrBlank()) {
-            return defaultKeyGenerator.obtain()
-        }
+    /**
+     * Evaluates the SpEL key. The result becomes text the way Spring converts it, but an object whose class does not
+     * override `toString()` is rejected first: its text would be the class name and the hash code.
+     */
+    private fun evaluateKeyExpression(
+        expression: Expression,
+        context: EvaluationContext,
+    ): String? {
+        val value = expression.getValue(context) ?: return null
+        if (value is String) return value
+        if (!value.javaClass.isArray) requireOwnToString(value)
 
-        return keyGeneratorMap.computeIfAbsent(keyGeneratorBeanName) {
-            beanFactory.getBean(it, KeyGenerator::class.java)
-        }
+        return context.typeConverter.convertValue(
+            value,
+            TypeDescriptor.forObject(value),
+            TypeDescriptor.valueOf(String::class.java),
+        ) as String?
     }
+
+    /** The named [KeyGenerator] bean decides the key; its result must describe itself, like any other key object. */
+    private fun generateKey(
+        keyGeneratorBeanName: String,
+        joinPoint: ProceedingJoinPoint,
+        method: Method,
+    ): String =
+        keyGeneratorMap
+            .computeIfAbsent(keyGeneratorBeanName) { beanFactory.getBean(it, KeyGenerator::class.java) }
+            .generate(joinPoint.target, method, *joinPoint.args)
+            .also { requireOwnToString(it) }
+            .toString()
 
     override fun setBeanFactory(beanFactory: BeanFactory) {
         this.beanFactory = beanFactory
