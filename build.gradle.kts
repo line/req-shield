@@ -18,7 +18,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
-version = "1.0.0"
+version = "1.1.0"
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -32,12 +32,13 @@ plugins {
     id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
 }
 
+val baseVersion = version.toString()
 val snapshotBuild = providers.gradleProperty("snapshotBuild").getOrElse("true").toBoolean()
 
 allprojects {
 
     group = "com.linecorp.cse.reqshield"
-    version = "1.0.0${if (snapshotBuild) "-SNAPSHOT" else ""}"
+    version = "$baseVersion${if (snapshotBuild) "-SNAPSHOT" else ""}"
 
     apply {
         plugin("java-test-fixtures")

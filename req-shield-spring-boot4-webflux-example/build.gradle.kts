@@ -26,7 +26,6 @@ plugins {
 extra["testcontainers.version"] = libs.versions.testcontainers.get()
 
 group = "com.linecorp.cse.reqshield"
-version = "1.0.0"
 
 dependencies {
     implementation(project(":core-spring-webflux"))
