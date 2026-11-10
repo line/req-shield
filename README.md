@@ -179,8 +179,8 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
   from inside the transaction.
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
-  coroutine context elements. The scope's own elements (its `Job`, dispatcher, exception handler) take precedence, so
-  the refresh is not cancelled with the request.
+  coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
+  the request and does not run on its thread. For any other element the scope's own one takes precedence.
 - `core` and the blocking Spring adapter run the refresh on the executor thread. `ThreadLocal` state of the caller
   (`SecurityContextHolder`, `RequestContextHolder`, MDC, a transaction) is **not** available there. Pass what the
   method needs as arguments, or supply a `reqShieldExecutor` that propagates the context your application needs.

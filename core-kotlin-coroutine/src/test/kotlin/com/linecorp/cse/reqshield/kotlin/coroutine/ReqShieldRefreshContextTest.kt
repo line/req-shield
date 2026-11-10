@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
@@ -33,9 +34,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Test
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
@@ -51,12 +54,15 @@ class ReqShieldRefreshContextTest {
         val user: String?,
         val coroutineName: String?,
         val parent: Job?,
+        val thread: String,
     )
 
     private val scopeJob = SupervisorJob()
     private val scope = CoroutineScope(scopeJob + Dispatchers.IO + CoroutineName("refresh-scope"))
     private val store = ConcurrentHashMap<String, ReqShieldData<String>>()
-    private val reqShield =
+    private val reqShield = reqShieldIn(scope)
+
+    private fun reqShieldIn(scope: CoroutineScope) =
         ReqShield(
             ReqShieldConfiguration<String>(
                 setCacheFunction = { key, data, _ ->
@@ -78,7 +84,10 @@ class ReqShieldRefreshContextTest {
         ReqShieldData("old", ReqShieldData.Status.NEW, System.currentTimeMillis() - (ttl * 0.9).toLong(), ttl)
 
     @OptIn(ExperimentalCoroutinesApi::class) // Job.parent
-    private suspend fun refreshContextOf(key: String): RefreshContext {
+    private suspend fun refreshContextOf(
+        key: String,
+        reqShield: ReqShield<String> = this.reqShield,
+    ): RefreshContext {
         val observed = CompletableDeferred<RefreshContext>()
         store[key] = staleEntry()
 
@@ -88,7 +97,12 @@ class ReqShieldRefreshContextTest {
                 {
                     val context = currentCoroutineContext()
                     observed.complete(
-                        RefreshContext(context[CallerIdentity]?.user, context[CoroutineName]?.name, context.job.parent),
+                        RefreshContext(
+                            context[CallerIdentity]?.user,
+                            context[CoroutineName]?.name,
+                            context.job.parent,
+                            Thread.currentThread().name,
+                        ),
                     )
                     "new"
                 },
@@ -119,4 +133,24 @@ class ReqShieldRefreshContextTest {
             assertSame(scopeJob, refresh.parent)
             assertEquals("refresh-scope", refresh.coroutineName)
         }
+
+    @Test
+    fun refreshShouldNotRunOnTheDispatcherOfTheCallerWhenTheScopeHasNone() {
+        val callerDispatcher = Executors.newSingleThreadExecutor { Thread(it, "caller-thread") }.asCoroutineDispatcher()
+        val scopeWithoutDispatcher = CoroutineScope(SupervisorJob())
+
+        try {
+            val refresh =
+                runBlocking(callerDispatcher) {
+                    refreshContextOf("dispatcher-${System.nanoTime()}", reqShieldIn(scopeWithoutDispatcher))
+                }
+
+            // On the caller's dispatcher a slow supplier would hold up the request thread
+            // startsWith: the coroutine debug mode appends the coroutine name to the thread name
+            assertFalse(refresh.thread.startsWith("caller-thread"), refresh.thread)
+        } finally {
+            scopeWithoutDispatcher.cancel()
+            callerDispatcher.close()
+        }
+    }
 }

@@ -25,6 +25,7 @@ import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -36,6 +37,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
+import kotlin.coroutines.ContinuationInterceptor
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
@@ -87,9 +89,13 @@ class ReqShield<T>(
         if (!onlyCreateCache && token == null) return
 
         // The refresh calls the supplier after the caller has its data, so it takes the caller's context elements
-        // (Reactor context, MDC, security). The elements of the scope win: the refresh keeps the scope's Job,
-        // dispatcher and exception handler, and must not become a child of the request.
-        val refreshContext = currentCoroutineContext().minusKey(Job) + reqShieldConfig.scope.coroutineContext
+        // (Reactor context, MDC, security). It never takes the caller's Job, dispatcher or exception handler: the
+        // refresh must not become a child of the request or run on its thread. The elements of the scope win.
+        val refreshContext =
+            currentCoroutineContext()
+                .minusKey(Job)
+                .minusKey(ContinuationInterceptor)
+                .minusKey(CoroutineExceptionHandler) + reqShieldConfig.scope.coroutineContext
 
         reqShieldConfig.scope.launch(refreshContext, start = CoroutineStart.ATOMIC) {
             try {
