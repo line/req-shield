@@ -162,6 +162,21 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   If the method throws, nothing is evicted; if the eviction itself fails, that failure propagates to the caller.
 - In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
 
+### Background refresh and the caller's context
+
+- Once an entry is older than `decisionForUpdate` percent of its TTL, the next read returns it and refreshes it in the
+  background. The refresh calls the supplier after the caller already has its data.
+- `core-reactor` and the WebFlux adapter subscribe the refresh with the caller's Reactor `Context`, so a supplier that
+  reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
+  transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
+  from inside the transaction.
+- `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
+  coroutine context elements. The scope's own elements (its `Job`, dispatcher, exception handler) take precedence, so
+  the refresh is not cancelled with the request.
+- `core` and the blocking Spring adapter run the refresh on the executor thread. `ThreadLocal` state of the caller
+  (`SecurityContextHolder`, `RequestContextHolder`, MDC, a transaction) is **not** available there. Pass what the
+  method needs as arguments, or supply a `reqShieldExecutor` that propagates the context your application needs.
+
 ### Waiting for another request (lock not acquired)
 
 - A request that loses the lock polls the cache every 50 ms, up to `maxAttemptGetCache` times (default 60).

@@ -419,6 +419,34 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
+    fun shouldRunTheRefreshSupplierWithTheReactorContextOfTheCaller() {
+        val cached = updateTargetReqShieldData(oldValue)
+        val written = AtomicReference<ReqShieldData<Product>?>()
+        every { cacheGetter(key) } returns Mono.just(cached)
+        every { cacheSetter(key, any(), any()) } answers {
+            written.set(secondArg())
+            Mono.just(true)
+        }
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.UPDATE, token) } returns Mono.just(true)
+        // Reads the caller identity the way ReactiveSecurityContextHolder does: empty without the context
+        every { callable.call() } returns
+            Mono.deferContextual { context ->
+                Mono.justOrEmpty(context.getOrEmpty<String>("user")).map { user -> Product(user, user) }
+            }
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis).contextWrite { it.put("user", "alice") })
+            .expectNext(cached)
+            .verifyComplete()
+
+        await().atMost(Duration.ofSeconds(5)).until { written.get() != null }
+        // Without the context the supplier completes empty and the refresh replaces the entry with a null value
+        assertEquals(Product("alice", "alice"), written.get()!!.value)
+    }
+
+    @Test
     fun shouldReleaseTheLockOnceWhenTheRecheckCompletesAfterTheCancel() {
         val recheck = LateMono<ReqShieldData<Product>?>()
         every { cacheGetter(key) } returnsMany listOf(Mono.empty(), recheck)

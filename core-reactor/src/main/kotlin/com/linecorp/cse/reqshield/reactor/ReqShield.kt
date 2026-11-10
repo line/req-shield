@@ -26,6 +26,7 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
+import reactor.util.context.ContextView
 import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicInteger
@@ -54,21 +55,20 @@ class ReqShield<T>(
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
-    ): Mono<ReqShieldData<T>> {
-        val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
-
-        return currentReqShieldData
-            .flatMap { reqShieldData ->
-                if (shouldUpdateCache(reqShieldData)) {
-                    updateReqShieldData(key, callable, timeToLiveMillis)
-                }
-                Mono.justOrEmpty(reqShieldData)
-            }.switchIfEmpty(
-                Mono.defer {
-                    handleLockForCacheCreation(key, callable, timeToLiveMillis)
-                },
-            )
-    }
+    ): Mono<ReqShieldData<T>> =
+        Mono.deferContextual { callerContext ->
+            executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+                .flatMap { reqShieldData ->
+                    if (shouldUpdateCache(reqShieldData)) {
+                        updateReqShieldData(key, callable, timeToLiveMillis, callerContext)
+                    }
+                    Mono.justOrEmpty(reqShieldData)
+                }.switchIfEmpty(
+                    Mono.defer {
+                        handleLockForCacheCreation(key, callable, timeToLiveMillis)
+                    },
+                )
+        }
 
     private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>?): Boolean =
         reqShieldData != null &&
@@ -82,6 +82,8 @@ class ReqShield<T>(
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
+        // The refresh is subscribed on its own, so it sees the caller's Reactor Context only when it is handed over.
+        callerContext: ContextView,
     ) {
         val lockType = LockType.UPDATE
 
@@ -123,6 +125,7 @@ class ReqShield<T>(
 
         updateMono
             .subscribeOn(reqShieldConfig.scheduler)
+            .contextWrite(callerContext)
             .subscribe(
                 { /* success - no action needed */ },
                 { e -> log.error("Failed to update cache for key '{}': {}", key, e.message, e) },

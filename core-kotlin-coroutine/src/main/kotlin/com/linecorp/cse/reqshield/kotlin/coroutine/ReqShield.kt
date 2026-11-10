@@ -27,6 +27,7 @@ import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -85,7 +86,12 @@ class ReqShield<T>(
 
         if (!onlyCreateCache && token == null) return
 
-        reqShieldConfig.scope.launch(start = CoroutineStart.ATOMIC) {
+        // The refresh calls the supplier after the caller has its data, so it takes the caller's context elements
+        // (Reactor context, MDC, security). The elements of the scope win: the refresh keeps the scope's Job,
+        // dispatcher and exception handler, and must not become a child of the request.
+        val refreshContext = currentCoroutineContext().minusKey(Job) + reqShieldConfig.scope.coroutineContext
+
+        reqShieldConfig.scope.launch(refreshContext, start = CoroutineStart.ATOMIC) {
             try {
                 val reqShieldData =
                     buildReqShieldData(
