@@ -103,6 +103,16 @@ class ReqShieldAspectCacheKeyIntegrationTest {
     }
 
     @Test
+    fun spelListKeyShouldNotShareAnEntryWhenAnElementHoldsTheSeparator() {
+        val first = service.documentBySpelList("a,b", "c")
+        awaitEntries(1)
+        val second = service.documentBySpelList("a", "b,c")
+
+        assertEquals("doc(a,b|c)", first)
+        assertEquals("doc(a|b,c)", second)
+    }
+
+    @Test
     fun evictShouldTargetTheEntryOfTheSameArguments() {
         service.document("a, b", "c")
         service.document("a", "b, c")
@@ -140,6 +150,15 @@ class ReqShieldAspectCacheKeyIntegrationTest {
         @ReqShieldCacheable(cacheName = "doc")
         open fun document(
             tenant: String?,
+            id: String,
+        ): String {
+            counter.incrementAndGet()
+            return "doc($tenant|$id)"
+        }
+
+        @ReqShieldCacheable(cacheName = "doc", key = "{#tenant, #id}")
+        open fun documentBySpelList(
+            tenant: String,
             id: String,
         ): String {
             counter.incrementAndGet()

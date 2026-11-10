@@ -102,6 +102,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - A key object whose class does not override `toString()` fails the call with an `IllegalArgumentException` before the
   method runs, because its text would be only the class name and the hash code. This applies to a method argument on
   the default path, to the result of a SpEL `key`, and to the result of a `keyGenerator` bean.
+- A SpEL `key` that results in a text is used as is. One that results in an array, a collection or a map (for example
+  `key = "{#tenant, #id}"`) is written by content with the same escaping, as `[tenant, id]`. The text of a
+  `keyGenerator` result is used as is, so a custom generator has to keep different arguments apart itself.
 
 ### Global lock guidance
 

@@ -34,9 +34,15 @@ private const val NESTED_SPECIAL_CHARS = ",[]{}="
 fun cacheKeyOfArguments(args: Array<out Any?>): String =
     when (args.size) {
         0 -> "SimpleKey []"
-        1 -> encodeKeyPart(args[0], nested = false)
+        1 -> cacheKeyOfValue(args[0])
         else -> args.joinToString(prefix = "SimpleKey [", postfix = "]") { encodeKeyPart(it, nested = true) }
     }
+
+/**
+ * The key text of one value, with the rules of [cacheKeyOfArguments] for a single argument: an array, a collection
+ * or a map is written by content, and any other value is its `toString()`.
+ */
+fun cacheKeyOfValue(value: Any?): String = encodeKeyPart(value, nested = false)
 
 /**
  * Rejects a key object whose `toString()` is the one of `Object`. That text holds only the class name and the hash code,
@@ -64,7 +70,8 @@ private fun encodeKeyPart(
         is LongArray -> encodeElements(part.asIterable())
         is FloatArray -> encodeElements(part.asIterable())
         is DoubleArray -> encodeElements(part.asIterable())
-        is Iterable<*> -> encodeElements(part)
+        // Only a Collection: another Iterable (a Path, a range) is a value with its own text
+        is Collection<*> -> encodeElements(part)
         is Map<*, *> ->
             part.entries.joinToString(prefix = "{", postfix = "}") {
                 "${encodeKeyPart(it.key, nested = true)}=${encodeKeyPart(it.value, nested = true)}"

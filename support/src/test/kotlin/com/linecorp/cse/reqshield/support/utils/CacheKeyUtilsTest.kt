@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.nio.file.Paths
 
 class CacheKeyUtilsTest {
     private class NoToString(
@@ -32,6 +33,14 @@ class CacheKeyUtilsTest {
     }
 
     private enum class Color { RED }
+
+    private class EmptyIterableValue(
+        val text: String,
+    ) : Iterable<Any> {
+        override fun iterator() = emptyList<Any>().iterator()
+
+        override fun toString() = text
+    }
 
     private fun keyOf(vararg args: Any?) = cacheKeyOfArguments(args)
 
@@ -68,6 +77,15 @@ class CacheKeyUtilsTest {
         assertNotEquals(keyOf(listOf("a, b")), keyOf(listOf("a", "b")))
         assertNotEquals(keyOf(listOf("[a", "b]")), keyOf(listOf(listOf("a", "b"))))
         assertNotEquals(keyOf(listOf("a"), "b"), keyOf(listOf("a", "b"), null))
+    }
+
+    @Test
+    fun iterableValueThatIsNotACollectionShouldKeepItsOwnText() {
+        // A Path iterates over its own name elements, and a value type can be Iterable without being a list of parts
+        assertEquals("/tmp/a", keyOf(Paths.get("/tmp/a")))
+        assertEquals("SimpleKey [/tmp/a, x]", keyOf(Paths.get("/tmp/a"), "x"))
+        assertEquals("1..3", keyOf(1..3))
+        assertNotEquals(keyOf(EmptyIterableValue("a")), keyOf(EmptyIterableValue("b")))
     }
 
     @Test

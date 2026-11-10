@@ -23,6 +23,7 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
+import com.linecorp.cse.reqshield.support.utils.cacheKeyOfValue
 import com.linecorp.cse.reqshield.support.utils.requireOwnToString
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
@@ -277,8 +278,9 @@ open class ReqShieldAspect<T>(
     }
 
     /**
-     * Evaluates the SpEL key. The result becomes text the way Spring converts it, but an object whose class does not
-     * override `toString()` is rejected first: its text would be the class name and the hash code.
+     * Evaluates the SpEL key. A text is used as is, and an array, a collection or a map is written by content. Any
+     * other result becomes text the way Spring converts it, but an object whose class does not override `toString()`
+     * is rejected first: its text would be the class name and the hash code.
      */
     private fun evaluateKeyExpression(
         expression: Expression,
@@ -286,7 +288,9 @@ open class ReqShieldAspect<T>(
     ): String? {
         val value = expression.getValue(context) ?: return null
         if (value is String) return value
-        if (!value.javaClass.isArray) requireOwnToString(value)
+        // Spring would join the elements with a bare comma; written by content, two different lists never match
+        if (value.javaClass.isArray || value is Collection<*> || value is Map<*, *>) return cacheKeyOfValue(value)
+        requireOwnToString(value)
 
         return context.typeConverter.convertValue(
             value,
