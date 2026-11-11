@@ -204,10 +204,11 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
   from inside the transaction.
-- In `core-reactor` and the WebFlux adapter, the lock functions of a global lock see the caller's Reactor `Context`
-  too, both when they take a lock and when they release it, on a cache miss and in a refresh. Functions that choose
-  the lock store from the `Context` (one store for each tenant, for example) therefore release a lock in the store
-  that granted it.
+- In `core-reactor` and the WebFlux adapter, the cache functions and the lock functions of a global lock see the
+  caller's Reactor `Context` too, on a cache miss and in a refresh. This includes the cache write and the lock
+  release, which run in the background after the caller has its data. Functions that choose the cache or the lock
+  store from the `Context` (one store for each tenant, for example) therefore write and release in the store that
+  the read and the lock used.
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
   coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
   the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A

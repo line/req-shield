@@ -215,10 +215,13 @@ class ReqShield<T>(
                 lockType,
                 token,
                 callerContext,
-            ).subscribe(
-                { /* success - no action needed */ },
-                { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
             )
+                // Subscribed on its own, so the cache function sees the caller's Reactor Context only when it is handed over.
+                .contextWrite(callerContext)
+                .subscribe(
+                    { /* success - no action needed */ },
+                    { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
+                )
         }
 
         return executeCallable(callable)
