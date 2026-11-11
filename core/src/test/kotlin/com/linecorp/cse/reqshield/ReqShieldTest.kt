@@ -31,6 +31,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import io.mockk.verifyOrder
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -257,48 +258,43 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() {
-        val writeStarted = CountDownLatch(1)
-        val finishWrite = CountDownLatch(1)
-        val cacheExecutor = Executors.newSingleThreadScheduledExecutor()
+    fun shouldWriteTheCacheOnTheCallerThreadAndReleaseTheLockBeforeItReturns() {
+        val writeThread = AtomicReference<Thread>()
         every { cacheGetter(key) } returns null
         every { cacheSetter(key, any(), any()) } answers {
-            writeStarted.countDown()
-            check(finishWrite.await(2, TimeUnit.SECONDS))
+            writeThread.set(Thread.currentThread())
             true
         }
         every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
         every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
-        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = cacheExecutor))
-
-        try {
-            assertEquals(value, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis).value)
-            assertTrue(writeStarted.await(2, TimeUnit.SECONDS))
-            verify(exactly = 2) { cacheGetter(key) }
-            verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, createToken) }
-            finishWrite.countDown()
-            cacheExecutor.submit {}.get(2, TimeUnit.SECONDS)
-            verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
-            verify(exactly = 1) { callable.call() }
-        } finally {
-            finishWrite.countDown()
-            cacheExecutor.shutdownNow()
-            assertTrue(cacheExecutor.awaitTermination(2, TimeUnit.SECONDS))
-        }
-    }
-
-    @Test
-    fun shouldReturnComputedDataAndReleaseLockWhenExecutorRejectsTheCacheWrite() {
-        every { cacheGetter(key) } returns null
-        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
-        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+        // An executor that rejects each task shows that the write of a new entry does not use the executor.
         val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
 
         val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
 
         assertEquals(value, result.value)
+        assertSame(Thread.currentThread(), writeThread.get())
+        // The lock did not time out, so the cache is read two times only: the first read and the recheck.
+        verify(exactly = 2) { cacheGetter(key) }
+        verify(exactly = 1) { callable.call() }
+        verifyOrder {
+            cacheSetter(key, any(), any())
+            keyLock.unLock(key, LockType.CREATE, createToken)
+        }
+    }
+
+    @Test
+    fun shouldReturnTheDataAndReleaseTheLockWhenTheCacheWriteOfANewEntryFails() {
+        every { cacheGetter(key) } returns null
+        every { cacheSetter(key, any(), any()) } throws IllegalStateException("cache write failed")
+        every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
+        every { keyLock.unLock(key, LockType.CREATE, createToken) } returns true
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock))
+
+        val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
+
+        assertEquals(value, result.value)
         verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
-        verify(exactly = 0) { cacheSetter(any(), any(), any()) }
     }
 
     @Test
@@ -315,15 +311,17 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldReturnComputedDataWhenExecutorRejectsTheCacheWriteAndTheUnlockFails() {
+    fun shouldReturnComputedDataWhenTheUnlockAfterTheCacheWriteFails() {
         every { cacheGetter(key) } returns null
+        every { cacheSetter(key, any(), any()) } returns true
         every { keyLock.tryLock(key, LockType.CREATE) } returns createToken
         every { keyLock.unLock(key, LockType.CREATE, createToken) } throws IllegalStateException("lock store down")
-        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, executor = rejectingExecutor))
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock))
 
         val result = shield.getAndSetReqShieldData(key, callable, timeToLiveMillis)
 
         assertEquals(value, result.value)
+        verify(exactly = 1) { cacheSetter(key, any(), any()) }
         verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, createToken) }
     }
 
@@ -382,9 +380,10 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldReturnCachedDataWithoutTouchingLocksWhenExecutorRejectsAnUnlockedRefresh() {
+    fun shouldFreeItsOwnRefreshLockWhenExecutorRejectsARefreshInOnlyCreateCacheMode() {
+        val isolatedKey = "rejected-refresh-${java.util.UUID.randomUUID()}"
         val cached = updateTargetData(oldValue)
-        every { cacheGetter(key) } returns cached
+        every { cacheGetter(isolatedKey) } returns cached
         val shield =
             ReqShield(
                 ReqShieldConfiguration(
@@ -396,10 +395,13 @@ class ReqShieldTest : BaseReqShieldTest {
                 ),
             )
 
-        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        assertSame(cached, shield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis))
+        // This mode guards a refresh with its own local lock, not with the configured lock
         verify(exactly = 0) { keyLock.tryLock(any(), any()) }
         verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
         verify(exactly = 0) { callable.call() }
+        // A leaked refresh lock would stop each refresh of this key until the lock times out
+        assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.UPDATE))
     }
 
     @Test

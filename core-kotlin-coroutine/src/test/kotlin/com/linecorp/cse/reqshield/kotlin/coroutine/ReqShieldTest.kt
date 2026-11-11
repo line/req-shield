@@ -50,6 +50,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -291,7 +292,7 @@ class ReqShieldTest : BaseReqShieldTest {
         }
 
     @Test
-    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() =
+    fun shouldReturnAfterTheCacheWriteAndTheLockReleaseOfANewEntry() =
         runTest {
             val writeStarted = CompletableDeferred<Unit>()
             val finishWrite = CompletableDeferred<Unit>()
@@ -304,12 +305,15 @@ class ReqShieldTest : BaseReqShieldTest {
             coEvery { keyLock.tryLock(key, LockType.CREATE) } returns LOCAL_TOKEN
             coEvery { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) } returns true
 
-            assertEquals(value, reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis).value)
+            val caller = async { reqShield.getAndSetReqShieldData(key, callable, timeToLiveMillis) }
             writeStarted.await()
-            coVerify(exactly = 2) { cacheGetter(key) }
+            assertFalse(caller.isCompleted, "The caller must wait for the cache write")
             coVerify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
+
             finishWrite.complete(Unit)
-            awaitBackgroundWrites()
+            assertEquals(value, caller.await().value)
+            // The lock did not time out, so the cache is read two times only: the first read and the recheck.
+            coVerify(exactly = 2) { cacheGetter(key) }
             coVerify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, LOCAL_TOKEN) }
             coVerify(exactly = 1) { callable() }
         }
@@ -1056,15 +1060,9 @@ class ReqShieldTest : BaseReqShieldTest {
     fun shouldReleaseGlobalLockWhenCacheSetterIsCancelled() = verifyGlobalLockReleasedOnCancellation(LockType.CREATE, cancelSetter = true)
 
     @Test
-    fun shouldReleaseGlobalCreateLockWhenScopeIsCancelledBeforeWriteStarts() =
-        verifyGlobalLockReleasedBeforeBackgroundTaskStarts(LockType.CREATE)
-
-    @Test
     fun shouldReleaseGlobalUpdateLockWhenScopeIsCancelledBeforeSupplierStarts() =
-        verifyGlobalLockReleasedBeforeBackgroundTaskStarts(LockType.UPDATE)
-
-    private fun verifyGlobalLockReleasedBeforeBackgroundTaskStarts(lockType: LockType) =
         runTest {
+            val lockType = LockType.UPDATE
             val locks = mutableMapOf<String, String>()
             var releases = 0
             val globalLock =
@@ -1088,9 +1086,7 @@ class ReqShieldTest : BaseReqShieldTest {
                             writes++
                             true
                         },
-                        getCacheFunction = {
-                            if (lockType == LockType.UPDATE) updateTargetData(oldValue, timeToLiveMillis) else null
-                        },
+                        getCacheFunction = { updateTargetData(oldValue, timeToLiveMillis) },
                         keyLock = globalLock,
                         scope = taskScope,
                     ),
@@ -1106,9 +1102,8 @@ class ReqShieldTest : BaseReqShieldTest {
                         },
                         timeToLiveMillis,
                     )
-                val expectedSupplierCalls = if (lockType == LockType.CREATE) 1 else 0
-                assertEquals(if (lockType == LockType.CREATE) value else oldValue, result.value)
-                assertEquals(expectedSupplierCalls, supplierCalls)
+                assertEquals(oldValue, result.value)
+                assertEquals(0, supplierCalls)
                 assertEquals(0, writes, "The background task must still be queued")
                 assertNull(globalLock.tryLock(key, lockType), "The queued task already owns the lock")
 
@@ -1121,7 +1116,7 @@ class ReqShieldTest : BaseReqShieldTest {
                 owner.join()
 
                 assertSame(cancellation, propagated)
-                assertEquals(expectedSupplierCalls, supplierCalls, "Cancellation must not start the supplier")
+                assertEquals(0, supplierCalls, "Cancellation must not start the supplier")
                 assertEquals(0, writes, "Cancellation must not start the cache write")
                 assertEquals(1, releases, "The owned token must be released exactly once")
                 val token = globalLock.tryLock(key, lockType)
@@ -1167,9 +1162,11 @@ class ReqShieldTest : BaseReqShieldTest {
                 ),
             )
 
+        // The caller runs outside the scope of the shield, so that scope holds only the background task.
+        val callerScope = CoroutineScope(coroutineContext + SupervisorJob())
         try {
             val caller =
-                taskScope.launch {
+                callerScope.launch {
                     shield.getAndSetReqShieldData(
                         key,
                         {
@@ -1195,6 +1192,7 @@ class ReqShieldTest : BaseReqShieldTest {
             assertNotNull(token, "Suspending cleanup must release the owned lock")
             assertTrue(globalLock.unLock(key, lockType, token!!))
         } finally {
+            callerScope.cancel()
             taskScope.cancel()
         }
     }

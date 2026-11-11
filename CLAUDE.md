@@ -93,7 +93,7 @@ Contains shared:
 ### ReqShieldConfiguration Parameters
 - `isLocalLock`: Use local vs distributed locking (default: true)
 - `globalLockFunction` / `globalUnLockFunction`: `(lockKey, token, ttlMillis) -> Boolean` / `(lockKey, token) -> Boolean`, required when `isLocalLock = false`
-- `executor` (core) / `scheduler` (reactor) / `scope` (coroutine): where background cache writes run; defaults are shared. The Spring adapters register none of them as beans (an `Executor` bean would make Spring Boot drop its `applicationTaskExecutor`, and any library bean would clash with an application bean of the same name): each aspect uses an application bean named `reqShieldExecutor` / `reqShieldScheduler` / `reqShieldCoroutineScope` if one exists (a bean of that name with another type fails the context refresh), otherwise its own default (an aspect-owned pool / the shared `boundedElastic` / an aspect-owned scope), and only shuts down what it owns
+- `executor` (core) / `scheduler` (reactor) / `scope` (coroutine): where background refreshes run (and, in reactor and coroutine, the cache write that a creating request waits for; `core` writes a new entry on the caller's thread); defaults are shared. The Spring adapters register none of them as beans (an `Executor` bean would make Spring Boot drop its `applicationTaskExecutor`, and any library bean would clash with an application bean of the same name): each aspect uses an application bean named `reqShieldExecutor` / `reqShieldScheduler` / `reqShieldCoroutineScope` if one exists (a bean of that name with another type fails the context refresh), otherwise its own default (an aspect-owned pool / the shared `boundedElastic` / an aspect-owned scope), and only shuts down what it owns
 - `lockTimeoutMillis`: Lock acquisition timeout (default: 3000ms)
 - `decisionForUpdate`: Percentage of TTL after which to trigger async cache refresh (default: 80)
 - `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60, 50ms apart). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
@@ -101,7 +101,7 @@ Contains shared:
 
 ### Work Modes
 - **CREATE_AND_UPDATE_CACHE**: Full functionality (default)
-- **ONLY_CREATE_CACHE**: Request collapsing (lock) applies only when a cache entry is being created; refreshes of existing entries still happen but without a lock, so every request past the `decisionForUpdate` threshold may trigger a refresh
+- **ONLY_CREATE_CACHE**: The configured lock applies only when a cache entry is being created. A refresh of an existing entry takes a local lock of the JVM instead (never the global lock), so one instance runs one refresh of a key at a time
 - **ONLY_UPDATE_CACHE**: Request collapsing (lock) applies only when an existing entry is being refreshed; on a cache miss every request calls the supplier and writes the cache without a lock
 
 ## Testing Guidelines

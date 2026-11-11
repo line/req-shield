@@ -75,11 +75,18 @@ class ReqShieldAspectIntegrationTest {
     }
 
     @Test
-    fun cacheWritesShouldRunOnThePoolOwnedByTheAspectAndStopWithTheContext() {
-        service.get("owned-pool")
+    fun newEntryShouldBeWrittenOnTheCallerThreadBeforeTheMethodReturns() {
+        service.get("new-entry")
 
-        await().atMost(Duration.ofSeconds(5)).until { cache.get("integration::owned-pool") != null }
-        assertTrue(cache.lastWriterThread!!.startsWith(OWNED_POOL_THREAD_PREFIX), cache.lastWriterThread)
+        assertNotNull(cache.get("integration::new-entry"))
+        assertEquals(Thread.currentThread().name, cache.lastWriterThread)
+    }
+
+    @Test
+    fun refreshesShouldRunOnThePoolOwnedByTheAspectAndStopWithTheContext() {
+        val refreshThread = refreshAndGetWriterThread(service, cache, "owned-pool")
+
+        assertTrue(refreshThread.startsWith(OWNED_POOL_THREAD_PREFIX), refreshThread)
 
         val ownedExecutor = context.getBean(ReqShieldAspect::class.java).ownedExecutor
         assertNotNull(ownedExecutor)
@@ -93,11 +100,9 @@ class ReqShieldAspectIntegrationTest {
         // A plain Executor view, so closing the context does not shut the pool down on its own
         val userExecutor = Executor { userPool.execute(it) }
         withNamedBean("reqShieldExecutor", userExecutor, *CONFIGURATIONS) { userContext ->
-            userContext.getBean(TestService::class.java).get("user-pool")
             val userCache = userContext.getBean(InMemoryReqShieldCache::class.java)
 
-            await().atMost(Duration.ofSeconds(5)).until { userCache.get("integration::user-pool") != null }
-            assertEquals("user-pool", userCache.lastWriterThread)
+            assertEquals("user-pool", refreshAndGetWriterThread(userContext.getBean(TestService::class.java), userCache, "user-pool"))
             assertNull(userContext.getBean(ReqShieldAspect::class.java).ownedExecutor)
         }
         // The aspect only ever sees the wrapper here; ReqShieldAspectTest checks that destroy() leaves the pool running
@@ -118,11 +123,10 @@ class ReqShieldAspectIntegrationTest {
     fun executorBeansWithOtherNamesShouldBeIgnored() {
         val otherPool = Executors.newSingleThreadExecutor { Thread(it, "other-pool") }
         withNamedBean("applicationTaskExecutor", Executor { otherPool.execute(it) }, *CONFIGURATIONS) { otherContext ->
-            otherContext.getBean(TestService::class.java).get("other-pool")
             val otherCache = otherContext.getBean(InMemoryReqShieldCache::class.java)
 
-            await().atMost(Duration.ofSeconds(5)).until { otherCache.get("integration::other-pool") != null }
-            assertTrue(otherCache.lastWriterThread!!.startsWith(OWNED_POOL_THREAD_PREFIX), otherCache.lastWriterThread)
+            val refreshThread = refreshAndGetWriterThread(otherContext.getBean(TestService::class.java), otherCache, "other-pool")
+            assertTrue(refreshThread.startsWith(OWNED_POOL_THREAD_PREFIX), refreshThread)
         }
         otherPool.shutdown()
     }
@@ -175,6 +179,22 @@ class ReqShieldAspectIntegrationTest {
         open fun testService(): TestService = TestService()
     }
 
+    /**
+     * Reads an entry that is old enough for a refresh and returns the name of the thread that wrote the refreshed
+     * entry. A new entry is written on the caller's thread, so only a refresh shows which executor the aspect uses.
+     */
+    private fun refreshAndGetWriterThread(
+        testService: TestService,
+        testCache: InMemoryReqShieldCache,
+        key: String,
+    ): String {
+        testCache.storeOldEntry("integration::$key")
+        testService.get(key)
+
+        await().atMost(Duration.ofSeconds(5)).until { testCache.lastWriterThread != null }
+        return testCache.lastWriterThread!!
+    }
+
     open class TestService {
         private val counter = AtomicInteger(0)
 
@@ -209,6 +229,11 @@ class ReqShieldAspectIntegrationTest {
         var lastWriterThread: String? = null
 
         override fun get(key: String): ReqShieldData<String>? = store[key]
+
+        /** Stores an entry that has used 90 % of its 10 s, without a call of [put]. */
+        fun storeOldEntry(key: String) {
+            store[key] = ReqShieldData("old", ReqShieldData.Status.NEW, System.currentTimeMillis() - 9_000, 10_000)
+        }
 
         override fun put(
             key: String,

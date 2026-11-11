@@ -61,7 +61,7 @@ class ReqShieldAspect<T>(
         private set
 
     /**
-     * Runs the asynchronous cache writes of every ReqShield this aspect creates: the application's bean named
+     * Runs the background refreshes of every ReqShield this aspect creates: the application's bean named
      * `reqShieldExecutor` when there is one, otherwise a pool owned by this aspect.
      *
      * The library deliberately registers no `Executor` bean of its own. Spring Boot backs off its

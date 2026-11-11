@@ -47,10 +47,11 @@ data class ReqShieldConfiguration<T>(
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     /**
-     * Executor used for the asynchronous cache writes. Only [Executor.execute] is called, so any
-     * pool works, and the library never shuts the pool down - a caller-supplied one stays the
-     * caller's to manage. A task the pool rejects (bounded queue full, or pool shut down) only
-     * skips that cache write or refresh; the request still gets its data and the lock is released.
+     * Executor used for the background refreshes of old entries. A new entry is written on the
+     * caller's thread, not here. Only [Executor.execute] is called, so any pool works, and the
+     * library never shuts the pool down - a caller-supplied one stays the caller's to manage.
+     * A task the pool rejects (bounded queue full, or pool shut down) only skips that refresh;
+     * the request still gets its data and the lock is released.
      * Defaults to a single pool shared by every configuration instance.
      */
     val executor: Executor = sharedExecutor,
@@ -112,7 +113,15 @@ private fun defaultKeyLock(
     }
 
 enum class ReqShieldWorkMode {
+    /** Requests are collapsed with the configured lock when an entry is created and when it is refreshed. */
     CREATE_AND_UPDATE_CACHE,
+
+    /**
+     * The configured lock is used when an entry is created. A refresh takes a local lock of this JVM instead, so one
+     * instance runs one refresh of a key at a time and a global lock gets no call for a refresh.
+     */
     ONLY_CREATE_CACHE,
+
+    /** The configured lock is used when an entry is refreshed. On a cache miss each request calls the supplier. */
     ONLY_UPDATE_CACHE,
 }

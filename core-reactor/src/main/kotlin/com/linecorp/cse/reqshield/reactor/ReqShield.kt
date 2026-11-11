@@ -26,9 +26,11 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
+import reactor.core.publisher.Sinks
 import reactor.util.context.ContextView
 import java.time.Duration
 import java.util.concurrent.Callable
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
@@ -51,6 +53,15 @@ private enum class LockOwner { RECHECK, CREATION, CACHE_WRITE, RELEASED }
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
+    /**
+     * Guards the refresh of an entry in [ReqShieldWorkMode.ONLY_CREATE_CACHE]. That mode does not call the configured
+     * lock for a refresh, so without a guard each request for an old entry would subscribe its own refresh. This lock
+     * lives in this JVM only and expires like any other local lock.
+     */
+    private val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
+
     fun getAndSetReqShieldData(
         key: String,
         callable: Callable<Mono<T?>>,
@@ -59,8 +70,8 @@ class ReqShield<T>(
         Mono.deferContextual { callerContext ->
             executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
                 .flatMap { reqShieldData ->
-                    if (shouldUpdateCache(reqShieldData)) {
-                        updateReqShieldData(key, callable, timeToLiveMillis, callerContext)
+                    if (reqShieldData != null && shouldUpdateCache(reqShieldData)) {
+                        updateReqShieldData(key, callable, timeToLiveMillis, reqShieldData.createdAt, callerContext)
                     }
                     Mono.justOrEmpty(reqShieldData)
                 }.switchIfEmpty(
@@ -70,66 +81,51 @@ class ReqShield<T>(
                 )
         }
 
-    private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>?): Boolean =
-        reqShieldData != null &&
-            decideToUpdateCache(
-                reqShieldData.createdAt,
-                reqShieldData.timeToLiveMillis,
-                reqShieldConfig.decisionForUpdate,
-            )
+    private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>): Boolean =
+        decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
+
+    /** The lock that collapses requests of [lockType]: the configured one, except for a refresh in ONLY_CREATE_CACHE. */
+    private fun lockFor(lockType: LockType): KeyLock =
+        if (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
+            localRefreshLock
+        } else {
+            reqShieldConfig.keyLock
+        }
 
     private fun updateReqShieldData(
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
+        // createdAt of the entry this request read, which tells that entry apart from one written during the refresh
+        seenCreatedAt: Long,
         // The refresh is subscribed on its own, so it sees the caller's Reactor Context only when it is handed over.
         callerContext: ContextView,
     ) {
         val lockType = LockType.UPDATE
+        val lockedAtNanos = System.nanoTime()
 
-        fun processMono(token: String?): Mono<ReqShieldData<T>> =
+        fun write(
+            reqShieldData: ReqShieldData<T>,
+            token: String,
+        ): Mono<ReqShieldData<T>> =
+            writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt, callerContext)
+                .thenReturn(reqShieldData)
+
+        fun processMono(token: String): Mono<ReqShieldData<T>> =
             executeCallable(callable)
                 .doOnError {
                     // A failed supplier never reaches the cache write, which would release the lock.
-                    // Only the holder of a token took a lock, so only it may release one.
-                    if (token != null) {
-                        releaseLock(key, lockType, token, callerContext)
-                    }
+                    releaseLock(key, lockType, token, callerContext)
                 }.map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                .flatMap { reqShieldData ->
-                    setReqShieldData(
-                        reqShieldConfig.setCacheFunction,
-                        key,
-                        reqShieldData,
-                        lockType,
-                        token,
-                        callerContext,
-                    ).thenReturn(reqShieldData)
-                }.switchIfEmpty(
-                    Mono.defer {
-                        val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
-                        setReqShieldData(
-                            reqShieldConfig.setCacheFunction,
-                            key,
-                            reqShieldData,
-                            lockType,
-                            token,
-                            callerContext,
-                        ).thenReturn(reqShieldData)
-                    },
-                )
+                .flatMap { reqShieldData -> write(reqShieldData, token) }
+                .switchIfEmpty(Mono.defer { write(buildReqShieldData(null, timeToLiveMillis), token) })
 
+        // Empty means another request already holds the update lock: nothing to do here.
+        // Deferred so a lock call that throws fails this refresh only, not the caller's cache hit.
         val updateMono =
-            if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
-                // This mode never refreshes an existing entry through the lock, so no token is taken.
-                processMono(null)
-            } else {
-                // Empty means another request already holds the update lock: nothing to do here.
-                // Deferred so a lock call that throws fails this refresh only, not the caller's cache hit.
-                Mono
-                    .defer { reqShieldConfig.keyLock.tryLock(key, lockType) }
-                    .flatMap { token -> processMono(token) }
-            }
+            Mono
+                .defer { lockFor(lockType).tryLock(key, lockType) }
+                .flatMap { token -> processMono(token) }
 
         updateMono
             .subscribeOn(reqShieldConfig.scheduler)
@@ -147,10 +143,11 @@ class ReqShield<T>(
         callerContext: ContextView,
     ): Mono<ReqShieldData<T>> {
         val lockType = LockType.CREATE
+        val lockedAtNanos = System.nanoTime()
 
         if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE) {
             // This mode never creates a cache entry through the lock, so no token is taken.
-            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null, null, callerContext)
+            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null, null, lockedAtNanos, callerContext)
         }
 
         return reqShieldConfig.keyLock
@@ -166,7 +163,7 @@ class ReqShield<T>(
                         Mono.defer {
                             // A cancel that already released the lock leaves nothing to create.
                             if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.CREATION)) {
-                                createReqShieldData(key, callable, timeToLiveMillis, lockType, token, owner, callerContext)
+                                createReqShieldData(key, callable, timeToLiveMillis, lockType, token, owner, lockedAtNanos, callerContext)
                             } else {
                                 Mono.empty()
                             }
@@ -186,6 +183,14 @@ class ReqShield<T>(
             )
     }
 
+    /**
+     * Calls the supplier, writes its result to the cache and emits it after that write ended. A caller that got its
+     * data before the write could evict the entry first, and the write would then put the evicted value back.
+     *
+     * The write is subscribed on its own and the caller only waits for it. So the write goes on when the caller
+     * cancels after its supplier call ended: the requests that wait for this entry would each call the supplier
+     * themselves if the write stopped.
+     */
     private fun createReqShieldData(
         key: String,
         callable: Callable<Mono<T?>>,
@@ -194,9 +199,10 @@ class ReqShield<T>(
         token: String?,
         // The owner of [token] (null without a lock): the cache write, the error and the cancel take it over once.
         owner: AtomicReference<LockOwner>?,
+        lockedAtNanos: Long,
         callerContext: ContextView,
     ): Mono<ReqShieldData<T>> {
-        // Hands the lock to the asynchronous cache write, which releases it after writing. False when a cancel
+        // Hands the lock to the cache write, which releases it after writing. False when a cancel
         // already released it: the write is then skipped, because it would run without the lock.
         fun handToCacheWrite(): Boolean = owner == null || owner.compareAndSet(LockOwner.CREATION, LockOwner.CACHE_WRITE)
 
@@ -206,45 +212,86 @@ class ReqShield<T>(
             }
         }
 
-        fun writeCache(reqShieldData: ReqShieldData<T>) {
-            // Async fire-and-forget cache storage (matches coroutine implementation)
-            setReqShieldData(
-                reqShieldConfig.setCacheFunction,
-                key,
-                reqShieldData,
-                lockType,
-                token,
-                callerContext,
-            )
+        // Completes when the cache write ended, also when it failed: the caller has its data either way.
+        fun writeCache(reqShieldData: ReqShieldData<T>): Mono<Void> {
+            val writeEnded = Sinks.empty<Void>()
+            writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, null, callerContext)
                 // Subscribed on its own, so the cache function sees the caller's Reactor Context only when it is handed over.
                 .contextWrite(callerContext)
+                .doFinally { writeEnded.tryEmitEmpty() }
                 .subscribe(
                     { /* success - no action needed */ },
                     { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
                 )
+            return writeEnded.asMono()
         }
 
         return executeCallable(callable)
             .doOnError { releaseUnlessHandedOver() }
             .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-            .doOnNext { reqShieldData ->
+            .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
+            .flatMap { reqShieldData ->
                 if (handToCacheWrite()) {
-                    writeCache(reqShieldData)
-                }
-            }.switchIfEmpty(
-                Mono.defer {
-                    val reqShieldData = buildReqShieldData(null, timeToLiveMillis)
-                    if (handToCacheWrite()) {
-                        writeCache(reqShieldData)
-                    }
+                    writeCache(reqShieldData).thenReturn(reqShieldData)
+                } else {
                     Mono.just(reqShieldData)
-                },
-            ).doOnCancel {
+                }
+            }.doOnCancel {
                 // A caller cancelled while the supplier runs (client disconnect, timeout()) never reaches
                 // the cache write, so the lock is released here instead of lingering until it expires.
                 releaseUnlessHandedOver()
             }
     }
+
+    /**
+     * Writes [reqShieldData] and releases the lock, unless the lock timed out during the supplier call and another
+     * request wrote the entry in that time. That other request called the supplier later, so its result is the newer
+     * one and this late write would replace it with older data.
+     *
+     * The cache is read again only after a lock timeout, so a supplier that is faster than the timeout costs no
+     * extra read. [seenCreatedAt] is the createdAt of the entry this request read before its supplier call, or null
+     * when there was none.
+     */
+    private fun writeUnlessSuperseded(
+        key: String,
+        reqShieldData: ReqShieldData<T>,
+        lockType: LockType,
+        token: String?,
+        lockedAtNanos: Long,
+        seenCreatedAt: Long?,
+        callerContext: ContextView,
+    ): Mono<Boolean> =
+        Mono.defer {
+            if (token == null || System.nanoTime() - lockedAtNanos < lockTimeoutNanos) {
+                return@defer setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token, callerContext)
+            }
+
+            isSuperseded(key, seenCreatedAt).flatMap { superseded ->
+                if (superseded) {
+                    log.debug("Skipped the cache write for key '{}': its lock timed out and a newer entry exists", key)
+                    releaseLock(key, lockType, token, callerContext)
+                    Mono.just(false)
+                } else {
+                    setReqShieldData(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token, callerContext)
+                }
+            }
+        }
+
+    private fun isSuperseded(
+        key: String,
+        seenCreatedAt: Long?,
+    ): Mono<Boolean> =
+        executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+            // The supplier can emit on its client's event loop; keep cache reads off that thread.
+            .subscribeOn(reqShieldConfig.scheduler)
+            .flatMap { Mono.justOrEmpty(it) }
+            .map { cachedData -> cachedData.createdAt != seenCreatedAt }
+            .defaultIfEmpty(false)
+            .onErrorResume { e ->
+                // Without the read nothing shows a newer entry, so the write goes on as it did before
+                log.warn("Failed to read cache for key '{}' before its late cache write: {}", key, e.message)
+                Mono.just(false)
+            }
 
     /**
      * Waits for the request that owns the lock to fill the cache.
@@ -375,7 +422,7 @@ class ReqShield<T>(
         callerContext: ContextView,
     ) {
         // No retry needed: false means lock already released or expired (not an error).
-        Mono.defer { reqShieldConfig.keyLock.unLock(key, lockType, token) }
+        Mono.defer { lockFor(lockType).unLock(key, lockType, token) }
             .doOnNext { unlocked ->
                 if (!unlocked) {
                     log.debug("Lock already released or expired for key '{}'", key)

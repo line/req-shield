@@ -29,12 +29,22 @@ import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
+    /**
+     * Guards the refresh of an entry in [ReqShieldWorkMode.ONLY_CREATE_CACHE]. That mode does not call the configured
+     * lock for a refresh, so without a guard each request for an old entry would queue its own refresh on the
+     * executor. This lock lives in this JVM only and expires like any other local lock.
+     */
+    private val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
+
     fun getAndSetReqShieldData(
         key: String,
         callable: Callable<T?>,
@@ -43,7 +53,7 @@ class ReqShield<T>(
         val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
         currentReqShieldData?.let {
             if (shouldUpdateCache(it)) {
-                updateReqShieldData(key, callable, timeToLiveMillis)
+                updateReqShieldData(key, callable, timeToLiveMillis, it.createdAt)
             }
             return it
         } ?: run {
@@ -54,37 +64,40 @@ class ReqShield<T>(
     private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>): Boolean =
         decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
 
+    /** The lock that collapses requests of [lockType]: the configured one, except for a refresh in ONLY_CREATE_CACHE. */
+    private fun lockFor(lockType: LockType): KeyLock =
+        if (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
+            localRefreshLock
+        } else {
+            reqShieldConfig.keyLock
+        }
+
     private fun updateReqShieldData(
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
+        // createdAt of the entry this request read, which tells that entry apart from one written during the refresh
+        seenCreatedAt: Long,
     ) {
         val lockType = LockType.UPDATE
-        val onlyCreateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE
+        val lockedAtNanos = System.nanoTime()
 
-        // ONLY_CREATE_CACHE collapses requests on cache creation only, so the update runs without a lock
         val token =
-            if (onlyCreateCache) {
-                null
-            } else {
-                try {
-                    reqShieldConfig.keyLock.tryLock(key, lockType)
-                } catch (e: Exception) {
-                    // The caller already has its data: a failing lock store only skips this refresh
-                    log.warn("Failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
-                    return
-                }
-            }
+            try {
+                lockFor(lockType).tryLock(key, lockType)
+            } catch (e: Exception) {
+                // The caller already has its data: a failing lock store only skips this refresh
+                log.warn("Failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
+                return
+            } ?: return // another request already refreshes this key
 
-        if (onlyCreateCache || token != null) {
-            runInBackground(key, lockType, token) {
-                val reqShieldData =
-                    buildReqShieldData(
-                        executeCallable(callable, key, lockType, token),
-                        timeToLiveMillis,
-                    )
-                executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
-            }
+        runInBackground(key, lockType, token) {
+            val reqShieldData =
+                buildReqShieldData(
+                    executeCallable(callable, key, lockType, token),
+                    timeToLiveMillis,
+                )
+            writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt)
         }
     }
 
@@ -97,6 +110,7 @@ class ReqShield<T>(
         val onlyUpdateCache = reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE
 
         // ONLY_UPDATE_CACHE collapses requests on cache update only, so the creation runs without a lock
+        val lockedAtNanos = System.nanoTime()
         val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
 
         if (token != null) {
@@ -115,40 +129,92 @@ class ReqShield<T>(
         }
 
         return if (onlyUpdateCache || token != null) {
-            createReqShieldData(key, callable, timeToLiveMillis, lockType, token)
+            createReqShieldData(key, callable, timeToLiveMillis, lockType, token, lockedAtNanos)
         } else {
             handleLockFailure(key, callable, timeToLiveMillis)
         }
     }
 
+    /**
+     * Calls the supplier and writes its result to the cache before it returns. The write runs on the caller's thread:
+     * a write that waits on the executor could run after an evict that followed the reply and put the evicted value
+     * back, and it would wait behind the refreshes queued there while other requests wait for this entry.
+     */
     private fun createReqShieldData(
         key: String,
         callable: Callable<T?>,
         timeToLiveMillis: Long,
         lockType: LockType,
         token: String?,
+        lockedAtNanos: Long,
     ): ReqShieldData<T> {
         val reqShieldData =
             buildReqShieldData(
                 executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
-        runInBackground(key, lockType, token) {
-            executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
+        try {
+            writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt = null)
+        } catch (e: Exception) {
+            // The caller has its data: a failed cache write must not cost it the reply
+            log.error("Failed to write the cache for key '{}'", key, e)
         }
 
         return reqShieldData
     }
 
     /**
-     * Runs [task] on the configured executor. The task releases the lock identified by [token] itself, so when the
+     * Writes [reqShieldData] and releases the lock, unless the lock timed out during the supplier call and another
+     * request wrote the entry in that time. That other request called the supplier later, so its result is the newer
+     * one and this late write would replace it with older data.
+     *
+     * The cache is read again only after a lock timeout, so a supplier that is faster than the timeout costs no
+     * extra read. [seenCreatedAt] is the createdAt of the entry this request read before its supplier call, or null
+     * when there was none.
+     */
+    private fun writeUnlessSuperseded(
+        key: String,
+        reqShieldData: ReqShieldData<T>,
+        lockType: LockType,
+        token: String?,
+        lockedAtNanos: Long,
+        seenCreatedAt: Long?,
+    ) {
+        if (token != null && isSuperseded(key, lockedAtNanos, seenCreatedAt)) {
+            log.debug("Skipped the cache write for key '{}': its lock timed out and a newer entry exists", key)
+            releaseQuietly(key, lockType, token, "after its late cache write was skipped")
+            return
+        }
+        executeSetCacheFunction(reqShieldConfig.setCacheFunction, key, reqShieldData, lockType, token)
+    }
+
+    private fun isSuperseded(
+        key: String,
+        lockedAtNanos: Long,
+        seenCreatedAt: Long?,
+    ): Boolean {
+        if (System.nanoTime() - lockedAtNanos < lockTimeoutNanos) return false
+
+        val cachedData =
+            try {
+                reqShieldConfig.getCacheFunction.invoke(key)
+            } catch (e: Exception) {
+                // Without the read nothing shows a newer entry, so the write goes on as it did before
+                log.warn("Cache read failed before the late cache write for key '{}'", key, e)
+                return false
+            }
+        return cachedData != null && cachedData.createdAt != seenCreatedAt
+    }
+
+    /**
+     * Runs the refresh [task] on the configured executor. The task releases the lock identified by [token] itself, so when the
      * executor rejects it - a saturated bounded pool, or one already shut down - the lock is released here instead.
-     * Only that background cache write or refresh is dropped: the caller still gets its data.
+     * Only that refresh is dropped: the caller still gets its data.
      */
     private fun runInBackground(
         key: String,
         lockType: LockType,
-        token: String?,
+        token: String,
         task: () -> Unit,
     ) {
         try {
@@ -156,10 +222,8 @@ class ReqShield<T>(
                 .runAsync(task, reqShieldConfig.executor)
                 .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
         } catch (e: RejectedExecutionException) {
-            log.warn("Executor rejected the background cache task for key '{}', so it is skipped", key, e)
-            if (token != null) {
-                releaseQuietly(key, lockType, token, "after the executor rejected its task")
-            }
+            log.warn("Executor rejected the cache refresh for key '{}', so it is skipped", key, e)
+            releaseQuietly(key, lockType, token, "after the executor rejected its task")
         }
     }
 
@@ -246,7 +310,7 @@ class ReqShield<T>(
         } finally {
             if (token != null) {
                 // No retry needed: false means lock already released or expired (not an error)
-                val unlocked = reqShieldConfig.keyLock.unLock(key, lockType, token)
+                val unlocked = lockFor(lockType).unLock(key, lockType, token)
                 if (!unlocked) {
                     log.debug("Lock already released or expired for key '{}'", key)
                 }
@@ -284,7 +348,7 @@ class ReqShield<T>(
         situation: String,
     ) {
         try {
-            reqShieldConfig.keyLock.unLock(key, lockType, token)
+            lockFor(lockType).unLock(key, lockType, token)
         } catch (unlockError: Exception) {
             log.error("Failed to unlock key '{}' {}", key, situation, unlockError)
         }

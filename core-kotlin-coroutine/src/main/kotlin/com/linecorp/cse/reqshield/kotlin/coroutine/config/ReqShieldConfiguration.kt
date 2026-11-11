@@ -118,7 +118,15 @@ private fun defaultKeyLock(
     }
 
 enum class ReqShieldWorkMode {
+    /** Requests are collapsed with the configured lock when an entry is created and when it is refreshed. */
     CREATE_AND_UPDATE_CACHE,
+
+    /**
+     * The configured lock is used when an entry is created. A refresh takes a local lock of this JVM instead, so one
+     * instance runs one refresh of a key at a time and a global lock gets no call for a refresh.
+     */
     ONLY_CREATE_CACHE,
+
+    /** The configured lock is used when an entry is refreshed. On a cache miss each request calls the supplier. */
     ONLY_UPDATE_CACHE,
 }

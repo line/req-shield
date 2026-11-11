@@ -66,7 +66,17 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
-    private val mockContinuation = mockk<Continuation<Any?>>()
+
+    /**
+     * The continuation of the annotated suspend function. The aspect resumes it when its coroutine suspended, for
+     * example while it waits for the cache write of a new entry. The tests read the cache and the mocks, not this result.
+     */
+    private val continuation =
+        object : Continuation<Any?> {
+            override val context = EmptyCoroutineContext
+
+            override fun resumeWith(result: Result<Any?>) = Unit
+        }
 
     private val cacheName = "TestCacheName"
     private val cacheKeyGenerator = "customGenerator"
@@ -80,8 +90,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
     @BeforeEach
     fun setUp() {
-        every { mockContinuation.context } returns EmptyCoroutineContext
-        every { joinPoint.args } returns arrayOf(argument, mockContinuation)
+        every { joinPoint.args } returns arrayOf(argument, continuation)
         every { joinPoint.target } returns targetObject
         // The aspect resolves the application's scope bean when the bean factory is set
         every { beanFactory.containsBean("reqShieldCoroutineScope") } returns true
