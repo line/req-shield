@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -35,7 +36,7 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Keys of methods that name neither a key nor a key generator, through the real proxy. */
+/** How the aspect turns arguments, a SpEL key and a key generator result into a cache key, through the real proxy. */
 class ReqShieldAspectCacheKeyIntegrationTest {
     private lateinit var context: AnnotationConfigApplicationContext
     private lateinit var service: KeyService
@@ -113,6 +114,63 @@ class ReqShieldAspectCacheKeyIntegrationTest {
     }
 
     @Test
+    fun spelKeyThatSpringCannotConvertShouldUseItsOwnToString() {
+        service.byFilter(Filter(1, 2))
+        awaitEntries(1)
+        service.byFilter(Filter(1, 2))
+        service.byFilter(Filter(1, 3))
+        awaitEntries(2)
+
+        assertEquals(setOf("filter::Filter(tenant=1, id=2)", "filter::Filter(tenant=1, id=3)"), cache.keys())
+        assertEquals(2, service.callCount())
+    }
+
+    @Test
+    fun spelKeyThatSpringConvertsShouldKeepTheConvertedText() {
+        service.byNumber(42L)
+        service.byColor(Color.RED)
+        awaitEntries(2)
+
+        // Spring converts an enum by its name, not by its toString()
+        assertEquals(setOf("number::42", "color::RED"), cache.keys())
+    }
+
+    @Test
+    fun spelKeyWithoutItsOwnToStringShouldNameTheClassInTheError() {
+        val error = assertThrows<IllegalArgumentException> { service.searchBySpel(Query("Aa")) }
+
+        // The blank-key check throws the same exception type, so the message tells the two apart
+        assertTrue(error.message!!.contains("Query") && error.message!!.contains("toString()"), error.message)
+    }
+
+    @Test
+    fun keyGeneratorResultWithoutItsOwnToStringShouldBeRejectedBeforeTheMethodRuns() {
+        val error = assertThrows<IllegalArgumentException> { service.searchByGenerator("Aa") }
+
+        assertTrue(error.message!!.contains("Query") && error.message!!.contains("toString()"), error.message)
+        assertEquals(0, service.callCount())
+    }
+
+    @Test
+    fun keyGeneratorResultShouldBeTheKeyAsItIs() {
+        service.byGenerator("a, b")
+        awaitEntries(1)
+
+        assertEquals(setOf("generated::generated-a, b"), cache.keys())
+    }
+
+    @Test
+    fun evictShouldTargetTheEntryOfTheSameSpelListKey() {
+        service.documentBySpelList("a,b", "c")
+        service.documentBySpelList("a", "b,c")
+        awaitEntries(2)
+
+        service.evictDocumentBySpelList("a,b", "c")
+
+        assertEquals(setOf("doc::[a, b\\,c]"), cache.keys())
+    }
+
+    @Test
     fun evictShouldTargetTheEntryOfTheSameArguments() {
         service.document("a, b", "c")
         service.document("a", "b, c")
@@ -132,10 +190,28 @@ class ReqShieldAspectCacheKeyIntegrationTest {
         override fun hashCode() = text.hashCode()
     }
 
+    data class Filter(
+        val tenant: Int,
+        val id: Int,
+    )
+
+    enum class Color {
+        RED,
+        ;
+
+        override fun toString() = "the color red"
+    }
+
     @Configuration
     open class KeyConfig {
         @Bean
         open fun reqShieldCache(): KeyCache = KeyCache()
+
+        @Bean
+        open fun queryKeyGenerator(): KeyGenerator = KeyGenerator { _, _, params -> Query(params[0] as String) }
+
+        @Bean
+        open fun textKeyGenerator(): KeyGenerator = KeyGenerator { _, _, params -> "generated-" + params[0] }
 
         @Bean
         open fun keyService(): KeyService = KeyService()
@@ -164,6 +240,35 @@ class ReqShieldAspectCacheKeyIntegrationTest {
             counter.incrementAndGet()
             return "doc($tenant|$id)"
         }
+
+        @ReqShieldCacheEvict(cacheName = "doc", key = "{#tenant, #id}")
+        open fun evictDocumentBySpelList(
+            tenant: String,
+            id: String,
+        ) {
+            // nothing to do: the aspect evicts after this method returns
+        }
+
+        @ReqShieldCacheable(cacheName = "filter", key = "#filter")
+        open fun byFilter(filter: Filter): String {
+            counter.incrementAndGet()
+            return "result-of-$filter"
+        }
+
+        @ReqShieldCacheable(cacheName = "number", key = "#number")
+        open fun byNumber(number: Long): String = "result-of-$number"
+
+        @ReqShieldCacheable(cacheName = "color", key = "#color")
+        open fun byColor(color: Color): String = "result-of-" + color.name
+
+        @ReqShieldCacheable(cacheName = "search", keyGenerator = "queryKeyGenerator")
+        open fun searchByGenerator(text: String): String {
+            counter.incrementAndGet()
+            return "result-of-$text"
+        }
+
+        @ReqShieldCacheable(cacheName = "generated", keyGenerator = "textKeyGenerator")
+        open fun byGenerator(text: String): String = "result-of-$text"
 
         @ReqShieldCacheEvict(cacheName = "doc")
         open fun evictDocument(

@@ -191,7 +191,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             every { reqShieldAspect.getTargetMethod(joinPoint) } returns methodOf(TestBean::cacheableWithDefaultKeyGenerator.name)
 
             assertEquals(
-                // SimpleKeyGenerator returns a single non-array argument as the key, so the key is the argument itself
+                // A single argument is the key itself; this one is a map, which is written by content, so the key is the argument itself
                 "$cacheName::{x=paramX, y=paramY}",
                 reqShieldAspect.getCacheableCacheKey(joinPoint),
             )

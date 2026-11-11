@@ -88,23 +88,35 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Cache key layout
 
-- The Spring adapters store every entry under `"{cacheName}::{key}"` (the same convention as Spring's `RedisCacheManager`),
-  where `key` is the SpEL result or the `KeyGenerator` output. `@ReqShieldCacheEvict` applies the same rule, so an evict
-  with the same `cacheName` and `key` always targets the entry written by `@ReqShieldCacheable`.
+- The Spring adapters store every entry under `"{cacheName}::{key}"` (the same convention as Spring's `RedisCacheManager`).
+  `@ReqShieldCacheEvict` applies the same rule, so an evict with the same `cacheName` and the same key source always
+  targets the entry written by `@ReqShieldCacheable`.
 - Lock keys are derived from that namespaced key and prefixed with `reqshield:lock:`, so two caches that happen to use the
   same raw key never share a lock or an entry.
 - If you call `ReqShield` directly (core / core-reactor / core-kotlin-coroutine), the key you pass is used as is.
-- Without `key` and `keyGenerator`, the key is built from the method arguments in the layout of Spring's
-  `SimpleKeyGenerator`: no argument gives `SimpleKey []`, one argument gives its `toString()`, several give
-  `SimpleKey [a, b]`. So that two different argument lists of a method never share an entry, the separator characters
-  (`,` `[` `]` `{` `}` `=`) and the backslash inside a value are escaped with a backslash, a single argument escapes
-  only the backslash, `null` is written as `\0`, and arrays, collections and maps are written by content.
-- A key object whose class does not override `toString()` fails the call with an `IllegalArgumentException` before the
-  method runs, because its text would be only the class name and the hash code. This applies to a method argument on
-  the default path, to the result of a SpEL `key`, and to the result of a `keyGenerator` bean.
-- A SpEL `key` that results in a text is used as is. One that results in an array, a collection or a map (for example
-  `key = "{#tenant, #id}"`) is written by content with the same escaping, as `[tenant, id]`. The text of a
-  `keyGenerator` result is used as is, so a custom generator has to keep different arguments apart itself.
+- `key` comes from one of three sources:
+    - **Method arguments** (neither `key` nor `keyGenerator` is set), in the layout of Spring's `SimpleKeyGenerator`:
+      no argument gives `SimpleKey []`, one argument gives its `toString()`, several give `SimpleKey [a, b]`.
+    - **A SpEL `key`.** A text is used as is. An array, a collection or a map (for example `key = "{#tenant, #id}"`)
+      is written by content, as `[tenant, id]`. Any other value is converted by Spring (an enum by its name), or is
+      its `toString()` when Spring has no converter for it (a data class, for example).
+    - **A `keyGenerator` bean.** The `toString()` of its result is used as is, so a custom generator has to keep
+      different arguments apart itself. In the coroutine adapter the generator also receives the `Continuation`.
+- Where a value is written by content or inside `SimpleKey [...]`, its text is escaped so that it cannot run into the
+  next value: `,` `[` `]` `{` `}` `=` and the backslash get a backslash in front, and an empty text is written as `\e`.
+  A single argument escapes only the backslash. `null` is always written as `\0`. For example, `("a, b", "c")` gives
+  `SimpleKey [a\, b, c]`, and a data class argument next to another argument gives `SimpleKey [t, Filter(a\=1\, b\=2)]`.
+- Two argument lists of a method then get different keys, as long as the `toString()` of each value tells its own
+  values apart. A class whose `toString()` joins free text does not: `Pair("a, b", "c")` and `Pair("a", "b, c")` are both
+  `(a, b, c)`. Give such a method a `key`. The same holds for a parameter typed `Any` that takes the text `[a, b]` in
+  one call and a list in another.
+- A key object whose class does not override `toString()` fails the call with an `IllegalArgumentException`, because
+  its text would be only the class name and the hash code. This applies to a method argument on the default path, to
+  the result of a SpEL `key`, and to the result of a `keyGenerator` bean. The key is built before the method is called,
+  so the annotated method does not run - neither a `@ReqShieldCacheable` method nor a `@ReqShieldCacheEvict` one.
+  Only the class of the value itself is checked: an object that prints such an object inside its own `toString()`
+  (a `Pair` of one) passes, and its entry is then never hit.
+- A collection or a map that contains itself is rejected the same way.
 
 ### Global lock guidance
 

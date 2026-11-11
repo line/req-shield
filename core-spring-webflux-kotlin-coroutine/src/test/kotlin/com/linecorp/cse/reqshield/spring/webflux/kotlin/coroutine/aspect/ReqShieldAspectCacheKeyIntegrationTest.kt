@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.cache.interceptor.KeyGenerator
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.test.annotation.DirtiesContext
@@ -38,7 +39,7 @@ import org.springframework.test.context.junit.jupiter.SpringExtension
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
 
-/** Keys of suspend methods that name neither a key nor a key generator, through the real proxy. */
+/** How the aspect turns arguments, a SpEL key and a key generator result into a cache key, through the real proxy. */
 @ExtendWith(SpringExtension::class)
 @ContextConfiguration(classes = [LibAutoConfiguration::class, ReqShieldAspectCacheKeyIntegrationTest.KeyConfig::class])
 @DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_EACH_TEST_METHOD)
@@ -113,6 +114,50 @@ class ReqShieldAspectCacheKeyIntegrationTest {
         }
 
     @Test
+    fun spelListKeyShouldNotShareAnEntryWhenAnElementHoldsTheSeparator() =
+        runBlocking {
+            val first = service.documentBySpelList("a,b", "c")
+            awaitEntry("doc::[a\\,b, c]")
+            val second = service.documentBySpelList("a", "b,c")
+
+            assertEquals("doc(a,b|c)", first)
+            assertEquals("doc(a|b,c)", second)
+        }
+
+    @Test
+    fun evictShouldTargetTheEntryOfTheSameSpelListKey() =
+        runBlocking {
+            service.documentBySpelList("a,b", "c")
+            service.documentBySpelList("a", "b,c")
+            awaitEntry("doc::[a\\,b, c]")
+            awaitEntry("doc::[a, b\\,c]")
+
+            service.evictDocumentBySpelList("a,b", "c")
+
+            assertNull(asyncCache.get("doc::[a\\,b, c]"))
+            assertNotNull(asyncCache.get("doc::[a, b\\,c]"))
+        }
+
+    @Test
+    fun spelKeyThatSpringCannotConvertShouldUseItsOwnToString() =
+        runBlocking {
+            service.byFilter(Filter(1, 2))
+            awaitEntry("filter::Filter(tenant=1, id=2)")
+            service.byFilter(Filter(1, 2))
+
+            assertEquals(1, service.callCount())
+        }
+
+    @Test
+    fun keyGeneratorResultWithoutItsOwnToStringShouldBeRejectedBeforeTheMethodRuns() =
+        runBlocking {
+            val error = assertFailsWith<IllegalArgumentException> { service.searchByGenerator("Aa") }
+
+            assertTrue(error.message!!.contains("Query") && error.message!!.contains("toString()"), error.message)
+            assertEquals(0, service.callCount())
+        }
+
+    @Test
     fun evictShouldTargetTheEntryOfTheSameArguments() =
         runBlocking {
             service.document("a, b", "c")
@@ -135,8 +180,16 @@ class ReqShieldAspectCacheKeyIntegrationTest {
         override fun hashCode() = text.hashCode()
     }
 
+    data class Filter(
+        val tenant: Int,
+        val id: Int,
+    )
+
     @Configuration
     open class KeyConfig {
+        @Bean
+        open fun queryKeyGenerator(): KeyGenerator = KeyGenerator { _, _, params -> Query(params[0] as String) }
+
         @Bean
         open fun asyncCache(): AsyncCache<String> = InMemoryAsyncCache()
 
@@ -158,6 +211,24 @@ class ReqShieldAspectCacheKeyIntegrationTest {
             tenant: String?,
             id: String,
         ): String = counter.incrementAndGet().let { "doc($tenant|$id)" }
+
+        @ReqShieldCacheable(cacheName = "doc", key = "{#tenant, #id}")
+        open suspend fun documentBySpelList(
+            tenant: String,
+            id: String,
+        ): String = counter.incrementAndGet().let { "doc($tenant|$id)" }
+
+        @ReqShieldCacheEvict(cacheName = "doc", key = "{#tenant, #id}")
+        open suspend fun evictDocumentBySpelList(
+            tenant: String,
+            id: String,
+        ): Boolean = true
+
+        @ReqShieldCacheable(cacheName = "filter", key = "#filter")
+        open suspend fun byFilter(filter: Filter): String = counter.incrementAndGet().let { "result-of-$filter" }
+
+        @ReqShieldCacheable(cacheName = "search", keyGenerator = "queryKeyGenerator")
+        open suspend fun searchByGenerator(text: String): String = counter.incrementAndGet().let { "result-of-$text" }
 
         @ReqShieldCacheEvict(cacheName = "doc")
         open suspend fun evictDocument(

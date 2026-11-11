@@ -187,7 +187,7 @@ open class ReqShieldAspect<T>(
         val method = getTargetMethod(joinPoint)
         // Spring 6.1+ (the supported minimum is 6.2) drops the trailing Continuation of a suspend function itself
         // in MethodBasedEvaluationContext, so the raw arguments are passed on. The default key is built here, so the
-        // Continuation is dropped here.
+        // Continuation is dropped here. A keyGenerator bean still receives the raw arguments, Continuation included.
         val args = joinPoint.args
 
         val context: EvaluationContext =
@@ -279,8 +279,9 @@ open class ReqShieldAspect<T>(
 
     /**
      * Evaluates the SpEL key. A text is used as is, and an array, a collection or a map is written by content. Any
-     * other result becomes text the way Spring converts it, but an object whose class does not override `toString()`
-     * is rejected first: its text would be the class name and the hash code.
+     * other result becomes text the way Spring converts it (an enum by its name), or by its `toString()` when Spring
+     * has no converter for it. An object whose class does not override `toString()` is rejected first: its text would
+     * be the class name and the hash code.
      */
     private fun evaluateKeyExpression(
         expression: Expression,
@@ -288,15 +289,17 @@ open class ReqShieldAspect<T>(
     ): String? {
         val value = expression.getValue(context) ?: return null
         if (value is String) return value
-        // Spring would join the elements with a bare comma; written by content, two different lists never match
+        // Spring would join the elements with a bare comma, so an element that holds one would shift into the next
         if (value.javaClass.isArray || value is Collection<*> || value is Map<*, *>) return cacheKeyOfValue(value)
         requireOwnToString(value)
 
-        return context.typeConverter.convertValue(
-            value,
-            TypeDescriptor.forObject(value),
-            TypeDescriptor.valueOf(String::class.java),
-        ) as String?
+        val valueType = TypeDescriptor.forObject(value)
+        val textType = TypeDescriptor.valueOf(String::class.java)
+        // Spring has no converter to String for a class without a String constructor or factory, a data class
+        // for example. Such a value is its own toString(), which the check above has just required.
+        if (!context.typeConverter.canConvert(valueType, textType)) return value.toString()
+
+        return context.typeConverter.convertValue(value, valueType, textType) as String?
     }
 
     /** The named [KeyGenerator] bean decides the key; its result must describe itself, like any other key object. */

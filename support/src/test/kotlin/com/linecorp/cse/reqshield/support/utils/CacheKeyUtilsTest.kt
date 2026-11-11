@@ -116,4 +116,82 @@ class CacheKeyUtilsTest {
         assertThrows(IllegalArgumentException::class.java) { requireOwnToString(Any()) }
         assertThrows(IllegalArgumentException::class.java) { requireOwnToString(arrayOf("a")) }
     }
+
+    @Test
+    fun emptyTextShouldDifferFromNoElement() {
+        assertNotEquals(keyOf(emptyList<String>()), keyOf(listOf("")))
+        assertNotEquals(keyOf("t", emptyList<String>()), keyOf("t", listOf("")))
+        assertEquals("SimpleKey [t, \\e]", keyOf("t", ""))
+        assertEquals("[\\e, \\e]", keyOf(listOf("", "")))
+    }
+
+    @Test
+    fun everyPrimitiveArrayShouldBeWrittenByContent() {
+        assertEquals("[true, false]", keyOf(booleanArrayOf(true, false)))
+        assertEquals("[1, 2]", keyOf(byteArrayOf(1, 2)))
+        assertEquals("[a, b]", keyOf(charArrayOf('a', 'b')))
+        assertEquals("[1, 2]", keyOf(shortArrayOf(1, 2)))
+        assertEquals("[1, 2]", keyOf(longArrayOf(1, 2)))
+        assertEquals("[1.5, 2.5]", keyOf(floatArrayOf(1.5f, 2.5f)))
+        assertEquals("[1.5, 2.5]", keyOf(doubleArrayOf(1.5, 2.5)))
+    }
+
+    @Test
+    fun everySeparatorInsideANestedValueShouldBeEscaped() {
+        assertEquals("SimpleKey [\\,\\[\\]\\{\\}\\=\\\\, x]", keyOf(",[]{}=\\", "x"))
+        // A map entry whose key holds the '=' must differ from the entry it would otherwise spell
+        assertNotEquals(keyOf(mapOf("a=b" to "c")), keyOf(mapOf("a" to "b=c")))
+        assertNotEquals(keyOf(mapOf("a" to "{b}")), keyOf(mapOf("a" to mapOf<String, String>())))
+    }
+
+    @Test
+    fun containerThatHoldsItselfShouldBeRejectedInsteadOfOverflowingTheStack() {
+        val self = ArrayList<Any>()
+        self.add(self)
+
+        val error = assertThrows(IllegalArgumentException::class.java) { keyOf(self) }
+
+        assertTrue(error.message!!.contains("nested"), error.message)
+    }
+
+    /**
+     * Every argument list of one signature over a small alphabet of awkward texts. The alphabet holds each character
+     * and marker the encoder gives a meaning, so a missing escape shows up as two lists with one key.
+     */
+    @Test
+    fun argumentListsOfOneSignatureShouldNeverShareAKey() {
+        val texts: List<String?> =
+            listOf(null, "", "a", " ", ",", ", ", "[", "]", "[]", "{", "}", "=", "\\", "\\0", "\\e", "0", "e", "null", "a, b", "a=b")
+        val lists: List<List<String?>?> =
+            listOf<List<String?>?>(null, emptyList()) + texts.map { listOf(it) } + texts.flatMap { a -> texts.map { b -> listOf(a, b) } }
+        val fewTexts = listOf(null, "", "a", ",", "[", "]", "\\", "\\e")
+        val nestedLists: List<List<List<String?>?>> =
+            listOf<List<List<String?>?>>(emptyList()) +
+                listOf(null, emptyList(), listOf("a"), listOf(""), listOf("a", "a"), listOf("["), listOf("]"), listOf(","))
+                    .let { inner -> inner.map { listOf(it) } + inner.flatMap { a -> inner.map { b -> listOf(a, b) } } }
+        val maps: List<Map<String?, String?>> =
+            listOf<Map<String?, String?>>(emptyMap()) +
+                fewTexts.flatMap { k -> fewTexts.map { v -> mapOf(k to v) } } +
+                listOf(linkedMapOf("a" to "b", "c" to "d"), mapOf("a" to "b, c=d"), mapOf("a, c" to "d"))
+
+        fun assertDistinct(
+            signature: String,
+            argumentLists: List<Array<out Any?>>,
+        ) {
+            val byKey = argumentLists.groupBy { cacheKeyOfArguments(it) }
+            val shared = byKey.entries.firstOrNull { it.value.size > 1 }
+            assertTrue(shared == null) { "$signature: ${shared!!.value.map { it.contentDeepToString() }} share '${shared.key}'" }
+        }
+
+        assertDistinct("(text)", texts.map { arrayOf(it) })
+        assertDistinct("(list)", lists.map { arrayOf(it) })
+        assertDistinct("(list of lists)", nestedLists.map { arrayOf(it) })
+        assertDistinct("(map)", maps.map { arrayOf(it) })
+        assertDistinct("(text, text)", texts.flatMap { a -> texts.map { b -> arrayOf(a, b) } })
+        assertDistinct("(text, list)", texts.flatMap { a -> lists.map { b -> arrayOf(a, b) } })
+        assertDistinct("(list, text)", lists.flatMap { a -> texts.map { b -> arrayOf(a, b) } })
+        assertDistinct("(list of lists, text)", nestedLists.flatMap { a -> fewTexts.map { b -> arrayOf(a, b) } })
+        assertDistinct("(map, text)", maps.flatMap { a -> fewTexts.map { b -> arrayOf(a, b) } })
+        assertDistinct("(text, text, text)", fewTexts.flatMap { a -> fewTexts.flatMap { b -> fewTexts.map { c -> arrayOf(a, b, c) } } })
+    }
 }
