@@ -184,15 +184,18 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Background refresh and the caller's context
 
-- Once an entry is older than `decisionForUpdate` percent of its TTL, the next read returns it and refreshes it in the
-  background. The refresh calls the supplier after the caller already has its data.
+- Once an entry is older than `decisionForUpdate` percent of its TTL, a read returns it and starts a refresh in the
+  background, unless another request already holds the update lock of that key. The refresh calls the supplier on its
+  own and can still be running after the caller has its data.
 - `core-reactor` and the WebFlux adapter subscribe the refresh with the caller's Reactor `Context`, so a supplier that
   reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
   from inside the transaction.
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
   coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
-  the request and does not run on its thread. For any other element the scope's own one takes precedence.
+  the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A
+  transaction of the caller that lives in its coroutine context (the Reactor `Context` of a reactive transaction) is
+  handed over too; a supplier that must not run in it should not be refreshed from inside the transaction.
 - `core` and the blocking Spring adapter run the refresh on the executor thread. `ThreadLocal` state of the caller
   (`SecurityContextHolder`, `RequestContextHolder`, MDC, a transaction) is **not** available there. Pass what the
   method needs as arguments, or supply a `reqShieldExecutor` that propagates the context your application needs.
@@ -204,9 +207,12 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   cache outage and the request falls back to calling the supplier itself right away.
 - When the attempts are exhausted the request calls the supplier once. A supplier failure is propagated as a
   `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
-- In `core-kotlin-coroutine`, a `CancellationException` thrown by a client function while the calling coroutine is
-  still active (a `withTimeout` inside the supplier, for example) is a failure of that function. It is reported as
-  `ClientException` like any other failure. Only the cancellation of the calling coroutine itself propagates unwrapped.
+- In `core-kotlin-coroutine`, a `CancellationException` thrown by the supplier or by a cache get/set function while
+  the calling coroutine is still active (a `withTimeout` inside the supplier, for example) is a failure of that
+  function. It is reported as `ClientException` like any other failure. Only the cancellation of the calling coroutine
+  itself propagates unwrapped. A failing lock function is not wrapped: on a cache miss its exception reaches the
+  caller as thrown (a `CancellationException` included), on a refresh it only skips that refresh, and a failed unlock
+  is logged.
 
 ### Thread pools and schedulers
 

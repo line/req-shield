@@ -88,7 +88,7 @@ class ReqShield<T>(
 
         if (!onlyCreateCache && token == null) return
 
-        // The refresh calls the supplier after the caller has its data, so it takes the caller's context elements
+        // The refresh can outlive the caller's request, so it takes the caller's context elements
         // (Reactor context, MDC, security). It never takes the caller's Job, dispatcher or exception handler: the
         // refresh must not become a child of the request or run on its thread. The elements of the scope win.
         val refreshContext =
@@ -243,11 +243,11 @@ class ReqShield<T>(
             rethrowIfCallerCancelled(e)
             throw ClientException(ErrorCode.SET_CACHE_ERROR, cause = e)
         } finally {
-            // Only the holder of a token has a lock to release.
+            // Only the holder of a token has a lock to release. A release that fails, or times out inside the lock
+            // function, is logged: thrown from here it would replace the result of the write, and a
+            // CancellationException would end the background coroutine as cancelled without any log.
             if (token != null) {
-                withContext(NonCancellable) {
-                    reqShieldConfig.keyLock.unLock(key, lockType, token)
-                }
+                releaseQuietly(key, lockType, token, "after the cache write")
             }
         }
     }
