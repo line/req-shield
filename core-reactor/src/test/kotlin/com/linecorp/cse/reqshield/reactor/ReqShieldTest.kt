@@ -43,6 +43,7 @@ import reactor.core.publisher.MonoSink
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
+import reactor.util.context.Context
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
@@ -416,6 +417,58 @@ class ReqShieldTest : BaseReqShieldTest {
             .verifyComplete()
 
         verify(exactly = 0) { callable.call() }
+    }
+
+    @Test
+    fun shouldRunTheRefreshSupplierWithTheReactorContextOfTheCaller() {
+        val cached = updateTargetReqShieldData(oldValue)
+        val written = AtomicReference<ReqShieldData<Product>?>()
+        every { cacheGetter(key) } returns Mono.just(cached)
+        every { cacheSetter(key, any(), any()) } answers {
+            written.set(secondArg())
+            Mono.just(true)
+        }
+        every { keyLock.tryLock(key, LockType.UPDATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.UPDATE, token) } returns Mono.just(true)
+        // Reads the caller identity the way ReactiveSecurityContextHolder does: empty without the context
+        every { callable.call() } returns
+            Mono.deferContextual { context ->
+                Mono.justOrEmpty(context.getOrEmpty<String>("user")).map { user -> Product(user, user) }
+            }
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis).contextWrite { it.put("user", "alice") })
+            .expectNext(cached)
+            .verifyComplete()
+
+        await().atMost(Duration.ofSeconds(5)).until { written.get() != null }
+        // Without the context the supplier completes empty and the refresh replaces the entry with a null value
+        assertEquals(Product("alice", "alice"), written.get()!!.value)
+    }
+
+    @Test
+    fun shouldWriteTheCreatedEntryWithTheReactorContextOfTheCaller() {
+        val userOfTheWrite = AtomicReference<String?>()
+        every { cacheGetter(key) } returns Mono.empty()
+        // Reads the caller identity inside the returned Mono, as a cache client that picks its store by tenant does
+        every { cacheSetter(key, any(), any()) } returns
+            Mono.deferContextual { context ->
+                userOfTheWrite.set(context.getOrDefault("user", "none"))
+                Mono.just(true)
+            }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        every { callable.call() } returns Mono.just(value)
+        val shield = ReqShield(ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock))
+
+        StepVerifier
+            .create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis).contextWrite { it.put("user", "alice") })
+            .assertNext { assertEquals(value, it.value) }
+            .verifyComplete()
+
+        await().atMost(Duration.ofSeconds(5)).until { userOfTheWrite.get() != null }
+        assertEquals("alice", userOfTheWrite.get())
     }
 
     @Test
@@ -995,7 +1048,7 @@ class ReqShieldTest : BaseReqShieldTest {
             Mono.defer {
                 try {
                     @Suppress("UNCHECKED_CAST")
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token) as Mono<Unit>
+                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
                 } catch (e: InvocationTargetException) {
                     Mono.error(e.cause ?: e)
                 }

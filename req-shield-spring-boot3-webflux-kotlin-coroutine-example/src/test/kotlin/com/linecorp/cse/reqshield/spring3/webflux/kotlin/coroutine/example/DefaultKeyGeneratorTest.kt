@@ -35,9 +35,9 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Runs on Spring 6.1, which strips the trailing `Continuation` of a suspend function itself before
- * generating a key. Only here can a default-generated key that ignores the method arguments be
- * observed, so this is where the collapse of unrelated arguments onto one cache key is guarded.
+ * The aspect builds the default key from the arguments without the trailing `Continuation` of a
+ * suspend function. A key that ignored the method arguments would collapse unrelated arguments onto
+ * one cache key, which is what this test guards.
  */
 @SpringBootTest(
     classes = [SpringWebfluxCoroutineApplication::class, DefaultKeyGeneratorTestConfiguration::class],
@@ -74,7 +74,7 @@ class DefaultKeyGeneratorTestConfiguration {
     fun defaultKeyGeneratorService(): DefaultKeyGeneratorService = DefaultKeyGeneratorService()
 }
 
-/** Neither `key` nor `keyGenerator` is set, so the key comes from Spring's `SimpleKeyGenerator`. */
+/** Neither `key` nor `keyGenerator` is set, so the aspect builds the key from the method arguments. */
 open class DefaultKeyGeneratorService {
     private val counter = AtomicInteger(0)
 

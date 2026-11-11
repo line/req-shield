@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * This Boot 4 test checks that distinct arguments produce distinct cache keys.
- * The key generator omits the trailing Continuation of a suspend function.
+ * The default key omits the trailing Continuation of a suspend function.
  */
 @SpringBootTest(
     classes = [SpringWebfluxCoroutineApplication::class, DefaultKeyGeneratorTestConfiguration::class],
@@ -73,7 +73,7 @@ class DefaultKeyGeneratorTestConfiguration {
     fun defaultKeyGeneratorService(): DefaultKeyGeneratorService = DefaultKeyGeneratorService()
 }
 
-/** Neither `key` nor `keyGenerator` is set, so the key comes from Spring's `SimpleKeyGenerator`. */
+/** Neither `key` nor `keyGenerator` is set, so the aspect builds the key from the method arguments. */
 open class DefaultKeyGeneratorService {
     private val counter = AtomicInteger(0)
 

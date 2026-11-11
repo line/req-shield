@@ -24,7 +24,7 @@ The library is organized into several core modules:
 2. **KeyLock**: Locking mechanism (local or global) to prevent concurrent cache operations. `tryLock` returns an ownership token and `unLock` only releases when the token matches, so a slow holder cannot release someone else's lock
 3. **ReqShieldConfiguration**: Configuration object that defines cache functions, locking behavior, and timeouts
 4. **ReqShieldData**: Wrapper for cached data with metadata (creation time, TTL)
-5. **Spring Aspects**: AOP-based implementations that provide annotation-driven caching. One `ReqShield` instance per annotated method; cache and lock keys are namespaced as `"{cacheName}::{key}"`; eviction happens after the method returns successfully
+5. **Spring Aspects**: AOP-based implementations that provide annotation-driven caching. One `ReqShield` instance per annotated method; cache and lock keys are namespaced as `"{cacheName}::{key}"`; eviction happens after the method returns successfully. Without `key`/`keyGenerator` the aspect builds the key from the arguments itself (`cacheKeyOfArguments` in `support`: `SimpleKey` layout with escaped separators), and a key object without its own `toString()` fails the call before the method runs. A background refresh carries the caller's Reactor `Context` / coroutine context elements; in `core` it runs on the executor thread without the caller's `ThreadLocal` state
 6. **GlobalLockSupport**: Optional interface a cache bean implements to enable `isLocalLock = false` (Redis `SET NX PX` + compare-and-delete). Without it, `isLocalLock = false` fails fast
 
 ### Design Patterns

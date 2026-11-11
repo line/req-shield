@@ -88,12 +88,48 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Cache key layout
 
-- The Spring adapters store every entry under `"{cacheName}::{key}"` (the same convention as Spring's `RedisCacheManager`),
-  where `key` is the SpEL result or the `KeyGenerator` output. `@ReqShieldCacheEvict` applies the same rule, so an evict
-  with the same `cacheName` and `key` always targets the entry written by `@ReqShieldCacheable`.
+- The Spring adapters store every entry under `"{cacheName}::{key}"` (the same convention as Spring's `RedisCacheManager`).
+  `@ReqShieldCacheEvict` applies the same rule, so an evict with the same `cacheName` and the same key source always
+  targets the entry written by `@ReqShieldCacheable`.
 - Lock keys are derived from that namespaced key and prefixed with `reqshield:lock:`, so two caches that happen to use the
   same raw key never share a lock or an entry.
 - If you call `ReqShield` directly (core / core-reactor / core-kotlin-coroutine), the key you pass is used as is.
+- `key` comes from one of three sources:
+    - **Method arguments** (neither `key` nor `keyGenerator` is set), in the layout of Spring's `SimpleKeyGenerator`:
+      no argument gives `SimpleKey []`, one argument gives its `toString()`, several give `SimpleKey [a, b]`.
+    - **A SpEL `key`.** A text is used as is. An array, a collection or a map (for example `key = "{#tenant, #id}"`)
+      is written by content, as `[tenant, id]`. Any other value is converted by Spring (an enum by its name), or is
+      its `toString()` when Spring has no converter for it (a data class, for example).
+    - **A `keyGenerator` bean.** The `toString()` of its result is used as is, so a custom generator has to keep
+      different arguments apart itself. In the coroutine adapter the generator also receives the `Continuation`.
+- Where a value is written by content or inside `SimpleKey [...]`, its text is escaped so that it cannot run into the
+  next value: `,` `[` `]` `{` `}` `=` and the backslash get a backslash in front, and an empty text is written as `\e`.
+  A single argument escapes only the backslash. `null` is always written as `\0`. For example, `("a, b", "c")` gives
+  `SimpleKey [a\, b, c]`, and a data class argument next to another argument gives `SimpleKey [t, Filter(a\=1\, b\=2)]`.
+- Use the same key source on the `@ReqShieldCacheable` method and the `@ReqShieldCacheEvict` method of an entry,
+  because the sources do not write every value the same way. For one text argument `id`, the method-argument key and
+  `key = "#id"` differ in two cases. The method-argument key writes a backslash twice (`tenant\alice` becomes
+  `tenant\\alice`), and SpEL keeps the text as is. The method-argument key writes `null` as `\0`, and a SpEL key that
+  is `null` fails the call. If the read uses the method arguments and the evict uses `key = "#id"`, the evict misses
+  the entry of an `id` that holds a backslash, and the read keeps returning the old value. Set the same `key` on both methods:
+  ```kotlin
+  @ReqShieldCacheable(cacheName = "product", key = "#id")
+  fun getProduct(id: String): Product
+
+  @ReqShieldCacheEvict(cacheName = "product", key = "#id")
+  fun removeProduct(id: String)
+  ```
+- Two argument lists of a method then get different keys, as long as the `toString()` of each value tells its own
+  values apart. A class whose `toString()` joins free text does not: `Pair("a, b", "c")` and `Pair("a", "b, c")` are both
+  `(a, b, c)`. Give such a method a `key`. The same holds for a parameter typed `Any` that takes the text `[a, b]` in
+  one call and a list in another.
+- A key object whose class does not override `toString()` fails the call with an `IllegalArgumentException`, because
+  its text would be only the class name and the hash code. This applies to a method argument on the default path, to
+  the result of a SpEL `key`, and to the result of a `keyGenerator` bean. The key is built before the method is called,
+  so the annotated method does not run - neither a `@ReqShieldCacheable` method nor a `@ReqShieldCacheEvict` one.
+  Only the class of the value itself is checked: an object that prints such an object inside its own `toString()`
+  (a `Pair` of one) passes, and its entry is then never hit.
+- A collection or a map that contains itself is rejected the same way.
 
 ### Global lock guidance
 
@@ -153,6 +189,34 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - `@ReqShieldCacheEvict` evicts **after** the annotated method completes successfully (Spring's `@CacheEvict` default).
   If the method throws, nothing is evicted; if the eviction itself fails, that failure propagates to the caller.
 - In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
+- **Known limitation:** a value that is computed before an eviction can be written after it. A request returns its
+  data first and writes the cache asynchronously, and a background refresh can be in flight, so an entry evicted in
+  that window comes back with the old value until its TTL ends. The eviction and the write can run on different
+  nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
+  version of the data in the cache key.
+
+### Background refresh and the caller's context
+
+- Once an entry is older than `decisionForUpdate` percent of its TTL, a read returns it and starts a refresh in the
+  background, unless another request already holds the update lock of that key. The refresh calls the supplier on its
+  own and can still be running after the caller has its data.
+- `core-reactor` and the WebFlux adapter subscribe the refresh with the caller's Reactor `Context`, so a supplier that
+  reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
+  transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
+  from inside the transaction.
+- In `core-reactor` and the WebFlux adapter, the cache functions and the lock functions of a global lock see the
+  caller's Reactor `Context` too, on a cache miss and in a refresh. This includes the cache write and the lock
+  release, which run in the background after the caller has its data. Functions that choose the cache or the lock
+  store from the `Context` (one store for each tenant, for example) therefore write and release in the store that
+  the read and the lock used.
+- `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
+  coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
+  the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A
+  transaction of the caller that lives in its coroutine context (the Reactor `Context` of a reactive transaction) is
+  handed over too; a supplier that must not run in it should not be refreshed from inside the transaction.
+- `core` and the blocking Spring adapter run the refresh on the executor thread. `ThreadLocal` state of the caller
+  (`SecurityContextHolder`, `RequestContextHolder`, MDC, a transaction) is **not** available there. Pass what the
+  method needs as arguments, or supply a `reqShieldExecutor` that propagates the context your application needs.
 
 ### Waiting for another request (lock not acquired)
 
@@ -161,6 +225,12 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   cache outage and the request falls back to calling the supplier itself right away.
 - When the attempts are exhausted the request calls the supplier once. A supplier failure is propagated as a
   `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
+- In `core-kotlin-coroutine`, a `CancellationException` thrown by the supplier or by a cache get/set function while
+  the calling coroutine is still active (a `withTimeout` inside the supplier, for example) is a failure of that
+  function. It is reported as `ClientException` like any other failure. Only the cancellation of the calling coroutine
+  itself propagates unwrapped. A failing lock function is not wrapped: on a cache miss its exception reaches the
+  caller as thrown (a `CancellationException` included), on a refresh it only skips that refresh, and a failed unlock
+  is logged.
 
 ### Thread pools and schedulers
 
