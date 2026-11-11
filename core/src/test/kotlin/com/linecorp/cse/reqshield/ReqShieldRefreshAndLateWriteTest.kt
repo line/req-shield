@@ -168,6 +168,42 @@ class ReqShieldRefreshAndLateWriteTest {
     }
 
     @Test
+    fun theFirstLateWriteShouldStayWhenTwoCallsBothOutlastTheLockTimeout() {
+        // The limit of the rule: the entry holds no start time, so the call that ends first wins, also when it
+        // started first. The second call here started later, and its result is not written.
+        val shield = shield(lockTimeoutMillis = 50)
+        val firstStarted = CountDownLatch(1)
+        val first =
+            executor.submit<Product?> {
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        firstStarted.countDown()
+                        Thread.sleep(300)
+                        oldProduct
+                    },
+                    10_000,
+                ).value
+            }
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+        // The lock of the first call has timed out, so the second call takes it and calls the supplier too.
+        Thread.sleep(100)
+        val second =
+            shield.getAndSetReqShieldData(
+                key,
+                {
+                    Thread.sleep(400)
+                    newProduct
+                },
+                10_000,
+            ).value
+
+        assertEquals(oldProduct, first.get(2, TimeUnit.SECONDS))
+        assertEquals(newProduct, second, "each caller gets the result of its own supplier call")
+        assertEquals(oldProduct, cache[key]?.value)
+    }
+
+    @Test
     fun aNewEntryShouldBeWrittenAfterALockTimeoutWhenNoOtherRequestWroteOne() {
         val shield = shield(lockTimeoutMillis = 50)
         val supplier =

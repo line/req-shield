@@ -67,7 +67,7 @@ open class ReqShieldAspect<T>(
         private set
 
     /**
-     * Runs the fire-and-forget cache writes of every ReqShield this aspect creates: the application's bean named
+     * Runs the cache writes and the background refreshes of every ReqShield this aspect creates: the application's bean named
      * `reqShieldCoroutineScope` when there is one, otherwise a scope owned by this aspect.
      *
      * The library registers no bean of its own, so an application bean of that name replaces the default instead of

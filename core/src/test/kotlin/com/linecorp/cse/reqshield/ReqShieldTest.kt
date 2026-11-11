@@ -405,12 +405,26 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldFreeTheLocalLockRightAwayWhenTheExecutorIsShutDown() {
-        val isolatedKey = "rejected-write-${java.util.UUID.randomUUID()}"
+    fun shouldWriteANewEntryAndFreeTheLocalLockWhenTheExecutorIsShutDown() {
+        val isolatedKey = "shut-down-executor-${java.util.UUID.randomUUID()}"
         val shutDownExecutor = Executors.newSingleThreadExecutor().apply { shutdown() }
-        val shield = ReqShield(ReqShieldConfiguration<Product>({ _, _, _ -> true }, { null }, executor = shutDownExecutor))
+        val written = AtomicReference<ReqShieldData<Product>>()
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration<Product>(
+                    { _, data, _ ->
+                        written.set(data)
+                        true
+                    },
+                    { null },
+                    executor = shutDownExecutor,
+                ),
+            )
 
         assertEquals(value, shield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis).value)
+
+        // The write of a new entry does not use the executor
+        assertEquals(value, written.get()?.value)
 
         // A leaked lock would stay held for lockTimeoutMillis and make the next request wait out its polling budget
         assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.CREATE))

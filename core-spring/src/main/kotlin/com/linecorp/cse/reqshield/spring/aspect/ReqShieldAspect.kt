@@ -295,8 +295,8 @@ class ReqShieldAspect<T>(
     private fun createOwnedExecutor(): ExecutorService {
         val threadCounter = AtomicLong(0)
 
-        // Daemon threads, so a pending cache write can never block JVM shutdown.
-        // Named apart from the core default pool so a thread dump shows which one ran a write.
+        // Daemon threads, so a pending refresh can never block JVM shutdown.
+        // Named apart from the core default pool so a thread dump shows which one ran a refresh.
         return Executors.newScheduledThreadPool(
             maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
         ) { runnable ->

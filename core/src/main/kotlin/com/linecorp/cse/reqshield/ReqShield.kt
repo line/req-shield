@@ -165,8 +165,12 @@ class ReqShield<T>(
 
     /**
      * Writes [reqShieldData] and releases the lock, unless the lock timed out during the supplier call and another
-     * request wrote the entry in that time. That other request called the supplier later, so its result is the newer
-     * one and this late write would replace it with older data.
+     * request wrote the entry in that time. So after a lock timeout the first write stays. In the usual case, one slow
+     * call that a later and faster call overtook, the entry that stays is the newer one, and the late write would
+     * replace it with older data.
+     *
+     * An entry does not hold the start time of its supplier call, so this rule cannot order two calls that both
+     * outlast the lock timeout: the entry of the call that ended first stays, also when that call started first.
      *
      * The cache is read again only after a lock timeout, so a supplier that is faster than the timeout costs no
      * extra read. [seenCreatedAt] is the createdAt of the entry this request read before its supplier call, or null

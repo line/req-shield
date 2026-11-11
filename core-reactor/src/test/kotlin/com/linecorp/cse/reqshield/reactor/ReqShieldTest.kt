@@ -322,7 +322,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldEmitAfterTheCacheWriteAndTheLockReleaseOfANewEntry() {
+    fun shouldEmitAfterTheCacheWriteOfANewEntry() {
         lateinit var pendingWrite: MonoSink<Boolean>
         every { cacheGetter(key) } returns Mono.empty()
         every { cacheSetter(key, any(), any()) } returns Mono.create { pendingWrite = it }

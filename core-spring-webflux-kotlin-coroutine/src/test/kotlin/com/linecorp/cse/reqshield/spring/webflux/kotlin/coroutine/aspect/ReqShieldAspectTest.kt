@@ -106,7 +106,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .find { it.name == name && it.parameters.size == 2 }
             ?.javaMethod!!
 
-    /** Cache writes are fire-and-forget, so tests that assert on them must wait for the scope. */
+    /** Cache writes and refreshes run on the scope, so tests that assert on them must wait for the scope. */
     private suspend fun CoroutineScope.awaitBackgroundWrites() {
         coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
     }
