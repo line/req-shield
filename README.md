@@ -106,6 +106,19 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   next value: `,` `[` `]` `{` `}` `=` and the backslash get a backslash in front, and an empty text is written as `\e`.
   A single argument escapes only the backslash. `null` is always written as `\0`. For example, `("a, b", "c")` gives
   `SimpleKey [a\, b, c]`, and a data class argument next to another argument gives `SimpleKey [t, Filter(a\=1\, b\=2)]`.
+- Use the same key source on the `@ReqShieldCacheable` method and the `@ReqShieldCacheEvict` method of an entry,
+  because the sources do not write every value the same way. For one text argument `id`, the method-argument key and
+  `key = "#id"` differ in two cases. The method-argument key writes a backslash twice (`tenant\alice` becomes
+  `tenant\\alice`), and SpEL keeps the text as is. The method-argument key writes `null` as `\0`, and a SpEL key that
+  is `null` fails the call. If the read uses the method arguments and the evict uses `key = "#id"`, the evict misses
+  the entry of an `id` that holds a backslash, and the read keeps returning the old value. Set the same `key` on both methods:
+  ```kotlin
+  @ReqShieldCacheable(cacheName = "product", key = "#id")
+  fun getProduct(id: String): Product
+
+  @ReqShieldCacheEvict(cacheName = "product", key = "#id")
+  fun removeProduct(id: String)
+  ```
 - Two argument lists of a method then get different keys, as long as the `toString()` of each value tells its own
   values apart. A class whose `toString()` joins free text does not: `Pair("a, b", "c")` and `Pair("a", "b, c")` are both
   `(a, b, c)`. Give such a method a `key`. The same holds for a parameter typed `Any` that takes the text `[a, b]` in
@@ -191,6 +204,10 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
   from inside the transaction.
+- In `core-reactor` and the WebFlux adapter, the lock functions of a global lock see the caller's Reactor `Context`
+  too, both when they take a lock and when they release it, on a cache miss and in a refresh. Functions that choose
+  the lock store from the `Context` (one store for each tenant, for example) therefore release a lock in the store
+  that granted it.
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
   coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
   the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A

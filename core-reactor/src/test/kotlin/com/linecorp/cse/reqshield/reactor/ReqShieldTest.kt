@@ -43,6 +43,7 @@ import reactor.core.publisher.MonoSink
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
 import reactor.test.StepVerifier
+import reactor.util.context.Context
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
@@ -1023,7 +1024,7 @@ class ReqShieldTest : BaseReqShieldTest {
             Mono.defer {
                 try {
                     @Suppress("UNCHECKED_CAST")
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token) as Mono<Unit>
+                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
                 } catch (e: InvocationTargetException) {
                     Mono.error(e.cause ?: e)
                 }
