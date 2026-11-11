@@ -18,7 +18,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
-version = "1.1.0"
+version = "1.2.0"
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -55,8 +55,20 @@ allprojects {
     dependencies {
         if (project.name.endsWith("-example")) {
             // Example applications are not published; they run on the runtime of the compiler that builds them.
-            implementation(kotlin("stdlib", rootProject.libs.versions.kotlin.get()))
-            implementation(kotlin("reflect", rootProject.libs.versions.kotlin.get()))
+            implementation(
+                kotlin(
+                    "stdlib",
+                    rootProject.libs.versions.kotlin
+                        .get(),
+                ),
+            )
+            implementation(
+                kotlin(
+                    "reflect",
+                    rootProject.libs.versions.kotlin
+                        .get(),
+                ),
+            )
         } else {
             // `api` keeps the stdlib in the published POM's compile scope (as the Kotlin plugin's default did),
             // because the public API exposes Kotlin types such as function types to Java callers.
@@ -120,16 +132,29 @@ allprojects {
                     // Spring Boot's dependency management (example modules) aligns every org.jetbrains.kotlin
                     // artifact to the project's Kotlin version, including the compiler that ktlint embeds,
                     // and ktlint fails with that compiler. Keep the versions ktlint asks for.
-                    "org.jetbrains.kotlin" -> useVersion(requested.version!!)
+                    "org.jetbrains.kotlin" -> {
+                        useVersion(requested.version!!)
+                    }
+
                     // ktlint 1.0.1 brings logback 1.3.5, which has known vulnerabilities.
-                    "ch.qos.logback" -> useVersion(rootProject.libs.versions.logback.get())
+                    "ch.qos.logback" -> {
+                        useVersion(
+                            rootProject.libs.versions.logback
+                                .get(),
+                        )
+                    }
                 }
             }
         }
         configurations.matching { it.name == "kotlinBouncyCastleConfiguration" }.configureEach {
             resolutionStrategy.eachDependency {
                 // The Kotlin Gradle plugin 2.4.21 brings bcprov 1.84, which has known vulnerabilities.
-                if (requested.group == "org.bouncycastle") useVersion(rootProject.libs.versions.bouncycastle.get())
+                if (requested.group == "org.bouncycastle") {
+                    useVersion(
+                        rootProject.libs.versions.bouncycastle
+                            .get(),
+                    )
+                }
             }
         }
     }
