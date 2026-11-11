@@ -171,6 +171,23 @@ class ReqShieldAspectCacheKeyIntegrationTest {
     }
 
     @Test
+    fun spelArrayAndMapKeysShouldBeWrittenByContent() {
+        service.bySpelArray("a,b", "c")
+        service.bySpelMap("a,b", "c")
+        awaitEntries(2)
+
+        assertEquals(setOf("array::[a\\,b, c]", "map::{tenant=a\\,b, id=c}"), cache.keys())
+    }
+
+    @Test
+    fun evictMethodShouldNotRunWhenItsKeyIsRejected() {
+        assertThrows<IllegalArgumentException> { service.evictSearch(Query("Aa")) }
+
+        // The key is built before the method is called, so a rejected key stops the method body too
+        assertEquals(0, service.callCount())
+    }
+
+    @Test
     fun evictShouldTargetTheEntryOfTheSameArguments() {
         service.document("a, b", "c")
         service.document("a", "b, c")
@@ -269,6 +286,23 @@ class ReqShieldAspectCacheKeyIntegrationTest {
 
         @ReqShieldCacheable(cacheName = "generated", keyGenerator = "textKeyGenerator")
         open fun byGenerator(text: String): String = "result-of-$text"
+
+        @ReqShieldCacheable(cacheName = "array", key = "new String[]{#tenant, #id}")
+        open fun bySpelArray(
+            tenant: String,
+            id: String,
+        ): String = "array($tenant|$id)"
+
+        @ReqShieldCacheable(cacheName = "map", key = "{tenant: #tenant, id: #id}")
+        open fun bySpelMap(
+            tenant: String,
+            id: String,
+        ): String = "map($tenant|$id)"
+
+        @ReqShieldCacheEvict(cacheName = "search")
+        open fun evictSearch(query: Query) {
+            counter.incrementAndGet()
+        }
 
         @ReqShieldCacheEvict(cacheName = "doc")
         open fun evictDocument(

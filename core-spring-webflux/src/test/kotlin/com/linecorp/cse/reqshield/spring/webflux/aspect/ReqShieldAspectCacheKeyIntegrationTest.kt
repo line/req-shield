@@ -138,6 +138,14 @@ class ReqShieldAspectCacheKeyIntegrationTest {
     }
 
     @Test
+    fun evictMethodShouldNotRunWhenItsKeyIsRejected() {
+        assertThrows<IllegalArgumentException> { service.evictSearch(Query("Aa")).block() }
+
+        // The key is built before the method is called, so a rejected key stops the method body too
+        assertEquals(0, service.callCount())
+    }
+
+    @Test
     fun evictShouldTargetTheEntryOfTheSameArguments() {
         service.document("a, b", "c").block()
         service.document("a", "b, c").block()
@@ -205,6 +213,9 @@ class ReqShieldAspectCacheKeyIntegrationTest {
 
         @ReqShieldCacheable(cacheName = "search", keyGenerator = "queryKeyGenerator")
         open fun searchByGenerator(text: String): Mono<String> = Mono.fromCallable { counter.incrementAndGet().let { "result-of-$text" } }
+
+        @ReqShieldCacheEvict(cacheName = "search")
+        open fun evictSearch(query: Query): Mono<Boolean> = Mono.fromCallable { counter.incrementAndGet() > 0 }
 
         @ReqShieldCacheEvict(cacheName = "doc")
         open fun evictDocument(
