@@ -14,12 +14,19 @@ on:
 
 concurrency:
   group: publish-${{ inputs.target }}
-  cancel-in-progress: true
+  # A release that is cancelled between the publication and the push would leave Maven Central without its tag.
+  cancel-in-progress: ${{ inputs.target != 'release' }}
+
+permissions:
+  contents: read
 
 jobs:
   publish:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
+    permissions:
+      # A release pushes the version commit and the tag, and creates the GitHub release.
+      contents: write
     services:
       redis:
         image: redis:6.2.7-alpine
@@ -32,6 +39,14 @@ jobs:
           --health-retries 5
 
     steps:
+      - name: Allow a release from the default branch only
+        if: inputs.target == 'release' && github.ref_name != github.event.repository.default_branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          echo "::error::Run the release target on the branch '$DEFAULT_BRANCH', not on '$GITHUB_REF_NAME'."
+          exit 1
+
       - name: Checkout code
         uses: actions/checkout@v5
 
@@ -55,6 +70,23 @@ jobs:
       - name: Set release version
         if: inputs.target == 'release'
         run: sed -i 's/snapshotBuild=true/snapshotBuild=false/' gradle.properties
+
+      # The commit stays in this job until the publication succeeded, so a failed run leaves the repository as it was.
+      - name: Raise the minor version and commit it
+        id: version
+        if: inputs.target == 'release'
+        run: |
+          version="$(bash .github/scripts/bump-minor-version.sh build.gradle.kts)"
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "::error::The tag $tag exists already, so version $version was released before."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --message "Upgrade project version to $version" -- build.gradle.kts
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Build with Gradle
         run: ./gradlew build
@@ -81,6 +113,26 @@ jobs:
           ORG_GRADLE_PROJECT_signingKeyId: ${{ secrets.GPG_SECRET_KEY_ID }}
           ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_SECRET_KEY }}
           ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_SECRET_PASSWORD }}
+
+      # The tag points at the version commit, which is the source of the published artifacts.
+      # --atomic pushes the commit and the tag together or not at all.
+      - name: Push the version commit and the tag
+        if: inputs.target == 'release'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          if ! git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/$TAG"; then
+            echo "::error::${TAG#v} is on Maven Central, but the version commit and the tag $TAG were not pushed. Set the version in build.gradle.kts and create the tag by hand."
+            exit 1
+          fi
+
+      - name: Create the GitHub release with generated notes
+        if: inputs.target == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
 
       - name: Cleanup Gradle Cache
         if: always()
