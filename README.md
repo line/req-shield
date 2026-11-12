@@ -195,6 +195,23 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
   version of the data in the cache key.
 
+### Lock timeouts and work modes
+
+- If a supplier call takes longer than `lockTimeoutMillis`, the lock can pass to another request. Before such a late
+  write, the cache is read one more time. If another request wrote the entry in that time, the late write is skipped:
+  after a lock timeout the first write stays. In the usual case, one slow call that a later and faster call overtook,
+  the entry that stays is the newer one. If two calls both outlast the lock timeout, the entry of the call that ended
+  first stays, also when that call started first, because an entry does not hold the start time of its supplier call.
+  A supplier that is faster than the lock timeout causes no extra read. Keep `lockTimeoutMillis` longer than the
+  slowest supplier call.
+- `reqShieldWorkMode` sets where requests are collapsed:
+    - `CREATE_AND_UPDATE_CACHE` (default): on the creation and on the refresh of an entry, with the configured lock.
+    - `ONLY_CREATE_CACHE`: the configured lock is used for the creation only. A refresh takes a local lock of this
+      JVM, so one instance runs one refresh of a key at a time and the global lock gets no call for a refresh.
+      Instances do not see each other's refreshes in this mode.
+    - `ONLY_UPDATE_CACHE`: the configured lock is used for the refresh only. On a cache miss each request calls the
+      supplier.
+
 ### Background refresh and the caller's context
 
 - Once an entry is older than `decisionForUpdate` percent of its TTL, a read returns it and starts a refresh in the

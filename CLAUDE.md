@@ -101,7 +101,7 @@ Contains shared:
 
 ### Work Modes
 - **CREATE_AND_UPDATE_CACHE**: Full functionality (default)
-- **ONLY_CREATE_CACHE**: Request collapsing (lock) applies only when a cache entry is being created; refreshes of existing entries still happen but without a lock, so every request past the `decisionForUpdate` threshold may trigger a refresh
+- **ONLY_CREATE_CACHE**: The configured lock applies only when a cache entry is being created. A refresh of an existing entry takes a local lock of the JVM instead (never the global lock), so one instance runs one refresh of a key at a time
 - **ONLY_UPDATE_CACHE**: Request collapsing (lock) applies only when an existing entry is being refreshed; on a cache miss every request calls the supplier and writes the cache without a lock
 
 ## Testing Guidelines
