@@ -5,6 +5,7 @@ on:
       - main
     paths:
       - ".github/workflows/**"
+      - ".github/scripts/**"
 
 concurrency:
   group: actionlint-${{ github.event.pull_request.number || github.sha }}
@@ -24,3 +25,12 @@ jobs:
         uses: reviewdog/action-actionlint@v1
         with:
           fail_on_error: true
+
+  scripts:
+    name: Test Workflow Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Test the version bump script
+        run: bash .github/scripts/bump-minor-version.test.sh
