@@ -57,6 +57,14 @@ The library is organized into several core modules:
 ./gradlew jacocoTestReport        # Generate test coverage report
 ```
 
+### Releasing
+- Start the `Publish to Maven Central` workflow (`.github/workflows/publish.yml`) by hand on `main`.
+- `dev` publishes the snapshot of the version in `build.gradle.kts`.
+- `release` raises the minor version in `build.gradle.kts` (`1.2.0` becomes `1.3.0`), commits that, publishes the new
+  version, pushes the commit with the tag `v1.3.0`, and creates the GitHub release with generated notes. Do not raise
+  the version by hand before a release. A patch or a major release still needs a manual version change.
+- `.github/scripts/bump-minor-version.sh` changes the version; `bump-minor-version.test.sh` tests it.
+
 ### Running Examples
 ```bash
 ./gradlew :req-shield-spring-boot3-example:bootRun                       # Spring Boot 3.5 (the supported minimum)
