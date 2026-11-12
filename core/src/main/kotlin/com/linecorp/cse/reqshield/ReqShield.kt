@@ -135,11 +135,6 @@ class ReqShield<T>(
         }
     }
 
-    /**
-     * Calls the supplier and writes its result to the cache before it returns. The write runs on the caller's thread:
-     * a write that waits on the executor could run after an evict that followed the reply and put the evicted value
-     * back, and it would wait behind the refreshes queued there while other requests wait for this entry.
-     */
     private fun createReqShieldData(
         key: String,
         callable: Callable<T?>,
@@ -153,11 +148,8 @@ class ReqShield<T>(
                 executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
-        try {
+        runInBackground(key, lockType, token) {
             writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt = null)
-        } catch (e: Exception) {
-            // The caller has its data: a failed cache write must not cost it the reply
-            log.error("Failed to write the cache for key '{}'", key, e)
         }
 
         return reqShieldData
@@ -211,14 +203,14 @@ class ReqShield<T>(
     }
 
     /**
-     * Runs the refresh [task] on the configured executor. The task releases the lock identified by [token] itself, so when the
+     * Runs [task] on the configured executor. The task releases the lock identified by [token] itself, so when the
      * executor rejects it - a saturated bounded pool, or one already shut down - the lock is released here instead.
-     * Only that refresh is dropped: the caller still gets its data.
+     * Only that background cache write or refresh is dropped: the caller still gets its data.
      */
     private fun runInBackground(
         key: String,
         lockType: LockType,
-        token: String,
+        token: String?,
         task: () -> Unit,
     ) {
         try {
@@ -226,8 +218,10 @@ class ReqShield<T>(
                 .runAsync(task, reqShieldConfig.executor)
                 .whenComplete { _, e -> if (e != null) logAsyncFailure(key, e) }
         } catch (e: RejectedExecutionException) {
-            log.warn("Executor rejected the cache refresh for key '{}', so it is skipped", key, e)
-            releaseQuietly(key, lockType, token, "after the executor rejected its task")
+            log.warn("Executor rejected the background cache task for key '{}', so it is skipped", key, e)
+            if (token != null) {
+                releaseQuietly(key, lockType, token, "after the executor rejected its task")
+            }
         }
     }
 

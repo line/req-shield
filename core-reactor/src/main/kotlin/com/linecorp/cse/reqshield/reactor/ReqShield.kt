@@ -26,7 +26,6 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
-import reactor.core.publisher.Sinks
 import reactor.util.context.ContextView
 import java.time.Duration
 import java.util.concurrent.Callable
@@ -183,14 +182,6 @@ class ReqShield<T>(
             )
     }
 
-    /**
-     * Calls the supplier, writes its result to the cache and emits it after that write ended. A caller that got its
-     * data before the write could evict the entry first, and the write would then put the evicted value back.
-     *
-     * The write is subscribed on its own and the caller only waits for it. So the write goes on when the caller
-     * cancels after its supplier call ended: the requests that wait for this entry would each call the supplier
-     * themselves if the write stopped.
-     */
     private fun createReqShieldData(
         key: String,
         callable: Callable<Mono<T?>>,
@@ -202,7 +193,7 @@ class ReqShield<T>(
         lockedAtNanos: Long,
         callerContext: ContextView,
     ): Mono<ReqShieldData<T>> {
-        // Hands the lock to the cache write, which releases it after writing. False when a cancel
+        // Hands the lock to the asynchronous cache write, which releases it after writing. False when a cancel
         // already released it: the write is then skipped, because it would run without the lock.
         fun handToCacheWrite(): Boolean = owner == null || owner.compareAndSet(LockOwner.CREATION, LockOwner.CACHE_WRITE)
 
@@ -212,29 +203,24 @@ class ReqShield<T>(
             }
         }
 
-        // Completes when the cache write ended, also when it failed: the caller has its data either way.
-        fun writeCache(reqShieldData: ReqShieldData<T>): Mono<Void> {
-            val writeEnded = Sinks.empty<Void>()
+        fun writeCache(reqShieldData: ReqShieldData<T>) {
+            // Async fire-and-forget cache storage (matches coroutine implementation)
             writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, null, callerContext)
                 // Subscribed on its own, so the cache function sees the caller's Reactor Context only when it is handed over.
                 .contextWrite(callerContext)
-                .doFinally { writeEnded.tryEmitEmpty() }
                 .subscribe(
                     { /* success - no action needed */ },
                     { e -> log.error("Failed to set cache for key '{}': {}", key, e.message, e) },
                 )
-            return writeEnded.asMono()
         }
 
         return executeCallable(callable)
             .doOnError { releaseUnlessHandedOver() }
             .map { data -> buildReqShieldData(data, timeToLiveMillis) }
             .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
-            .flatMap { reqShieldData ->
+            .doOnNext { reqShieldData ->
                 if (handToCacheWrite()) {
-                    writeCache(reqShieldData).thenReturn(reqShieldData)
-                } else {
-                    Mono.just(reqShieldData)
+                    writeCache(reqShieldData)
                 }
             }.doOnCancel {
                 // A caller cancelled while the supplier runs (client disconnect, timeout()) never reaches

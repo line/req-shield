@@ -36,10 +36,8 @@ class LibAutoConfigurationBootTest {
     @Test
     fun userDefinedReqShieldExecutorShouldStartAndBeUsed() {
         run(ApplicationWithOwnExecutor::class.java).use {
-            val cache = it.getBean(InMemoryReqShieldCache::class.java)
-            // A new entry is written on the caller's thread, so only a refresh shows which executor the aspect uses.
-            cache.storeOldEntry("boot::boot")
             it.getBean(CachedService::class.java).get("boot")
+            val cache = it.getBean(InMemoryReqShieldCache::class.java)
 
             await().atMost(Duration.ofSeconds(5)).until { cache.lastWriterThread != null }
             assertEquals(USER_EXECUTOR_THREAD, cache.lastWriterThread)
@@ -89,11 +87,6 @@ class LibAutoConfigurationBootTest {
         var lastWriterThread: String? = null
 
         override fun get(key: String): ReqShieldData<String>? = store[key]
-
-        /** Stores an entry that has used 90 % of its 10 s, without a call of [put]. */
-        fun storeOldEntry(key: String) {
-            store[key] = ReqShieldData("old", ReqShieldData.Status.NEW, System.currentTimeMillis() - 9_000, 10_000)
-        }
 
         override fun put(
             key: String,

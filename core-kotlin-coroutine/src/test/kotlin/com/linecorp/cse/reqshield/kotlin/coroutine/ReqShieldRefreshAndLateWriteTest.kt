@@ -25,23 +25,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.job
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * The write of a new entry before the reply, the refresh guard of ONLY_CREATE_CACHE, and the late cache write after a
- * lock timeout. The tests use a map as the cache, so each assertion reads the entry that a request would get. They run
+ * The refresh guard of ONLY_CREATE_CACHE and the late cache write after a lock timeout. The tests use a map as the cache, so each assertion reads the entry that a request would get. They run
  * in real time, because the lock timeout is measured with the system clock.
  */
 class ReqShieldRefreshAndLateWriteTest {
@@ -61,13 +57,12 @@ class ReqShieldRefreshAndLateWriteTest {
     private fun shield(
         workMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
         lockTimeoutMillis: Long = 3000,
-        setCache: suspend (String, ReqShieldData<Product>) -> Unit = { cacheKey, data -> cache[cacheKey] = data },
         getCache: suspend (String) -> ReqShieldData<Product>? = { cacheKey -> cache[cacheKey] },
     ): ReqShield<Product> =
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = { cacheKey, data, _ ->
-                    setCache(cacheKey, data)
+                    cache[cacheKey] = data
                     true
                 },
                 getCacheFunction = { cacheKey ->
@@ -90,44 +85,6 @@ class ReqShieldRefreshAndLateWriteTest {
     private suspend fun awaitCachedValue(expected: Product) =
         withTimeout(2_000) {
             while (cache[key]?.value != expected) delay(10)
-        }
-
-    @Test
-    fun aNewEntryShouldBeInTheCacheWhenTheCallReturns() =
-        runBlocking {
-            val shield =
-                shield(setCache = { cacheKey, data ->
-                    delay(100)
-                    cache[cacheKey] = data
-                })
-
-            shield.getAndSetReqShieldData(key, { newProduct }, 10_000)
-
-            assertEquals(newProduct, cache[key]?.value)
-            assertEquals(2, cacheReads.get(), "only the first read and the recheck after the lock")
-        }
-
-    @Test
-    fun theWriteOfANewEntryShouldGoOnWhenTheCallerIsCancelledAfterItsSupplierCall() =
-        runBlocking {
-            val writeStarted = CompletableDeferred<Unit>()
-            val finishWrite = CompletableDeferred<Unit>()
-            val shield =
-                shield(setCache = { cacheKey, data ->
-                    writeStarted.complete(Unit)
-                    finishWrite.await()
-                    cache[cacheKey] = data
-                })
-
-            val caller = launch { shield.getAndSetReqShieldData(key, { newProduct }, 10_000) }
-            writeStarted.await()
-            caller.cancelAndJoin()
-            finishWrite.complete(Unit)
-
-            awaitCachedValue(newProduct)
-            awaitScopeTasks()
-            // The write also released the lock, so the next request can take it at once.
-            assertTrue(KeyLocalLock(3000).tryLock(key, LockType.CREATE) != null)
         }
 
     @Test
@@ -192,9 +149,10 @@ class ReqShieldRefreshAndLateWriteTest {
                     },
                     10_000,
                 )
+            awaitScopeTasks()
 
             assertEquals(newProduct, result.value, "the caller still gets the result of its own supplier call")
-            assertEquals(other, cache[key], "the entry of the later supplier call must stay")
+            assertEquals(other, cache[key], "the entry that the other request wrote must stay")
         }
 
     @Test
@@ -210,8 +168,21 @@ class ReqShieldRefreshAndLateWriteTest {
                 },
                 10_000,
             )
+            awaitScopeTasks()
 
             assertEquals(newProduct, cache[key]?.value)
+        }
+
+    @Test
+    fun aNewEntryShouldBeWrittenWithoutAnExtraCacheReadWhileTheLockIsValid() =
+        runBlocking {
+            val shield = shield(lockTimeoutMillis = 3000)
+
+            shield.getAndSetReqShieldData(key, { newProduct }, 10_000)
+            awaitScopeTasks()
+
+            assertEquals(newProduct, cache[key]?.value)
+            assertEquals(2, cacheReads.get(), "only the first read and the recheck after the lock")
         }
 
     @Test
@@ -276,6 +247,7 @@ class ReqShieldRefreshAndLateWriteTest {
                 },
                 10_000,
             )
+            awaitScopeTasks()
 
             assertEquals(3, cacheReads.get())
             assertEquals(newProduct, cache[key]?.value)

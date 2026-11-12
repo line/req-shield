@@ -295,34 +295,7 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldGoOnWithTheCacheWriteWhenCallerCancelsWhileItWaitsForTheWrite() {
-        lateinit var pendingWrite: MonoSink<Boolean>
-        var writeCancelled = false
-        every { cacheGetter(key) } returns Mono.empty()
-        every { cacheSetter(key, any(), any()) } returns
-            Mono.create<Boolean> { pendingWrite = it }.doOnCancel { writeCancelled = true }
-        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
-        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
-        val shield =
-            ReqShield(
-                ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()),
-            )
-
-        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
-            .expectSubscription()
-            .expectNoEvent(Duration.ofMillis(100))
-            .thenCancel()
-            .verify()
-
-        // The write already owns the lock, so the cancellation must neither stop the write nor release the lock early
-        assertEquals(false, writeCancelled)
-        verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
-        pendingWrite.success(true)
-        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
-    }
-
-    @Test
-    fun shouldEmitAfterTheCacheWriteOfANewEntry() {
+    fun shouldReleaseLockOnlyAfterCacheWriteWhenCallerCancelsAfterValueIsEmitted() {
         lateinit var pendingWrite: MonoSink<Boolean>
         every { cacheGetter(key) } returns Mono.empty()
         every { cacheSetter(key, any(), any()) } returns Mono.create { pendingWrite = it }
@@ -334,17 +307,35 @@ class ReqShieldTest : BaseReqShieldTest {
             )
 
         StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
-            .expectSubscription()
-            // The caller gets no value while the cache write is pending
-            .expectNoEvent(Duration.ofMillis(100))
-            .then {
-                verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
-                pendingWrite.success(true)
-            }.expectNextMatches { it.value == value }
+            .expectNextMatches { it.value == value }
+            .thenCancel()
+            .verify()
+
+        // The write already owns the lock, so the cancellation must not release it early
+        verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
+        pendingWrite.success(true)
+        verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
+    }
+
+    @Test
+    fun shouldKeepLockUntilAsyncCacheWriteCompletesAfterRecheckMiss() {
+        lateinit var pendingWrite: MonoSink<Boolean>
+        every { cacheGetter(key) } returns Mono.empty()
+        every { cacheSetter(key, any(), any()) } returns Mono.create { pendingWrite = it }
+        every { keyLock.tryLock(key, LockType.CREATE) } returns Mono.just(token)
+        every { keyLock.unLock(key, LockType.CREATE, token) } returns Mono.just(true)
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(cacheSetter, cacheGetter, keyLock = keyLock, scheduler = Schedulers.immediate()),
+            )
+
+        StepVerifier.create(shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+            .expectNextMatches { it.value == value }
             .verifyComplete()
 
-        // The lock did not time out, so the cache is read two times only: the first read and the recheck.
         verify(exactly = 2) { cacheGetter(key) }
+        verify(exactly = 0) { keyLock.unLock(key, LockType.CREATE, token) }
+        pendingWrite.success(true)
         verify(exactly = 1) { keyLock.unLock(key, LockType.CREATE, token) }
         verify(exactly = 1) { callable.call() }
     }

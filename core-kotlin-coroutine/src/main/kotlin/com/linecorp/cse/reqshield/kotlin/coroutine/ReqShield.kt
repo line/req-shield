@@ -159,14 +159,6 @@ class ReqShield<T>(
         }
     }
 
-    /**
-     * Calls the supplier, writes its result to the cache and returns after that write ended. A caller that returned
-     * before the write could evict the entry first, and the write would then put the evicted value back.
-     *
-     * The write runs on the configured scope and the caller only waits for it. So the write goes on when the caller
-     * is cancelled after its supplier call ended: the requests that wait for this entry would each call the supplier
-     * themselves if the write stopped. The scope can still cancel a write that does not return.
-     */
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun createReqShieldData(
         key: String,
@@ -181,16 +173,15 @@ class ReqShield<T>(
                 executeCallable(callable, key, lockType, token),
                 timeToLiveMillis,
             )
-        reqShieldConfig.scope
-            .launch(start = CoroutineStart.ATOMIC) {
-                try {
-                    writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt = null)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log.error("[Req-Shield] failed to create the cache of key '{}'", key, e)
-                }
-            }.join()
+        reqShieldConfig.scope.launch(start = CoroutineStart.ATOMIC) {
+            try {
+                writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt = null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("[Req-Shield] failed to create the cache of key '{}'", key, e)
+            }
+        }
         return reqShieldData
     }
 

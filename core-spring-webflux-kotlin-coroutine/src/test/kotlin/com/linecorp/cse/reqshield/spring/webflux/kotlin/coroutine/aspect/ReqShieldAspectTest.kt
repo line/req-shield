@@ -66,17 +66,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     private val reqShieldAspect: ReqShieldAspect<Product> = spyk(ReqShieldAspect(asyncCache))
     private val targetObject = spyk(TestBean())
     private val argument = mapOf("x" to "paramX", "y" to "paramY")
-
-    /**
-     * The continuation of the annotated suspend function. The aspect resumes it when its coroutine suspended, for
-     * example while it waits for the cache write of a new entry. The tests read the cache and the mocks, not this result.
-     */
-    private val continuation =
-        object : Continuation<Any?> {
-            override val context = EmptyCoroutineContext
-
-            override fun resumeWith(result: Result<Any?>) = Unit
-        }
+    private val mockContinuation = mockk<Continuation<Any?>>()
 
     private val cacheName = "TestCacheName"
     private val cacheKeyGenerator = "customGenerator"
@@ -90,7 +80,8 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
     @BeforeEach
     fun setUp() {
-        every { joinPoint.args } returns arrayOf(argument, continuation)
+        every { mockContinuation.context } returns EmptyCoroutineContext
+        every { joinPoint.args } returns arrayOf(argument, mockContinuation)
         every { joinPoint.target } returns targetObject
         // The aspect resolves the application's scope bean when the bean factory is set
         every { beanFactory.containsBean("reqShieldCoroutineScope") } returns true
@@ -106,7 +97,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
             .find { it.name == name && it.parameters.size == 2 }
             ?.javaMethod!!
 
-    /** Cache writes and refreshes run on the scope, so tests that assert on them must wait for the scope. */
+    /** Cache writes are fire-and-forget, so tests that assert on them must wait for the scope. */
     private suspend fun CoroutineScope.awaitBackgroundWrites() {
         coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
     }

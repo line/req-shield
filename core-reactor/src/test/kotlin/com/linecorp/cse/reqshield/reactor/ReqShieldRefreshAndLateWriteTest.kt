@@ -29,11 +29,9 @@ import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.assertNotNull
 
 /**
- * The write of a new entry before the reply, the refresh guard of ONLY_CREATE_CACHE, and the late cache write after a
- * lock timeout. The tests use a map as the cache, so each assertion reads the entry that a request would get.
+ * The refresh guard of ONLY_CREATE_CACHE and the late cache write after a lock timeout. The tests use a map as the cache, so each assertion reads the entry that a request would get.
  */
 class ReqShieldRefreshAndLateWriteTest {
     private val key = "issue-61-${UUID.randomUUID()}"
@@ -47,13 +45,12 @@ class ReqShieldRefreshAndLateWriteTest {
     private fun shield(
         workMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
         lockTimeoutMillis: Long = 3000,
-        writeDelay: Duration = Duration.ZERO,
         failReadsAfter: Int = Int.MAX_VALUE,
     ): ReqShield<Product> =
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = { cacheKey, data, _ ->
-                    Mono.delay(writeDelay).map {
+                    Mono.fromSupplier {
                         cache[cacheKey] = data
                         true
                     }
@@ -90,33 +87,6 @@ class ReqShieldRefreshAndLateWriteTest {
 
     private fun awaitCachedValue(expected: Product) =
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(expected, cache[key]?.value) }
-
-    @Test
-    fun aNewEntryShouldBeInTheCacheWhenTheValueIsEmitted() {
-        val shield = shield(writeDelay = Duration.ofMillis(100))
-
-        val result = shield.getAndSetReqShieldData(key, { Mono.just(newProduct) }, 10_000).block(timeout)
-
-        assertEquals(newProduct, result?.value)
-        assertEquals(newProduct, cache[key]?.value)
-        assertEquals(2, cacheReads.get(), "only the first read and the recheck after the lock")
-    }
-
-    @Test
-    fun theWriteOfANewEntryShouldGoOnWhenTheCallerCancelsAfterItsSupplierCall() {
-        val shield = shield(writeDelay = Duration.ofMillis(300))
-
-        // The supplier ends at once, so this cancel arrives while the caller waits for the cache write.
-        val caller = shield.getAndSetReqShieldData(key, { Mono.just(newProduct) }, 10_000).subscribe()
-        Thread.sleep(100)
-        caller.dispose()
-
-        awaitCachedValue(newProduct)
-        // The write also released the lock, so the next request can take it at once.
-        await().atMost(Duration.ofSeconds(2)).untilAsserted {
-            assertNotNull(KeyLocalLock(3000).tryLock(key, LockType.CREATE).block(timeout))
-        }
-    }
 
     @Test
     fun onlyCreateCacheShouldRunOneRefreshOfAKeyAtATime() {
@@ -168,7 +138,9 @@ class ReqShieldRefreshAndLateWriteTest {
         val result = shield.getAndSetReqShieldData(key, slowSupplier(150) { cache[key] = other }, 10_000).block(timeout)
 
         assertEquals(newProduct, result?.value, "the caller still gets the result of its own supplier call")
-        assertEquals(other, cache[key], "the entry of the later supplier call must stay")
+        // The write runs after the value is emitted. If it ran, it would be there well before 300 ms.
+        Thread.sleep(300)
+        assertEquals(other, cache[key], "the entry that the other request wrote must stay")
     }
 
     @Test
@@ -177,7 +149,17 @@ class ReqShieldRefreshAndLateWriteTest {
 
         shield.getAndSetReqShieldData(key, slowSupplier(150), 10_000).block(timeout)
 
-        assertEquals(newProduct, cache[key]?.value)
+        awaitCachedValue(newProduct)
+    }
+
+    @Test
+    fun aNewEntryShouldBeWrittenWithoutAnExtraCacheReadWhileTheLockIsValid() {
+        val shield = shield(lockTimeoutMillis = 3000)
+
+        shield.getAndSetReqShieldData(key, { Mono.just(newProduct) }, 10_000).block(timeout)
+
+        awaitCachedValue(newProduct)
+        assertEquals(2, cacheReads.get(), "only the first read and the recheck after the lock")
     }
 
     @Test
@@ -211,7 +193,7 @@ class ReqShieldRefreshAndLateWriteTest {
 
         shield.getAndSetReqShieldData(key, slowSupplier(150), 10_000).block(timeout)
 
+        awaitCachedValue(newProduct)
         assertEquals(3, cacheReads.get())
-        assertEquals(newProduct, cache[key]?.value)
     }
 }

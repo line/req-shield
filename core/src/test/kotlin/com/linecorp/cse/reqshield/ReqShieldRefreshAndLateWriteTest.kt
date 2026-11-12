@@ -30,6 +30,7 @@ import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -42,16 +43,33 @@ class ReqShieldRefreshAndLateWriteTest {
     private val key = "issue-61-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
     private val cacheReads = AtomicInteger()
-    private val executor = Executors.newFixedThreadPool(4)
+    private val pool = Executors.newFixedThreadPool(4)
+
+    /** Tasks that req-shield handed to the executor and that have not ended. */
+    private val runningTasks = AtomicInteger()
+    private val executor =
+        Executor { task ->
+            runningTasks.incrementAndGet()
+            pool.execute {
+                try {
+                    task.run()
+                } finally {
+                    runningTasks.decrementAndGet()
+                }
+            }
+        }
     private val oldProduct = Product("old", "old")
     private val newProduct = Product("new", "new")
     private val otherProduct = Product("other", "other")
 
     @AfterEach
     fun tearDown() {
-        executor.shutdownNow()
-        assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+        pool.shutdownNow()
+        assertTrue(pool.awaitTermination(2, TimeUnit.SECONDS))
     }
+
+    /** Waits until each cache write and refresh that req-shield started has ended. */
+    private fun awaitBackgroundTasks() = await().atMost(Duration.ofSeconds(2)).until { runningTasks.get() == 0 }
 
     private fun shield(
         workMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
@@ -95,8 +113,8 @@ class ReqShieldRefreshAndLateWriteTest {
         try {
             repeat(50) { assertEquals(oldProduct, shield.getAndSetReqShieldData(key, supplier, 10_000).value) }
             assertTrue(supplierStarted.await(2, TimeUnit.SECONDS))
-            // Let the executor run each task it got. A second refresh would call the supplier in one of them.
-            executor.submit {}.get(2, TimeUnit.SECONDS)
+            // The pool has free threads. A second refresh would call the supplier on one of them in this time.
+            Thread.sleep(200)
 
             assertEquals(1, supplierCalls.get())
         } finally {
@@ -162,9 +180,10 @@ class ReqShieldRefreshAndLateWriteTest {
             }
 
         val result = shield.getAndSetReqShieldData(key, supplier, 10_000)
+        awaitBackgroundTasks()
 
         assertEquals(newProduct, result.value, "the caller still gets the result of its own supplier call")
-        assertEquals(other, cache[key], "the entry of the later supplier call must stay")
+        assertEquals(other, cache[key], "the entry that the other request wrote must stay")
     }
 
     @Test
@@ -174,7 +193,7 @@ class ReqShieldRefreshAndLateWriteTest {
         val shield = shield(lockTimeoutMillis = 50)
         val firstStarted = CountDownLatch(1)
         val first =
-            executor.submit<Product?> {
+            pool.submit<Product?> {
                 shield.getAndSetReqShieldData(
                     key,
                     {
@@ -200,6 +219,7 @@ class ReqShieldRefreshAndLateWriteTest {
 
         assertEquals(oldProduct, first.get(2, TimeUnit.SECONDS))
         assertEquals(newProduct, second, "each caller gets the result of its own supplier call")
+        awaitBackgroundTasks()
         assertEquals(oldProduct, cache[key]?.value)
     }
 
@@ -213,6 +233,7 @@ class ReqShieldRefreshAndLateWriteTest {
             }
 
         shield.getAndSetReqShieldData(key, supplier, 10_000)
+        awaitBackgroundTasks()
 
         assertEquals(newProduct, cache[key]?.value)
     }
@@ -222,6 +243,7 @@ class ReqShieldRefreshAndLateWriteTest {
         val shield = shield(lockTimeoutMillis = 3000)
 
         shield.getAndSetReqShieldData(key, { newProduct }, 10_000)
+        awaitBackgroundTasks()
 
         assertEquals(newProduct, cache[key]?.value)
         assertEquals(2, cacheReads.get(), "only the first read and the recheck after the lock")
@@ -244,9 +266,7 @@ class ReqShieldRefreshAndLateWriteTest {
         shield.getAndSetReqShieldData(key, supplier, 10_000)
 
         assertTrue(supplierDone.await(2, TimeUnit.SECONDS))
-        // Let the refresh task end before the cache is checked.
-        executor.submit {}.get(2, TimeUnit.SECONDS)
-        Thread.sleep(100)
+        awaitBackgroundTasks()
         assertEquals(other, cache[key])
     }
 
@@ -292,6 +312,7 @@ class ReqShieldRefreshAndLateWriteTest {
             }
 
         shield.getAndSetReqShieldData(key, supplier, 10_000)
+        awaitBackgroundTasks()
 
         assertEquals(3, failReads.get())
         assertEquals(newProduct, cache[key]?.value)

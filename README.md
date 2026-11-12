@@ -189,20 +189,14 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - `@ReqShieldCacheEvict` evicts **after** the annotated method completes successfully (Spring's `@CacheEvict` default).
   If the method throws, nothing is evicted; if the eviction itself fails, that failure propagates to the caller.
 - In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
-- A request that creates an entry gets its data after the cache write of that entry ended. An eviction that the same
-  caller starts after it has its data therefore runs after the write.
-- **Known limitation:** a value that is computed before an eviction can still be written after it. This happens when
-  the eviction runs while a supplier call or a background refresh for that key is in flight: the entry comes back
-  with the old value until its TTL ends. The eviction and the write can run on different nodes, so the library cannot
-  order them. If stale data after an update is not acceptable, use a short TTL or put a version of the data in the
-  cache key.
+- **Known limitation:** a value that is computed before an eviction can be written after it. A request returns its
+  data first and writes the cache asynchronously, and a background refresh can be in flight, so an entry evicted in
+  that window comes back with the old value until its TTL ends. The eviction and the write can run on different
+  nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
+  version of the data in the cache key.
 
-### Cache writes, lock timeouts and work modes
+### Lock timeouts and work modes
 
-- A request that finds no entry calls the supplier, writes the cache, and then returns its data. A failed write is
-  logged and the request still gets its data. `core` writes on the caller's thread. `core-reactor` and
-  `core-kotlin-coroutine` run the write on the scheduler or the scope and the caller waits for it; a caller that is
-  cancelled during that wait does not stop the write.
 - If a supplier call takes longer than `lockTimeoutMillis`, the lock can pass to another request. Before such a late
   write, the cache is read one more time. If another request wrote the entry in that time, the late write is skipped:
   after a lock timeout the first write stays. In the usual case, one slow call that a later and faster call overtook,
@@ -257,14 +251,14 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Thread pools and schedulers
 
-- `core` accepts any `java.util.concurrent.Executor` for its background refreshes; only `execute` is called and the
+- `core` accepts any `java.util.concurrent.Executor` for its background cache writes; only `execute` is called and the
   library never shuts a caller-supplied pool down. The default is a shared daemon pool. The Spring adapter runs the
-  refreshes on a daemon pool of its own that is shut down with the context, and registers no `Executor` bean, so Spring
+  writes on a daemon pool of its own that is shut down with the context, and registers no `Executor` bean, so Spring
   Boot keeps its `applicationTaskExecutor`. To use your own pool, define an `Executor` bean named `reqShieldExecutor`;
   its lifecycle stays yours, and like any `Executor` bean it makes Spring Boot skip `applicationTaskExecutor`.
 - `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter uses the shared
   `boundedElastic` too and never disposes it; to use your own, define a `Scheduler` bean named `reqShieldScheduler`.
-- `core-kotlin-coroutine` accepts a `CoroutineScope` for cache writes and background refreshes (default: a shared supervisor scope on
+- `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
   `Dispatchers.IO`). The coroutine Spring adapter runs them on a supervisor scope of its own on `Dispatchers.IO` and
   cancels it on context shutdown; to use your own, define a `CoroutineScope` bean named `reqShieldCoroutineScope`.
 - The Spring adapters register none of these beans themselves, so an application bean of the same name replaces the

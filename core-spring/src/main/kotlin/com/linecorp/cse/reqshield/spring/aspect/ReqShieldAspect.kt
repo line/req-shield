@@ -61,7 +61,7 @@ class ReqShieldAspect<T>(
         private set
 
     /**
-     * Runs the background refreshes of every ReqShield this aspect creates: the application's bean named
+     * Runs the asynchronous cache writes of every ReqShield this aspect creates: the application's bean named
      * `reqShieldExecutor` when there is one, otherwise a pool owned by this aspect.
      *
      * The library deliberately registers no `Executor` bean of its own. Spring Boot backs off its
@@ -295,8 +295,8 @@ class ReqShieldAspect<T>(
     private fun createOwnedExecutor(): ExecutorService {
         val threadCounter = AtomicLong(0)
 
-        // Daemon threads, so a pending refresh can never block JVM shutdown.
-        // Named apart from the core default pool so a thread dump shows which one ran a refresh.
+        // Daemon threads, so a pending cache write can never block JVM shutdown.
+        // Named apart from the core default pool so a thread dump shows which one ran a write.
         return Executors.newScheduledThreadPool(
             maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
         ) { runnable ->
