@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test
 import reactor.core.publisher.Mono
 import reactor.test.StepVerifier
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -37,7 +38,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * granted. A release subscribed without that Context goes to the default store and leaves the lock in place.
  */
 class ReqShieldLockContextTest {
-    private val key = "testKey"
+    // The lock map and the signal registries are static, so each test has its own key
+    private val key = "testKey-${UUID.randomUUID()}"
     private val timeToLiveMillis = 10_000L
     private val tenant = "alice"
 
@@ -195,5 +197,36 @@ class ReqShieldLockContextTest {
         assertTheTenantLockWasTakenAndReleased()
         assertEquals(0, supplierCalls.get())
         assertTrue(lockStoreOf("default").isEmpty())
+    }
+
+    @Test
+    fun shouldReleaseTheCreationLockInTheStoreOfTheCallerContextWhenTheCallerCancelsTheLockCall() {
+        // Takes the lock in the tenant's store and gives no answer, like a store call whose answer is still on its way
+        val lockThatNeverAnswers =
+            KeyGlobalLock(
+                globalLockFunction = { lockKey, token, _ ->
+                    withTenant { tenantName ->
+                        lockStoreOf(tenantName)[lockKey] = token
+                        acquiredBy(tenantName).incrementAndGet()
+                    }.then(Mono.never<Boolean>())
+                },
+                globalUnLockFunction = { lockKey, token -> withTenant { tenantName -> lockStoreOf(tenantName).remove(lockKey, token) } },
+                lockTimeoutMillis = 3_000,
+            )
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration<Product>(
+                    setCacheFunction = { _, _, _ -> Mono.just(true) },
+                    getCacheFunction = { Mono.empty() },
+                    keyLock = lockThatNeverAnswers,
+                ),
+            )
+        val caller = shield.callAsTenant(supplierOf(Mono.just(Product("new", "new")))).subscribe()
+        await().atMost(Duration.ofSeconds(5)).until { lockStoreOf(tenant).isNotEmpty() }
+
+        caller.dispose()
+
+        assertTheTenantLockWasTakenAndReleased()
+        assertEquals(0, setCacheCalls.get())
     }
 }
