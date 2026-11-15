@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
+import com.linecorp.cse.reqshield.support.utils.nextLocalLockToken
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
@@ -28,7 +29,6 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
@@ -71,14 +71,11 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock {
 
         private const val LOCK_MAP_INITIAL_CAPACITY = 1024
 
-        // Ownership tokens are only compared within this JVM, so a counter is enough (and cheaper than UUID)
-        private val tokenCounter = AtomicLong(0)
-
         // Single scheduler shared by all instances
         @Volatile
         private var sharedScheduler: ScheduledExecutorService? = null
 
-        private fun nextToken(): String = "local-${tokenCounter.incrementAndGet()}"
+        private fun nextToken(): String = nextLocalLockToken()
 
         // Thread-safe lazy initialization
         private fun getOrCreateScheduler(): ScheduledExecutorService {

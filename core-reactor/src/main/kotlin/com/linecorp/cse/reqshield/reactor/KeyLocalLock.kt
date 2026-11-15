@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
+import com.linecorp.cse.reqshield.support.utils.nextLocalLockToken
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import org.slf4j.LoggerFactory
 import reactor.core.Disposable
@@ -31,7 +32,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
@@ -74,10 +74,6 @@ class KeyLocalLock(
 
         private const val LOCK_MAP_INITIAL_CAPACITY = 1024
 
-        // Monotonic counter backing the local ownership tokens. A counter is enough because
-        // the tokens never leave this JVM, and it is far cheaper than UUID generation.
-        private val tokenSequence = AtomicLong(0)
-
         @Volatile
         private var monitoringStarted: Boolean = false
 
@@ -87,7 +83,7 @@ class KeyLocalLock(
         // Track consecutive failures for rate-limited logging
         private val consecutiveFailures = AtomicInteger(0)
 
-        private fun nextToken(): String = "local-${tokenSequence.incrementAndGet()}"
+        private fun nextToken(): String = nextLocalLockToken()
 
         private fun startMonitoringOnce() {
             if (monitoringStarted) return

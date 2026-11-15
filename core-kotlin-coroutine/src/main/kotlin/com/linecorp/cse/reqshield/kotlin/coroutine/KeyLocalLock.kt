@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
+import com.linecorp.cse.reqshield.support.utils.nextLocalLockToken
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -31,7 +32,6 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 
@@ -73,16 +73,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
 
         private const val LOCK_MAP_INITIAL_CAPACITY = 1024
 
-        /**
-         * Source of local ownership tokens. A monotonic counter is enough because tokens never
-         * leave this JVM, and it is far cheaper than a UUID on the lock acquisition path.
-         */
-        private val tokenSequence = AtomicLong()
-
         @Volatile
         private var monitorJob: Job? = null
 
-        private fun nextToken(): String = "local-${tokenSequence.incrementAndGet()}"
+        private fun nextToken(): String = nextLocalLockToken()
 
         private fun ensureMonitorStarted() {
             if (monitorJob?.isActive == true) return
