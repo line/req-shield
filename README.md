@@ -330,6 +330,10 @@ java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*
   (pass it with `-jvmArgsAppend`).
 - Choose the module and the side with parameters, for example
   `-p module=core,reactor,coroutine -p arm=cacheAside,reqShield -p supplierMillis=10,100`.
+- The scenario benchmarks also take `-p lock=global` (lock functions on the store, not the lock map of the JVM) and
+  `-p store=redis` (a Redis server as the cache and the lock store, at the URL in `-Dbench.redis`, default
+  `redis://localhost:6379`). `RemoteHolderBenchmark` shows a waiter whose lock holder is in another JVM, and
+  `ReactiveAspectStampedeBenchmark` a stampede through the WebFlux and the coroutine aspect.
 - The cache of the benchmarks is a map in the JVM. A cache behind a network call takes far longer per call, so read a
   difference of some nanoseconds as an absolute cost, not as a ratio.
 
