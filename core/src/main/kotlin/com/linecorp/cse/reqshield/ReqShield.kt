@@ -82,16 +82,18 @@ class ReqShield<T>(
         seenCreatedAt: Long,
     ) {
         val lockType = LockType.UPDATE
-        val lockedAtNanos = System.nanoTime()
+        val lock = lockFor(lockType)
+        val nanosBeforeAttempt = nanosBeforeAttempt(lock)
 
         val token =
             try {
-                lockFor(lockType).tryLock(key, lockType)
+                lock.tryLock(key, lockType)
             } catch (e: Exception) {
                 // The caller already has its data: a failing lock store only skips this refresh
                 log.warn("Failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
                 return
             } ?: return // another request already refreshes this key
+        val lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
         // A request that finds the entry gone during this refresh waits for this signal instead of a supplier call
         refreshSignals.register(key, token, CountDownLatch(1))
 
@@ -126,8 +128,11 @@ class ReqShield<T>(
 
         while (true) {
             // ONLY_UPDATE_CACHE collapses requests on cache update only, so the creation runs without a lock
-            val lockedAtNanos = System.nanoTime()
-            val token = if (onlyUpdateCache) null else reqShieldConfig.keyLock.tryLock(key, lockType)
+            val lock = reqShieldConfig.keyLock
+            val nanosBeforeAttempt = if (onlyUpdateCache) 0L else nanosBeforeAttempt(lock)
+            val token = if (onlyUpdateCache) null else lock.tryLock(key, lockType)
+            // Without a token there is no lock, and no late-write check reads this value
+            val lockedAtNanos = if (token == null) 0L else lockStartNanos(lock, nanosBeforeAttempt)
 
             if (token != null) {
                 // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
@@ -160,6 +165,24 @@ class ReqShield<T>(
             }
         }
     }
+
+    /**
+     * The clock before a lock attempt, for a lock whose start is read there. A lock in a store starts when the store
+     * takes it, before the answer arrives, so its start is the time before the attempt. A local lock is not read
+     * here: see [lockStartNanos].
+     */
+    private fun nanosBeforeAttempt(lock: KeyLock): Long = if (lock is KeyLocalLock) 0L else System.nanoTime()
+
+    /**
+     * The start of a lock that this request got, for the check whether the lock timed out before a late write.
+     * A local lock starts inside tryLock, so its start is read after the attempt, by the request that got the lock.
+     * A request that loses a local lock - each read of an old entry while its refresh runs - reads no clock:
+     * System.nanoTime() can be slow when many threads call it at once.
+     */
+    private fun lockStartNanos(
+        lock: KeyLock,
+        nanosBeforeAttempt: Long,
+    ): Long = if (lock is KeyLocalLock) System.nanoTime() else nanosBeforeAttempt
 
     private fun createReqShieldData(
         key: String,

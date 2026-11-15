@@ -105,25 +105,29 @@ class ReqShield<T>(
         callerContext: ContextView,
     ) {
         val lockType = LockType.UPDATE
-        val lockedAtNanos = System.nanoTime()
+        val lock = lockFor(lockType)
+        val nanosBeforeAttempt = nanosBeforeAttempt(lock)
 
         fun write(
             reqShieldData: ReqShieldData<T>,
             token: String,
+            lockedAtNanos: Long,
         ): Mono<ReqShieldData<T>> =
             writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt, callerContext)
                 .thenReturn(reqShieldData)
 
-        fun processMono(token: String): Mono<ReqShieldData<T>> =
+        fun processMono(
+            token: String,
+            lockedAtNanos: Long,
+        ): Mono<ReqShieldData<T>> =
             executeCallable(callable)
                 .doOnError {
                     // A failed supplier never reaches the cache write, which would release the lock.
                     releaseLock(key, lockType, token, callerContext)
                 }.map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                .flatMap { reqShieldData -> write(reqShieldData, token) }
-                .switchIfEmpty(Mono.defer { write(buildReqShieldData(null, timeToLiveMillis), token) })
+                .flatMap { reqShieldData -> write(reqShieldData, token, lockedAtNanos) }
+                .switchIfEmpty(Mono.defer { write(buildReqShieldData(null, timeToLiveMillis), token, lockedAtNanos) })
 
-        val lock = lockFor(lockType)
         // Empty means another request already holds the update lock: nothing to do here.
         // Deferred so a lock call that throws fails this refresh only, not the caller's cache hit.
         val token = Mono.defer { lock.tryLock(key, lockType) }
@@ -136,11 +140,12 @@ class ReqShield<T>(
                 token.flatMap { acquired ->
                     // A request that finds the entry gone during this refresh waits for this signal instead of a supplier call
                     refreshSignals.register(key, acquired, CompletableFuture())
+                    val lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
                     val started = AtomicBoolean(false)
                     Mono
                         .defer {
                             started.set(true)
-                            processMono(acquired)
+                            processMono(acquired, lockedAtNanos)
                         }.subscribeOn(reqShieldConfig.scheduler)
                         // After subscribeOn: a scheduler that rejects the task never subscribes the chain above, so
                         // the releases inside processMono never run and the token is released here.
@@ -152,7 +157,7 @@ class ReqShield<T>(
                 token
                     .flatMap { acquired ->
                         refreshSignals.register(key, acquired, CompletableFuture())
-                        processMono(acquired)
+                        processMono(acquired, lockStartNanos(lock, nanosBeforeAttempt))
                     }.subscribeOn(reqShieldConfig.scheduler)
             }
 
@@ -207,16 +212,18 @@ class ReqShield<T>(
         callerContext: ContextView,
     ): Mono<ReqShieldData<T>> {
         val lockType = LockType.CREATE
-        val lockedAtNanos = System.nanoTime()
 
         if (reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_UPDATE_CACHE) {
-            // This mode never creates a cache entry through the lock, so no token is taken.
-            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null, null, lockedAtNanos, callerContext)
+            // This mode never creates a cache entry through the lock, so no token is taken and no lock start is read.
+            return createReqShieldData(key, callable, timeToLiveMillis, lockType, null, null, 0L, callerContext)
         }
 
-        return reqShieldConfig.keyLock
+        val lock = reqShieldConfig.keyLock
+        val nanosBeforeAttempt = nanosBeforeAttempt(lock)
+        return lock
             .tryLock(key, lockType)
             .flatMap { token ->
+                val lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
                 // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
                 creationSignals.register(key, token, CompletableFuture())
                 val owner = AtomicReference(LockOwner.RECHECK)
@@ -247,6 +254,24 @@ class ReqShield<T>(
                 },
             )
     }
+
+    /**
+     * The clock before a lock attempt, for a lock whose start is read there. A lock in a store starts when the store
+     * takes it, before the answer arrives, so its start is the time before the attempt. A local lock is not read
+     * here: see [lockStartNanos].
+     */
+    private fun nanosBeforeAttempt(lock: KeyLock): Long = if (lock is KeyLocalLock) 0L else System.nanoTime()
+
+    /**
+     * The start of a lock that this request got, for the check whether the lock timed out before a late write.
+     * A local lock starts inside tryLock, so its start is read after the attempt, by the request that got the lock.
+     * A request that loses a local lock - each read of an old entry while its refresh runs - reads no clock:
+     * System.nanoTime() can be slow when many threads call it at once.
+     */
+    private fun lockStartNanos(
+        lock: KeyLock,
+        nanosBeforeAttempt: Long,
+    ): Long = if (lock is KeyLocalLock) System.nanoTime() else nanosBeforeAttempt
 
     private fun createReqShieldData(
         key: String,
