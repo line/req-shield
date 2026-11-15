@@ -152,8 +152,13 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   extensions.
 - A global lock also uses the local lock map of the JVM (see "Local lock map size"). Its entries have the cache key
   with the prefix `creation-front:` (the request that asks the lock store for a creation lock) or `refresh-attempt:`
-  (the last request that asked for a refresh lock). `req-shield.lock.max-entries` applies to them. Once the map is
-  full, each request for a new key asks the lock store itself, as in versions before this change.
+  (the last request that asked for a refresh lock), and the number of the `ReqShield` instance in front of that.
+  `req-shield.lock.max-entries` applies to them. Once the map is full, each request for a new key asks the lock store
+  itself, as in versions before this change.
+- These entries belong to one `ReqShield` instance. Two instances that use the same key with a global lock or a
+  custom `KeyLock` never wait for each other inside the JVM: only their lock decides. The same holds for the refresh
+  guard of `ONLY_CREATE_CACHE`. Instances with the local lock share the lock of a key, as before, because the local
+  lock map is one map for the JVM.
 
 ### Local lock map size
 

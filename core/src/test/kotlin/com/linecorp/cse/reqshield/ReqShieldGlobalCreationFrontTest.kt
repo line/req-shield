@@ -39,6 +39,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * that JVM wait for that request, and do not call the lock store.
  */
 class ReqShieldGlobalCreationFrontTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     private val key = "global-front-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
 
@@ -83,7 +86,7 @@ class ReqShieldGlobalCreationFrontTest {
                 executor = background,
                 maxAttemptGetCache = maxAttemptGetCache,
             ),
-        )
+        ).also { created = it }
 
     private fun supplier(millis: Long = 0) =
         Callable<Product?> {
@@ -123,7 +126,7 @@ class ReqShieldGlobalCreationFrontTest {
      * lock, and gives it back. With a front lock left, that request would not ask the store.
      */
     private fun assertTheNextRequestGetsTheLock(shield: ReqShield<Product>) {
-        assertEquals(null, ReqShield.creationSignals.find(key))
+        assertEquals(null, created.creationSignals.find(key))
         cache.remove(key)
         unlockByAnotherJvm()
         await().atMost(Duration.ofSeconds(2)).until { locks.isEmpty() }
@@ -137,7 +140,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(lockCallsBefore + 1, lockCalls.get())
         assertEquals(supplierCallsBefore + 1, supplierCalls.get())
         await().atMost(Duration.ofSeconds(2)).until { unlockCalls.get() == unlockCallsBefore + 1 && locks.isEmpty() }
-        assertEquals(null, ReqShield.creationSignals.find(key))
+        assertEquals(null, created.creationSignals.find(key))
     }
 
     @Test
@@ -172,7 +175,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(1, lockCalls.get())
         await().atMost(Duration.ofSeconds(2)).until { unlockCalls.get() == 1 }
         assertTrue(locks.isEmpty())
-        assertEquals(null, ReqShield.creationSignals.find(key))
+        assertEquals(null, created.creationSignals.find(key))
     }
 
     @Test
@@ -248,8 +251,7 @@ class ReqShieldGlobalCreationFrontTest {
     @Test
     fun theFrontLockShouldBeFreeWhenItsSignalCompletes() {
         val shield = shield()
-        // A local lock of the same JVM shares the lock map, so it can try the front lock of a key
-        val probe = KeyLocalLock(1_000)
+        val probe = shield.creationFrontLock
 
         repeat(ORDER_ROUNDS) { round ->
             val roundKey = "$key-$round"
@@ -268,7 +270,7 @@ class ReqShieldGlobalCreationFrontTest {
                     )
                 }
             assertTrue(holderInSupplier.await(2, TimeUnit.SECONDS))
-            val signal = ReqShield.creationSignals.find(roundKey)!!
+            val signal = created.creationSignals.find(roundKey)!!
             // Spins, so it sees the completed signal as early as a waiter can
             val frontLockWasFree =
                 callers.submit<Boolean> {

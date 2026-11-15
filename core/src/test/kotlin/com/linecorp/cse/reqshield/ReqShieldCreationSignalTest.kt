@@ -43,6 +43,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * by the signal.
  */
 class ReqShieldCreationSignalTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the local locks are shared by all instances, so each test has its own key
     private val key = "creation-signal-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
@@ -77,9 +80,9 @@ class ReqShieldCreationSignalTest {
                 maxAttemptGetCache = maxAttemptGetCache,
                 lockTimeoutMillis = lockTimeoutMillis,
             ),
-        )
+        ).also { created = it }
 
-    private fun awaitNoSignal() = await().atMost(Duration.ofSeconds(2)).until { ReqShield.creationSignals.find(key) == null }
+    private fun awaitNoSignal() = await().atMost(Duration.ofSeconds(2)).until { created.creationSignals.find(key) == null }
 
     @Test
     fun aWaiterShouldGetTheEntryRightAfterTheHolderWroteIt() {
@@ -177,7 +180,7 @@ class ReqShieldCreationSignalTest {
                     executor = pool,
                     keyLock = lock,
                 ),
-            )
+            ).also { created = it }
         val supplierCalls = AtomicInteger()
         val supplier =
             Callable<Product?> {
@@ -330,7 +333,7 @@ class ReqShieldCreationSignalTest {
     private fun oldEntry(): ReqShieldData<Product> =
         ReqShieldData(Product("old", "old"), ReqShieldData.Status.NEW, System.currentTimeMillis() - 9_000, 10_000)
 
-    private fun awaitNoRefreshSignal() = await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+    private fun awaitNoRefreshSignal() = await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
 
     @Test
     fun aRequestThatFindsTheEntryGoneDuringARefreshShouldWaitForTheRefresh() {
@@ -560,11 +563,11 @@ class ReqShieldCreationSignalTest {
                     getCacheFunction = { if (reads.incrementAndGet() == 1) null else entry },
                     executor = pool,
                 ),
-            )
+            ).also { created = it }
 
         assertEquals(product, shield.getAndSetReqShieldData(key, { error("not called") }, 10_000).value)
 
-        assertNull(ReqShield.creationSignals.find(key))
+        assertNull(created.creationSignals.find(key))
     }
 
     @Test
@@ -573,7 +576,7 @@ class ReqShieldCreationSignalTest {
             shield().getAndSetReqShieldData(key, { error("the supplier fails") }, 10_000)
         }
 
-        assertNull(ReqShield.creationSignals.find(key))
+        assertNull(created.creationSignals.find(key))
     }
 
     @Test
@@ -582,7 +585,7 @@ class ReqShieldCreationSignalTest {
 
         assertEquals(product, shield(executor = rejecting).getAndSetReqShieldData(key, { product }, 10_000).value)
 
-        assertNull(ReqShield.creationSignals.find(key))
+        assertNull(created.creationSignals.find(key))
     }
 
     @Test

@@ -40,6 +40,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
@@ -62,25 +63,52 @@ class ReqShield<T>(
     private val reqShieldConfig: ReqShieldConfiguration<T>,
 ) {
     /**
+     * In front of the keys of the local locks that guard something inside this instance. Those locks share the lock
+     * map of the JVM, and without this text a request of one instance would wait for a request of another instance
+     * that uses the same key for another cache or another lock store.
+     */
+    private val instanceScope = "instance-${instanceSequence.incrementAndGet()}:"
+
+    /**
+     * The creations that requests of this instance wait for. With a local lock the registry is the one of the JVM,
+     * because the local lock map is shared too: a request waits for a creation of the same key in another instance.
+     * With any other lock the registry belongs to this instance: two instances with stores of their own never
+     * wait for each other.
+     */
+    internal val creationSignals: ReleaseSignals<CompletableFuture<Unit>> =
+        if (reqShieldConfig.keyLock is KeyLocalLock) Companion.creationSignals else ReleaseSignals { it.complete(Unit) }
+
+    /**
+     * The refreshes that requests of this instance wait for. Shared in the JVM only when the refresh lock is the
+     * configured local lock. In [ReqShieldWorkMode.ONLY_CREATE_CACHE] the refresh lock belongs to this instance.
+     */
+    internal val refreshSignals: ReleaseSignals<CompletableFuture<Unit>> =
+        if (reqShieldConfig.keyLock is KeyLocalLock && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) {
+            Companion.refreshSignals
+        } else {
+            ReleaseSignals { it.complete(Unit) }
+        }
+
+    /**
      * Guards the refresh of an entry in [ReqShieldWorkMode.ONLY_CREATE_CACHE]. That mode does not call the configured
      * lock for a refresh, so without a guard each request for an old entry would subscribe its own refresh. This lock
      * lives in this JVM only and expires like any other local lock.
      */
-    private val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+    internal val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis, instanceScope) }
 
     /**
      * Limits how often this JVM asks the lock store for the refresh lock of one key: once in
      * [GET_CACHE_INTERVAL_MILLIS]. Without it each read of an old entry would call the store while a request of
      * another JVM holds the lock. An attempt takes this local lock and never gives it back: it expires.
      */
-    private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS) }
+    private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS, instanceScope) }
 
     /**
      * With a global lock, chooses the one request of this JVM that asks the lock store for the creation lock of a
      * key. The other requests of this JVM wait for the signal of that request. Without it, each of them would call
      * the store, and each would read the cache every 50 ms while a request of another JVM holds the lock.
      */
-    private val creationFrontLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+    internal val creationFrontLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis, instanceScope) }
 
     /** The front lock token of a request that got the global lock, by the token of that global lock. */
     private val frontTokens = ConcurrentHashMap<String, String>()
@@ -804,13 +832,15 @@ class ReqShield<T>(
             .onErrorMap { e -> ClientException(ErrorCode.SUPPLIER_ERROR, cause = e) }
 
     companion object {
+        private val instanceSequence = AtomicLong()
+
         /**
-         * Shared by every instance, like the local lock map: requests for one key collapse across instances, so a
-         * waiter of one instance must see the creation that another instance runs.
+         * For instances with a local lock. Shared like the local lock map: requests for one key collapse across
+         * those instances, so a waiter of one instance must see the creation that another instance runs.
          */
         internal val creationSignals = ReleaseSignals<CompletableFuture<Unit>> { it.complete(Unit) }
 
-        /** The refreshes that run in this JVM. A request that finds an entry gone waits for the refresh of its key. */
+        /** For instances with a local lock: the refreshes that run in this JVM under that lock. */
         internal val refreshSignals = ReleaseSignals<CompletableFuture<Unit>> { it.complete(Unit) }
     }
 }

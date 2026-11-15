@@ -43,6 +43,9 @@ import java.util.concurrent.atomic.AtomicReference
  * to the scheduler only when it gets the lock, not on each read.
  */
 class ReqShieldRefreshSchedulingTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The local locks and the signals are shared by all instances, so each test has its own key
     private val key = "refresh-scheduling-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
@@ -104,7 +107,7 @@ class ReqShieldRefreshSchedulingTest {
                     reqShieldWorkMode = workMode,
                 )
             },
-        )
+        ).also { created = it }
     }
 
     /** An entry that is old enough for a refresh: 9 s of its 10 s are over, and the refresh starts at 80 %. */
@@ -144,7 +147,7 @@ class ReqShieldRefreshSchedulingTest {
             finishRefresh.complete(newProduct)
         }
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(newProduct, cache[key]?.value) }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -209,7 +212,7 @@ class ReqShieldRefreshSchedulingTest {
 
         // The caller has its data: only the refresh is skipped
         assertEquals(oldProduct, data?.value)
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
         // A lock that is still held would reject this attempt for the 3 s of its timeout
         await().atMost(Duration.ofSeconds(1)).untilAsserted {
             val token = KeyLocalLock(3000).tryLock(key, LockType.UPDATE).block(timeout)

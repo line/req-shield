@@ -52,6 +52,9 @@ import kotlin.test.assertNotNull
  * that JVM wait for that request, and do not call the lock store.
  */
 class ReqShieldGlobalCreationFrontTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the front locks are shared by all instances, so each test has its own key
     private val key = "global-front-${UUID.randomUUID()}"
     private val remoteLockKey = lockKeyOf(key, LockType.CREATE)
@@ -104,7 +107,7 @@ class ReqShieldGlobalCreationFrontTest {
                 maxAttemptGetCache = maxAttemptGetCache,
                 scope = scope,
             ),
-        )
+        ).also { created = it }
 
     private fun supplier(): suspend () -> Product? =
         {
@@ -121,7 +124,7 @@ class ReqShieldGlobalCreationFrontTest {
         locks.remove(remoteLockKey, REMOTE_TOKEN)
     }
 
-    private fun signal() = ReqShield.creationSignals.find(key)
+    private fun signal() = created.creationSignals.find(key)
 
     private suspend fun awaitUntil(condition: () -> Boolean) =
         withTimeout(2_000) {
@@ -245,7 +248,7 @@ class ReqShieldGlobalCreationFrontTest {
             val frontLockFreeAtSignal = CompletableDeferred<Boolean>()
             // The handler runs in the release, at the moment the signal completes. The probe never suspends.
             assertNotNull(signal()).invokeOnCompletion {
-                val probe = KeyLocalLock(3_000)
+                val probe = created.creationFrontLock
                 val frontKey = GLOBAL_CREATION_FRONT_KEY_PREFIX + key
                 val token = runBlocking { probe.tryLock(frontKey, LockType.CREATE) }
                 if (token != null) runBlocking { probe.unLock(frontKey, LockType.CREATE, token) }

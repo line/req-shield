@@ -403,7 +403,7 @@ class ReqShieldTest : BaseReqShieldTest {
         verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
         verify(exactly = 0) { callable.call() }
         // A leaked refresh lock would stop each refresh of this key until the lock times out
-        assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.UPDATE))
+        assertNotNull(shield.localRefreshLock.tryLock(isolatedKey, LockType.UPDATE))
     }
 
     @Test

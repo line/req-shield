@@ -39,6 +39,16 @@ private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
 class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScope {
     /**
+     * A text in front of each key of this lock. The lock map is shared in the JVM by key, so a lock that guards
+     * something inside one ReqShield instance sets this to keep its entries apart from those of other instances.
+     */
+    private var keyScope: String = ""
+
+    internal constructor(lockTimeoutMillis: Long, keyScope: String) : this(lockTimeoutMillis) {
+        this.keyScope = keyScope
+    }
+
+    /**
      * Internal lock state holder.
      * Using class instead of data class to allow mutable expiresAt for atomic updates.
      */
@@ -145,7 +155,7 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
         key: String,
         lockType: LockType,
     ): String? {
-        val completeKey = lockKeyOf(key, lockType)
+        val completeKey = lockKeyOf(keyScope + key, lockType)
         val now = nowToEpochTime()
         // An entry exists only while its lock is held, so an entry that has not expired means the lock is taken.
         // A failed attempt changes nothing, so it needs no lock on the map bin. Only an attempt that can get the lock
@@ -206,7 +216,7 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
         lockType: LockType,
         token: String,
     ): Boolean {
-        val completeKey = lockKeyOf(key, lockType)
+        val completeKey = lockKeyOf(keyScope + key, lockType)
         val released = AtomicBoolean(false)
 
         // Release inside compute() so that it is atomic with respect to acquisition and cleanup

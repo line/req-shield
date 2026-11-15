@@ -46,6 +46,9 @@ import java.util.concurrent.atomic.AtomicReference
  * that JVM wait for that request, and do not call the lock store.
  */
 class ReqShieldGlobalCreationFrontTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the local locks are shared by all instances, so each test has its own key
     private val key = "global-front-${UUID.randomUUID()}"
     private val lockKey = "reqshield:lock:${key}_CREATE"
@@ -96,14 +99,14 @@ class ReqShieldGlobalCreationFrontTest {
                 },
                 globalUnLockFunction = { lockKey, token ->
                     Mono.fromSupplier {
-                        signalAtUnlock[unlockCalls.incrementAndGet()] = ReqShield.creationSignals.find(key) != null
+                        signalAtUnlock[unlockCalls.incrementAndGet()] = created.creationSignals.find(key) != null
                         locks.remove(lockKey, token)
                     }
                 },
                 isLocalLock = false,
                 maxAttemptGetCache = maxAttemptGetCache,
             ),
-        )
+        ).also { created = it }
 
     private fun supplier(millis: Long = 0) =
         Callable<Mono<Product?>> {
@@ -137,7 +140,7 @@ class ReqShieldGlobalCreationFrontTest {
      * lock, and gives it back. With a front lock left, that request would not ask the store.
      */
     private fun assertTheNextRequestGetsTheLock(shield: ReqShield<Product>) {
-        assertEquals(null, ReqShield.creationSignals.find(key))
+        assertEquals(null, created.creationSignals.find(key))
         cache.remove(key)
         unlockByAnotherJvm()
         await().atMost(Duration.ofSeconds(2)).until { locks.isEmpty() }
@@ -151,7 +154,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(lockCallsBefore + 1, lockCalls.get())
         assertEquals(supplierCallsBefore + 1, supplierCalls.get())
         await().atMost(Duration.ofSeconds(2)).until { unlockCalls.get() == unlockCallsBefore + 1 && locks.isEmpty() }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.creationSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.creationSignals.find(key) == null }
     }
 
     private fun millisSince(startNanos: Long): Long = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
@@ -191,7 +194,7 @@ class ReqShieldGlobalCreationFrontTest {
             (1..CALLERS).map { caller ->
                 shield
                     .getAndSetReqShieldData(key, supplier(), 10_000)
-                    .doOnNext { signalAtResult[caller] = ReqShield.creationSignals.find(key) != null }
+                    .doOnNext { signalAtResult[caller] = created.creationSignals.find(key) != null }
                     .subscribeOn(Schedulers.boundedElastic())
                     .contextWrite { it.put("caller", caller) }
                     .toFuture()
@@ -225,7 +228,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(1, lockCalls.get())
         await().atMost(Duration.ofSeconds(2)).until { unlockCalls.get() == 1 }
         assertTrue(locks.isEmpty())
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.creationSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.creationSignals.find(key) == null }
         // The global lock was released before its waiters were woken
         assertEquals(true, signalAtUnlock[1])
     }
@@ -268,7 +271,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(1, supplierCalls.get())
         assertEquals(2, lockCalls.get())
         await().atMost(Duration.ofSeconds(2)).until { unlockCalls.get() == 2 && locks.isEmpty() }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.creationSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.creationSignals.find(key) == null }
     }
 
     @Test
@@ -304,7 +307,7 @@ class ReqShieldGlobalCreationFrontTest {
         assertThrows(IllegalStateException::class.java) {
             shield
                 .getAndSetReqShieldData(key, supplier(), 10_000)
-                .doOnError { signalAtError.set(ReqShield.creationSignals.find(key) != null) }
+                .doOnError { signalAtError.set(created.creationSignals.find(key) != null) }
                 .block(timeout)
         }
 
@@ -325,8 +328,8 @@ class ReqShieldGlobalCreationFrontTest {
         assertEquals(1, lockCalls.get())
         // Runs inside the completion of the signal: checks whether the front lock is free at that moment
         val frontFreeAtSignal = AtomicReference<Boolean>()
-        checkNotNull(ReqShield.creationSignals.find(key)).thenRun {
-            val probe = KeyLocalLock(3_000)
+        checkNotNull(created.creationSignals.find(key)).thenRun {
+            val probe = created.creationFrontLock
             val token = probe.tryLock(GLOBAL_CREATION_FRONT_KEY_PREFIX + key, LockType.CREATE).toFuture().getNow(null)
             frontFreeAtSignal.set(token != null)
             if (token != null) probe.unLock(GLOBAL_CREATION_FRONT_KEY_PREFIX + key, LockType.CREATE, token).subscribe()
@@ -444,7 +447,7 @@ class ReqShieldGlobalCreationFrontTest {
                     isLocalLock = false,
                     maxAttemptGetCache = 2,
                 ),
-            )
+            ).also { created = it }
 
         try {
             val supplierThread = AtomicReference<String>()

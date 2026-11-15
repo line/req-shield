@@ -56,6 +56,9 @@ import kotlin.test.assertNotNull
  * by the signal. The tests run in real time, because the waits are measured with the system clock.
  */
 class ReqShieldCreationSignalTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the local locks are shared by all instances, so each test has its own key
     private val key = "creation-signal-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
@@ -100,7 +103,7 @@ class ReqShieldCreationSignalTest {
                 reqShieldWorkMode = workMode,
                 scope = scope,
             ),
-        )
+        ).also { created = it }
 
     /** Waits until each task that the shield launched on its scope has ended. */
     private suspend fun awaitScopeTasks() = scope.coroutineContext.job.children.toList().forEach { it.join() }
@@ -110,9 +113,9 @@ class ReqShieldCreationSignalTest {
             while (cacheReads.get() < count) delay(1)
         }
 
-    private fun signal() = ReqShield.creationSignals.find(key)
+    private fun signal() = created.creationSignals.find(key)
 
-    private fun refreshSignal() = ReqShield.refreshSignals.find(key)
+    private fun refreshSignal() = created.refreshSignals.find(key)
 
     /** An entry that is old enough for a refresh: 9 s of its 10 s are over, and the refresh starts at 80 %. */
     private fun oldEntry(): ReqShieldData<Product> =
@@ -774,13 +777,14 @@ class ReqShieldCreationSignalTest {
                         return true
                     }
                 }
+            val shield = shield(keyLock = keyLock)
             val creationSignal = CompletableDeferred<Unit>()
-            ReqShield.creationSignals.register(key, sameToken, creationSignal)
+            shield.creationSignals.register(key, sameToken, creationSignal)
             cache[key] = oldEntry()
             var refreshSignalDuringSupplier: CompletableDeferred<Unit>? = null
 
             try {
-                shield(keyLock = keyLock).getAndSetReqShieldData(
+                shield.getAndSetReqShieldData(
                     key,
                     {
                         refreshSignalDuringSupplier = refreshSignal()
@@ -798,7 +802,7 @@ class ReqShieldCreationSignalTest {
                 assertTrue(refreshSignalDuringSupplier!!.isCompleted)
                 assertNull(refreshSignal())
             } finally {
-                ReqShield.creationSignals.release(key, sameToken)
+                shield.creationSignals.release(key, sameToken)
             }
         }
 

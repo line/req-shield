@@ -40,6 +40,16 @@ class KeyLocalLock(
     private val lockTimeoutMillis: Long,
 ) : KeyLock {
     /**
+     * A text in front of each key of this lock. The lock map is shared in the JVM by key, so a lock that guards
+     * something inside one ReqShield instance sets this to keep its entries apart from those of other instances.
+     */
+    private var keyScope: String = ""
+
+    internal constructor(lockTimeoutMillis: Long, keyScope: String) : this(lockTimeoutMillis) {
+        this.keyScope = keyScope
+    }
+
+    /**
      * Internal lock state holder.
      * Using class instead of data class to allow mutable expiresAt for atomic updates.
      */
@@ -253,5 +263,5 @@ class KeyLocalLock(
     private fun completeKey(
         key: String,
         lockType: LockType,
-    ): String = "$LOCK_KEY_PREFIX${key}_${lockType.name}"
+    ): String = "$LOCK_KEY_PREFIX$keyScope${key}_${lockType.name}"
 }
