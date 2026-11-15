@@ -26,7 +26,9 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
+import io.mockk.verify
 import org.aspectj.lang.ProceedingJoinPoint
+import org.aspectj.lang.reflect.MethodSignature
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -72,8 +74,74 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
         reqShieldAspect.setBeanFactory(beanFactory)
     }
 
-    private fun stubTargetMethod(methodName: String) {
-        every { reqShieldAspect.getTargetMethod(joinPoint) } returns findTestBeanMethod(methodName)
+    private fun stubTargetMethod(
+        methodName: String,
+        aspect: ReqShieldAspect<Product> = reqShieldAspect,
+    ) {
+        val method = findTestBeanMethod(methodName)
+        every { aspect.getTargetMethod(joinPoint) } returns method
+        // The aspect keeps what it resolved per signature method and target class
+        val signature = mockk<MethodSignature>()
+        every { signature.method } returns method
+        every { joinPoint.signature } returns signature
+    }
+
+    @Test
+    fun repeatedCallsShouldResolveTheMethodOnceAndReuseOneReqShield() {
+        val method = findTestBeanMethod(TestBean::cacheableWithCustomKey.name)
+        asyncCache.put(spelEvaluatedKey, ReqShieldData(methodReturn, 1000), 1000).block()
+        every { joinPoint.proceed() } answers { targetObject.cacheableWithCustomKey(argument) }
+        stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+
+        reqShieldAspect.aroundTargetCacheable(joinPoint).block()
+        val first = reqShieldAspect.reqShieldMap[method]
+        repeat(3) { reqShieldAspect.aroundTargetCacheable(joinPoint).block() }
+
+        // The target method, and with it the annotation, is resolved on the first call only
+        verify(exactly = 1) { reqShieldAspect.getTargetMethod(joinPoint) }
+        assertEquals(1, reqShieldAspect.reqShieldMap.size)
+        Assertions.assertNotNull(first)
+        Assertions.assertSame(first, reqShieldAspect.reqShieldMap[method])
+    }
+
+    @Test
+    fun repeatedEvictionsShouldResolveTheMethodOnce() {
+        stubTargetMethod(TestBean::evict.name)
+        every { joinPoint.proceed() } answers { targetObject.evict(argument) }
+
+        repeat(3) { reqShieldAspect.aroundReqShieldCacheEvict(joinPoint).block() }
+
+        verify(exactly = 1) { reqShieldAspect.getTargetMethod(joinPoint) }
+    }
+
+    @Test
+    fun onlyASpelKeyShouldBuildAnEvaluationContext() {
+        every { beanFactory.getBean(cacheKeyGenerator, KeyGenerator::class.java) } returns CustomGenerator()
+
+        stubTargetMethod(TestBean::cacheableWithDefaultKeyGenerator.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+        stubTargetMethod(TestBean::cacheableWithKeyGenerator.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        verify(exactly = 0) { reqShieldAspect.createEvaluationContext(any(), any(), any()) }
+
+        stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        verify(exactly = 2) { reqShieldAspect.createEvaluationContext(any(), any(), any()) }
+    }
+
+    @Test
+    fun spelKeyShouldBeEvaluatedAgainForTheArgumentsOfEachCall() {
+        stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+
+        val first = reqShieldAspect.getCacheableCacheKey(joinPoint)
+        every { joinPoint.args } returns arrayOf(mapOf("x" to "otherX", "y" to "otherY"))
+        val second = reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        assertEquals(spelEvaluatedKey, first)
+        assertEquals("$cacheName::otherXotherY", second)
     }
 
     private fun findTestBeanMethod(methodName: String): Method =
@@ -256,8 +324,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
 
     @Test
     fun missingAnnotationsAreReported() {
-        every { reqShieldAspect.getTargetMethod(joinPoint) } returns
-            ReflectionUtils.findMethod(TestBean::class.java, TestBean::notAnnotated.name, Map::class.java)!!
+        stubTargetMethod(TestBean::notAnnotated.name)
 
         assertThrows<IllegalArgumentException> { reqShieldAspect.getCacheableAnnotation(joinPoint) }
         assertThrows<IllegalArgumentException> { reqShieldAspect.getCacheEvictAnnotation(joinPoint) }
@@ -306,8 +373,7 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     fun globalLockRequiresTheCacheToImplementGlobalLockSupport() {
         val localOnlyAspect = spyk(ReqShieldAspect<Product>(LocalOnlyAsyncCache()))
         localOnlyAspect.setBeanFactory(beanFactory)
-        every { localOnlyAspect.getTargetMethod(joinPoint) } returns
-            findTestBeanMethod(TestBean::cacheableWithGlobalLock.name)
+        stubTargetMethod(TestBean::cacheableWithGlobalLock.name, localOnlyAspect)
         every { joinPoint.proceed() } answers { targetObject.cacheableWithGlobalLock(argument) }
 
         val exception = assertThrows<IllegalArgumentException> { localOnlyAspect.aroundTargetCacheable(joinPoint) }

@@ -31,12 +31,14 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import org.aspectj.lang.ProceedingJoinPoint
+import org.aspectj.lang.reflect.MethodSignature
 import org.awaitility.Awaitility
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -104,8 +106,84 @@ class ReqShieldAspectTest : BaseReqShieldModuleSupportTest {
     ): Method {
         val method = ReflectionUtils.findMethod(TestBean::class.java, methodName, Map::class.java)!!
         every { aspect.getTargetMethod(joinPoint) } returns method
+        // The aspect keeps what it resolved per signature method and target class
+        val signature = mockk<MethodSignature>()
+        every { signature.method } returns method
+        every { joinPoint.signature } returns signature
 
         return method
+    }
+
+    @Test
+    fun repeatedCallsShouldResolveTheMethodOnceAndReuseOneReqShield() {
+        // given
+        every { reqShieldCache.get(any()) } returns ReqShieldData(methodReturn, 1000)
+        every { joinPoint.proceed() } answers { targetObject.cacheableWithCustomKey(argument) }
+        val method = stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+
+        // when
+        reqShieldAspect.aroundReqShieldCacheable(joinPoint)
+        val first = reqShieldAspect.reqShieldMap[method]
+        repeat(3) { reqShieldAspect.aroundReqShieldCacheable(joinPoint) }
+
+        // then the target method, and with it the annotation, is resolved on the first call only
+        verify(exactly = 1) { reqShieldAspect.getTargetMethod(joinPoint) }
+        assertEquals(1, reqShieldAspect.reqShieldMap.size)
+        assertNotNull(first)
+        assertSame(first, reqShieldAspect.reqShieldMap[method])
+    }
+
+    @Test
+    fun repeatedEvictionsShouldResolveTheMethodOnce() {
+        // given
+        every { joinPoint.proceed() } returns null
+        every { reqShieldCache.evict(any()) } returns true
+        stubTargetMethod(TestBean::evict.name)
+
+        // when
+        repeat(3) { reqShieldAspect.aroundReqShieldCacheEvict(joinPoint) }
+
+        // then
+        verify(exactly = 1) { reqShieldAspect.getTargetMethod(joinPoint) }
+        verify(exactly = 3) { reqShieldCache.evict("$cacheName::$spelEvaluatedKey") }
+    }
+
+    @Test
+    fun onlyASpelKeyShouldBuildAnEvaluationContext() {
+        // given
+        every { beanFactory.getBean(cacheKeyGenerator, KeyGenerator::class.java) } returns CustomGenerator()
+
+        // when
+        stubTargetMethod(TestBean::cacheableWithDefaultKeyGenerator.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+        stubTargetMethod(TestBean::cacheableWithKeyGenerator.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        // then
+        verify(exactly = 0) { reqShieldAspect.createEvaluationContext(any(), any(), any()) }
+
+        // when
+        stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+        reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        // then
+        verify(exactly = 2) { reqShieldAspect.createEvaluationContext(any(), any(), any()) }
+    }
+
+    @Test
+    fun spelKeyShouldBeEvaluatedAgainForTheArgumentsOfEachCall() {
+        // given
+        stubTargetMethod(TestBean::cacheableWithCustomKey.name)
+
+        // when
+        val first = reqShieldAspect.getCacheableCacheKey(joinPoint)
+        every { joinPoint.args } returns arrayOf(mapOf("x" to "otherX", "y" to "otherY"))
+        val second = reqShieldAspect.getCacheableCacheKey(joinPoint)
+
+        // then
+        assertEquals("$cacheName::$spelEvaluatedKey", first)
+        assertEquals("$cacheName::otherXotherY", second)
     }
 
     @Test

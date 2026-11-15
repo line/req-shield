@@ -25,6 +25,15 @@ private const val NESTED_SPECIAL_CHARS = ",[]{}="
 private const val MAX_NESTING_DEPTH = 32
 
 /**
+ * Whether a class overrides `toString()`, looked up once per class. A [ClassValue] keeps the answer on the class
+ * itself, so it does not keep the class or its class loader alive.
+ */
+private val OWNS_TO_STRING =
+    object : ClassValue<Boolean>() {
+        override fun computeValue(type: Class<*>): Boolean = type.getMethod("toString").declaringClass != Any::class.java
+    }
+
+/**
  * Builds the cache key of a method call from its arguments when the annotation names neither a key nor a key generator.
  *
  * The layout is the one of Spring's `SimpleKeyGenerator`: no argument gives `SimpleKey []`, one argument gives its
@@ -63,7 +72,7 @@ fun cacheKeyOfValue(value: Any?): String = encodeKeyPart(value, nested = false, 
  * (a `Pair` of one, a data class with such a field) passes, and its key then holds that hash code.
  */
 fun requireOwnToString(keyPart: Any) {
-    require(keyPart.javaClass.getMethod("toString").declaringClass != Any::class.java) {
+    require(OWNS_TO_STRING.get(keyPart.javaClass)) {
         "${keyPart.javaClass.name} does not override toString(), so it cannot be part of a cache key. " +
             "Override toString(), or set a key or keyGenerator that gives a text."
     }
@@ -123,11 +132,21 @@ private fun escape(
     nested: Boolean,
 ): String {
     if (nested && text.isEmpty()) return EMPTY_TEXT_MARKER
+    val firstEscaped = text.indexOfFirst { needsEscape(it, nested) }
+    // Most texts hold no special character, so they are returned without a copy
+    if (firstEscaped < 0) return text
 
-    return buildString(text.length) {
-        for (char in text) {
-            if (char == ESCAPE || (nested && char in NESTED_SPECIAL_CHARS)) append(ESCAPE)
+    return buildString(text.length + 1) {
+        append(text, 0, firstEscaped)
+        for (index in firstEscaped until text.length) {
+            val char = text[index]
+            if (needsEscape(char, nested)) append(ESCAPE)
             append(char)
         }
     }
 }
+
+private fun needsEscape(
+    char: Char,
+    nested: Boolean,
+): Boolean = char == ESCAPE || (nested && char in NESTED_SPECIAL_CHARS)
