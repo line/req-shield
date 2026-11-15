@@ -19,6 +19,8 @@ logback = "1.5.38"
 netty = "4.1.139.Final"
 # Bouncy Castle used internally by the Kotlin Gradle plugin (see the root build).
 bouncycastle = "1.86"
+# JMH of the req-shield-benchmark-example module.
+jmh = "1.37"
 
 [libraries]
 # kotlin
@@ -40,6 +42,7 @@ kotlin-coroutine-reactive = { module = "org.jetbrains.kotlinx:kotlinx-coroutines
 # log
 slf4j = { module = "org.slf4j:slf4j-api", version = "1.7.36" }
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+slf4j-nop = { module = "org.slf4j:slf4j-nop", version = "1.7.36" }
 
 # redis
 lettuce = { module = "io.lettuce:lettuce-core", version = "6.8.2.RELEASE" }
@@ -85,3 +88,4 @@ spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }
 spring-boot4 = { id = "org.springframework.boot", version.ref = "springBoot4" }
 spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependency" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version = "12.1.0" }
+jmh = { id = "me.champeau.jmh", version = "0.7.2" }

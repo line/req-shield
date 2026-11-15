@@ -295,6 +295,28 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   functions. Annotating a regular function fails fast with an `IllegalArgumentException`; use `core-spring` or
   `core-spring-webflux` for blocking or `Mono`-returning methods.
 
+## Benchmarks
+
+The `req-shield-benchmark-example` module holds JMH benchmarks of the library. It is not published.
+
+```bash
+./gradlew :req-shield-benchmark-example:jmhJar
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar -l        # list the benchmarks
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar 'HitBenchmark' -t 8 -prof gc
+```
+
+- `HitBenchmark`, `MissBenchmark`, `StaleHitBenchmark`, `LockBenchmark`: the cost of one call on each path of `core`,
+  against a plain cache-aside call. `Reactor*` and `Coroutine*` do the same for `core-reactor` and
+  `core-kotlin-coroutine`, and `*AspectHitBenchmark` for the three Spring aspects.
+- `StampedeBenchmark`, `ReadAfterMissBenchmark`, `ExpiryLoadBenchmark`, `SpringAspectStampedeBenchmark`: one invocation is
+  one scenario run. The JMH score is the time of the run. The supplier call count and the latency of each request go
+  to a JSON-lines file: `build/jmh-events.jsonl` in the working directory, or the path in `-Dbench.events`
+  (pass it with `-jvmArgsAppend`).
+- Choose the module and the side with parameters, for example
+  `-p module=core,reactor,coroutine -p arm=cacheAside,reqShield -p supplierMillis=10,100`.
+- The cache of the benchmarks is a map in the JVM. A cache behind a network call takes far longer per call, so read a
+  difference of some nanoseconds as an absolute cost, not as a ratio.
+
 ## Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to

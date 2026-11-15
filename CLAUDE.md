@@ -67,6 +67,12 @@ The library is organized into several core modules:
 ./gradlew :req-shield-spring-boot4-webflux-kotlin-coroutine-example:bootRun
 ```
 
+### Running Benchmarks
+```bash
+./gradlew :req-shield-benchmark-example:jmhJar      # JMH benchmarks of the library (not published); see README "Benchmarks"
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar -l
+```
+
 ## Module Structure
 
 ### Core Modules
