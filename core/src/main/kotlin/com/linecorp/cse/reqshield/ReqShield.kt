@@ -182,7 +182,8 @@ class ReqShield<T>(
                 token =
                     try {
                         lock.tryLock(key, lockType)
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
+                        // Also for an Error: the front lock and its signal must not stay until the lock timeout
                         if (frontToken != null) releaseFrontLock(key, frontToken)
                         throw e
                     }

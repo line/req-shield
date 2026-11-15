@@ -26,7 +26,8 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.REPRESENTATIVE_F
  *
  * Only one request of a JVM reads at these short waits, so the cache gets few extra reads, and the other requests
  * of that JVM get an entry of a fast supplier long before a whole poll interval ends. No wait is longer than the
- * poll interval, so an entry of a slow supplier is found as early as with the fixed interval.
+ * poll interval, so an entry is found at most one poll interval after its write, as with the fixed interval. The
+ * reads fall at other times than with the fixed interval, so one entry can be found earlier or later than before.
  */
 fun representativePollMillis(waitIndex: Int): Long {
     require(waitIndex >= 0) { "waitIndex must not be negative, but was $waitIndex" }

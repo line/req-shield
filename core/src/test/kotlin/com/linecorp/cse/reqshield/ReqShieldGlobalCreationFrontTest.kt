@@ -245,7 +245,48 @@ class ReqShieldGlobalCreationFrontTest {
         assertTheNextRequestGetsTheLock(shield)
     }
 
+    @Test
+    fun theFrontLockShouldBeFreeWhenItsSignalCompletes() {
+        val shield = shield()
+        // A local lock of the same JVM shares the lock map, so it can try the front lock of a key
+        val probe = KeyLocalLock(1_000)
+
+        repeat(ORDER_ROUNDS) { round ->
+            val roundKey = "$key-$round"
+            val holderInSupplier = CountDownLatch(1)
+            val endSupplier = CountDownLatch(1)
+            val holder =
+                callers.submit<ReqShieldData<Product>> {
+                    shield.getAndSetReqShieldData(
+                        roundKey,
+                        Callable<Product?> {
+                            holderInSupplier.countDown()
+                            endSupplier.await()
+                            localProduct
+                        },
+                        10_000,
+                    )
+                }
+            assertTrue(holderInSupplier.await(2, TimeUnit.SECONDS))
+            val signal = ReqShield.creationSignals.find(roundKey)!!
+            // Spins, so it sees the completed signal as early as a waiter can
+            val frontLockWasFree =
+                callers.submit<Boolean> {
+                    while (signal.count != 0L) Thread.onSpinWait()
+                    val token = probe.tryLock("creation-front:$roundKey", LockType.CREATE)
+                    if (token != null) probe.unLock("creation-front:$roundKey", LockType.CREATE, token)
+                    token != null
+                }
+
+            endSupplier.countDown()
+
+            assertEquals(localProduct, holder.get(2, TimeUnit.SECONDS).value)
+            assertTrue(frontLockWasFree.get(2, TimeUnit.SECONDS), "round $round: the signal completed while the front lock was held")
+        }
+    }
+
     private companion object {
+        const val ORDER_ROUNDS = 300
         const val CALLERS = 20
         const val REMOTE_TOKEN = "token-of-another-jvm"
     }

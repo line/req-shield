@@ -263,8 +263,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   miss of 100 concurrent requests costs one lock call and one unlock call, not 101 lock calls.
 - If a request of another JVM holds the global lock, that one request reads the cache for its JVM: 5, 15, 35 and
   75 ms after its first read, then every 50 ms. When it finds the entry, the other requests of its JVM read the cache
-  at once. An entry is found at most one of these waits after it was written, and never later than with a fixed
-  50 ms interval. If the holder in the other JVM fails and writes no entry, the requests still wait until their reads
+  at once. An entry is found at most one of these waits after it was written, so at most 50 ms after the write, as
+  with the fixed interval. The reads fall at other times than before, so an entry of a slow supplier can be found
+  up to 25 ms earlier or later than with the fixed interval. If the holder in the other JVM fails and writes no entry, the requests still wait until their reads
   are used up (about 3 s with the defaults), as before.
 - If the holder gave the lock back and the cache still has no entry (the supplier of the holder failed, for example),
   the waiting request tries to get the lock itself. One waiting request becomes the next holder and calls the
