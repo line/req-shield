@@ -218,6 +218,12 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - Once an entry is older than `decisionForUpdate` percent of its TTL, a read returns it and starts a refresh in the
   background, unless another request already holds the update lock of that key. The refresh calls the supplier on its
   own and can still be running after the caller has its data.
+- Choose the TTL and `decisionForUpdate` so that a supplier call ends inside the refresh window. The window is the
+  last part of the TTL: `timeToLiveMillis × (100 − decisionForUpdate) / 100`, which is 20 % of the TTL with the
+  default of 80. A refresh that ends inside the window is not seen by any request: each read gets the old entry at
+  once and the new entry after the write. If the supplier takes longer than the window, the entry expires before
+  its refresh ends, and the requests for that key then wait for the refresh. If the supplier takes about as long as
+  the TTL, the requests wait for most of each TTL: use a longer TTL, or a smaller `decisionForUpdate`.
 - `core-reactor` and the WebFlux adapter subscribe the refresh with the caller's Reactor `Context`, so a supplier that
   reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
