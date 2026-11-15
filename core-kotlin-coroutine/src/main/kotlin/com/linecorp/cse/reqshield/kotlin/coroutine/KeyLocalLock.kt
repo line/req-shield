@@ -18,6 +18,7 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -66,7 +67,11 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
     )
 
     companion object {
-        private val lockMap = ConcurrentHashMap<String, LockInfo>()
+        // An entry lives only while its lock is held, so the map is almost empty. With the default 16 bins, locks of
+        // different keys would contend for the same bins.
+        private val lockMap = ConcurrentHashMap<String, LockInfo>(LOCK_MAP_INITIAL_CAPACITY)
+
+        private const val LOCK_MAP_INITIAL_CAPACITY = 1024
 
         /**
          * Source of local ownership tokens. A monotonic counter is enough because tokens never
@@ -148,6 +153,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
     ): String? {
         val completeKey = lockKeyOf(key, lockType)
         val now = nowToEpochTime()
+        // An entry exists only while its lock is held, so an entry that has not expired means the lock is taken.
+        // A failed attempt changes nothing, so it needs no lock on the map bin. Only an attempt that can get the lock
+        // goes on to compute(): a new key, or an entry that expired.
+        lockMap[completeKey]?.let { if (now <= it.expiresAt) return null }
         val acquiredToken = AtomicReference<String?>(null)
 
         // Use compute() for atomic lock acquisition.
@@ -178,7 +187,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
                 // The caller then takes its normal path and writes the cache; making it wait
                 // would stall it on a holder that does not exist. Only this key's collapsing
                 // is lost, and the later unLock simply finds nothing to release.
-                if (LocalLockLimit.rejectsNewEntry(lockMap.mappingCount())) {
+                // mappingCount() adds up the counter cells of the map, so it is read only while a cap is set
+                if (LocalLockLimit.maxEntries != UNLIMITED_LOCK_ENTRIES &&
+                    LocalLockLimit.rejectsNewEntry(lockMap.mappingCount())
+                ) {
                     acquiredToken.set(nextToken())
                     return@compute null
                 }

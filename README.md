@@ -273,6 +273,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   its lifecycle stays yours, and like any `Executor` bean it makes Spring Boot skip `applicationTaskExecutor`.
 - `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter uses the shared
   `boundedElastic` too and never disposes it; to use your own, define a `Scheduler` bean named `reqShieldScheduler`.
+  With the local lock, a read of an entry that is due for a refresh asks for the update lock on its own thread, and
+  only the read that gets the lock hands the refresh to the scheduler. A global lock or a custom `KeyLock` is called
+  on the scheduler.
 - `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
   `Dispatchers.IO`). The coroutine Spring adapter runs them on a supervisor scope of its own on `Dispatchers.IO` and
   cancels it on context shutdown; to use your own, define a `CoroutineScope` bean named `reqShieldCoroutineScope`.

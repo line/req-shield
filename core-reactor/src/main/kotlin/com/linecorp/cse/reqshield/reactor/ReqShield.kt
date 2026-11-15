@@ -123,19 +123,40 @@ class ReqShield<T>(
                 .flatMap { reqShieldData -> write(reqShieldData, token) }
                 .switchIfEmpty(Mono.defer { write(buildReqShieldData(null, timeToLiveMillis), token) })
 
+        val lock = lockFor(lockType)
         // Empty means another request already holds the update lock: nothing to do here.
         // Deferred so a lock call that throws fails this refresh only, not the caller's cache hit.
+        val token = Mono.defer { lock.tryLock(key, lockType) }
+
         val updateMono =
-            Mono
-                .defer { lockFor(lockType).tryLock(key, lockType) }
-                .flatMap { token ->
+            if (lock is KeyLocalLock) {
+                // A local lock answers at once, on the thread that asks, as it does on the creation path. So only the
+                // request that gets the token hands work to the scheduler. A request that loses the lock - each
+                // other read of this key while the refresh runs - creates no task.
+                token.flatMap { acquired ->
                     // A request that finds the entry gone during this refresh waits for this signal instead of a supplier call
-                    refreshSignals.register(key, token, CompletableFuture())
-                    processMono(token)
+                    refreshSignals.register(key, acquired, CompletableFuture())
+                    val started = AtomicBoolean(false)
+                    Mono
+                        .defer {
+                            started.set(true)
+                            processMono(acquired)
+                        }.subscribeOn(reqShieldConfig.scheduler)
+                        // After subscribeOn: a scheduler that rejects the task never subscribes the chain above, so
+                        // the releases inside processMono never run and the token is released here.
+                        .doFinally { if (!started.get()) releaseLock(key, lockType, acquired, callerContext) }
                 }
+            } else {
+                // A global or custom lock can take time and can emit on its client's event loop, so its call and all
+                // that follows stay on the scheduler.
+                token
+                    .flatMap { acquired ->
+                        refreshSignals.register(key, acquired, CompletableFuture())
+                        processMono(acquired)
+                    }.subscribeOn(reqShieldConfig.scheduler)
+            }
 
         updateMono
-            .subscribeOn(reqShieldConfig.scheduler)
             .contextWrite(callerContext)
             .subscribe(
                 { /* success - no action needed */ },
