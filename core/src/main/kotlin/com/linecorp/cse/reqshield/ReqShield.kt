@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_CREATION_FRONT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
@@ -27,10 +28,12 @@ import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.signal.ReleaseSignals
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
+import com.linecorp.cse.reqshield.support.utils.representativePollMillis
 import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
@@ -53,6 +56,16 @@ class ReqShield<T>(
      * another JVM holds the lock. An attempt takes this local lock and never gives it back: it expires.
      */
     private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS) }
+
+    /**
+     * With a global lock, chooses the one request of this JVM that asks the lock store for the creation lock of a
+     * key. The other requests of this JVM wait for the signal of that request. Without it, each of them would call
+     * the store, and each would read the cache every 50 ms while a request of another JVM holds the lock.
+     */
+    private val creationFrontLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    /** The front lock token of a request that got the global lock, by the token of that global lock. */
+    private val frontTokens = ConcurrentHashMap<String, String>()
 
     private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
 
@@ -150,14 +163,40 @@ class ReqShield<T>(
         while (true) {
             // ONLY_UPDATE_CACHE collapses requests on cache update only, so the creation runs without a lock
             val lock = reqShieldConfig.keyLock
-            val nanosBeforeAttempt = if (onlyUpdateCache) 0L else nanosBeforeAttempt(lock)
-            val token = if (onlyUpdateCache) null else lock.tryLock(key, lockType)
+            // With a global lock, only the request that gets the front lock of this JVM asks the store
+            val frontToken =
+                if (!onlyUpdateCache && lock is KeyGlobalLock) {
+                    creationFrontLock.tryLock(frontKeyOf(key), lockType)
+                } else {
+                    null
+                }
+            val asksTheLock = !onlyUpdateCache && (lock !is KeyGlobalLock || frontToken != null)
+
+            var token: String? = null
             // Without a token there is no lock, and no late-write check reads this value
-            val lockedAtNanos = if (token == null) 0L else lockStartNanos(lock, nanosBeforeAttempt)
+            var lockedAtNanos = 0L
+            if (asksTheLock) {
+                // The requests of this JVM that lost the front lock wait for this signal from now on
+                if (frontToken != null) creationSignals.register(key, frontToken, CountDownLatch(1))
+                val nanosBeforeAttempt = nanosBeforeAttempt(lock)
+                token =
+                    try {
+                        lock.tryLock(key, lockType)
+                    } catch (e: Exception) {
+                        if (frontToken != null) releaseFrontLock(key, frontToken)
+                        throw e
+                    }
+                if (token != null) lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
+            }
 
             if (token != null) {
-                // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
-                creationSignals.register(key, token, CountDownLatch(1))
+                if (frontToken != null) {
+                    // The release of the global lock gives the front lock back too, and completes its signal
+                    frontTokens[token] = frontToken
+                } else {
+                    // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
+                    creationSignals.register(key, token, CountDownLatch(1))
+                }
                 var cacheCreationRequired = false
                 try {
                     // Another request may have filled the cache between our initial miss and lock acquisition.
@@ -176,7 +215,19 @@ class ReqShield<T>(
                 return createReqShieldData(key, callable, timeToLiveMillis, lockType, token, lockedAtNanos)
             }
 
-            when (val waited = readUntilReleased(key, creationSignals, budget)) {
+            val waited =
+                if (frontToken != null) {
+                    // A request of another JVM holds the global lock. This request reads the cache for all requests
+                    // of this JVM, and they wait for its signal.
+                    try {
+                        pollAsRepresentative(key, budget)
+                    } finally {
+                        releaseFrontLock(key, frontToken)
+                    }
+                } else {
+                    readUntilReleased(key, creationSignals, budget)
+                }
+            when (waited) {
                 is Waited.Found -> return waited.data
                 // The holder gave the lock back and wrote no entry (its supplier failed, for example), so this
                 // request tries to be the next holder. The requests that lose again wait for the new holder.
@@ -499,8 +550,68 @@ class ReqShield<T>(
         lockType: LockType,
         token: String,
     ) {
-        val signals = if (lockType == LockType.CREATE) creationSignals else refreshSignals
-        signals.release(key, token)
+        if (lockType == LockType.UPDATE) {
+            refreshSignals.release(key, token)
+            return
+        }
+        // A request that got a global lock holds the front lock of its JVM too, and registered its signal with it
+        val frontToken = frontTokens.remove(token)
+        if (frontToken != null) releaseFrontLock(key, frontToken) else creationSignals.release(key, token)
+    }
+
+    private fun frontKeyOf(key: String): String = GLOBAL_CREATION_FRONT_KEY_PREFIX + key
+
+    /**
+     * Gives the front lock back and then wakes the requests that wait for [frontToken]. The order matters: a
+     * request that wakes while the front lock is still held loses it again, finds no signal, and reads the cache at
+     * the poll interval until its reads are used up.
+     */
+    private fun releaseFrontLock(
+        key: String,
+        frontToken: String,
+    ) {
+        try {
+            creationFrontLock.unLock(frontKeyOf(key), LockType.CREATE, frontToken)
+        } catch (unlockError: Exception) {
+            log.error("Failed to unlock the front lock of key '{}'", key, unlockError)
+        } finally {
+            creationSignals.release(key, frontToken)
+        }
+    }
+
+    /**
+     * Reads the cache while a request of another JVM holds the global lock. No signal of that request reaches this
+     * JVM, so the wait between two reads starts short and grows to the poll interval: see [representativePollMillis].
+     * The reads count in [budget] like the reads of any wait, and the supplier is never called from the loop.
+     *
+     * @return [Waited.Found] with the entry, or [Waited.GaveUp] when the reads are used up or the cache looks
+     * unavailable.
+     */
+    private fun pollAsRepresentative(
+        key: String,
+        budget: ReadBudget,
+    ): Waited<T> {
+        var waits = 0
+
+        while (budget.reads < reqShieldConfig.maxAttemptGetCache) {
+            budget.reads++
+
+            try {
+                val cachedData = reqShieldConfig.getCacheFunction.invoke(key)
+                if (cachedData != null) return Waited.Found(cachedData)
+
+                budget.consecutiveFailures = 0
+            } catch (e: Exception) {
+                log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
+                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.GaveUp
+            }
+
+            if (budget.reads < reqShieldConfig.maxAttemptGetCache) {
+                waitForNextRead(key, null, representativePollMillis(waits++))
+            }
+        }
+
+        return Waited.GaveUp
     }
 
     private fun logAsyncFailure(

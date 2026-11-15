@@ -46,6 +46,19 @@ object ConfigValues {
      */
     const val GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX = "refresh-attempt:"
 
+    /**
+     * With a global lock, one request of a JVM at a time asks the lock store for the creation lock of a key. The
+     * local lock that chooses that request has keys with this prefix, so they do not collide with the local locks
+     * of the cache keys.
+     */
+    const val GLOBAL_CREATION_FRONT_KEY_PREFIX = "creation-front:"
+
+    /**
+     * The first wait of the request that reads the cache for its JVM while a request of another JVM holds the
+     * global lock. Each wait is twice the one before it, up to [GET_CACHE_INTERVAL_MILLIS].
+     */
+    const val REPRESENTATIVE_FIRST_POLL_MILLIS = 5L
+
     /** Prefix applied to every lock key so lock entries can never collide with cache entries. */
     const val LOCK_KEY_PREFIX = "reqshield:lock:"
 

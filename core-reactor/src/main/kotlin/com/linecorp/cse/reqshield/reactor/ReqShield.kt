@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield.reactor
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_CREATION_FRONT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
@@ -27,6 +28,7 @@ import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.signal.ReleaseSignals
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
+import com.linecorp.cse.reqshield.support.utils.representativePollMillis
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
@@ -34,6 +36,7 @@ import reactor.util.context.ContextView
 import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -71,6 +74,16 @@ class ReqShield<T>(
      * another JVM holds the lock. An attempt takes this local lock and never gives it back: it expires.
      */
     private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS) }
+
+    /**
+     * With a global lock, chooses the one request of this JVM that asks the lock store for the creation lock of a
+     * key. The other requests of this JVM wait for the signal of that request. Without it, each of them would call
+     * the store, and each would read the cache every 50 ms while a request of another JVM holds the lock.
+     */
+    private val creationFrontLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    /** The front lock token of a request that got the global lock, by the token of that global lock. */
+    private val frontTokens = ConcurrentHashMap<String, String>()
 
     private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
 
@@ -238,41 +251,131 @@ class ReqShield<T>(
         }
 
         val lock = reqShieldConfig.keyLock
+        if (lock is KeyGlobalLock) {
+            // With a global lock, only the request that gets the front lock of this JVM asks the store
+            return creationFrontLock
+                .tryLock(frontKeyOf(key), lockType)
+                .flatMap { frontToken -> createAsRepresentative(key, callable, timeToLiveMillis, budget, callerContext, lock, frontToken) }
+                .switchIfEmpty(
+                    Mono.defer {
+                        handleLockFailure(key, callable, timeToLiveMillis, budget, callerContext)
+                    },
+                )
+        }
+
         val nanosBeforeAttempt = nanosBeforeAttempt(lock)
         return lock
             .tryLock(key, lockType)
             .flatMap { token ->
-                val lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
                 // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
                 creationSignals.register(key, token, CompletableFuture())
-                val owner = AtomicReference(LockOwner.RECHECK)
-                // Another request may have filled the cache between our initial miss and lock acquisition.
-                Mono.defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key) }
-                    // A global lock can emit on its client's event loop; keep cache reads off that thread.
-                    .subscribeOn(reqShieldConfig.scheduler)
-                    .flatMap { Mono.justOrEmpty(it) }
-                    .switchIfEmpty(
-                        Mono.defer {
-                            // A cancel that already released the lock leaves nothing to create.
-                            if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.CREATION)) {
-                                createReqShieldData(key, callable, timeToLiveMillis, lockType, token, owner, lockedAtNanos, callerContext)
-                            } else {
-                                Mono.empty()
-                            }
-                        },
-                    ).doFinally {
-                        // A cache hit, read failure, or cancellation during the recheck must release our token.
-                        // Once creation owns it, createReqShieldData releases it (error, cancel or after the write).
-                        if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.RELEASED)) {
-                            releaseLock(key, lockType, token, callerContext)
-                        }
-                    }
+                createUnderLock(key, callable, timeToLiveMillis, token, lockStartNanos(lock, nanosBeforeAttempt), callerContext)
             }.switchIfEmpty(
                 Mono.defer {
                     handleLockFailure(key, callable, timeToLiveMillis, budget, callerContext)
                 },
             )
     }
+
+    /**
+     * Runs the request that got the front lock of [key] in this JVM. It asks the store for the global lock. If it
+     * gets the lock, it creates the entry, and the release of the global lock gives the front lock back. If a request
+     * of another JVM holds the lock, it reads the cache for all requests of this JVM, see [pollAsRepresentative].
+     *
+     * The front lock is given back exactly once, also on an error or a cancel, and always before its signal completes.
+     */
+    private fun createAsRepresentative(
+        key: String,
+        callable: Callable<Mono<T?>>,
+        timeToLiveMillis: Long,
+        budget: ReadBudget,
+        callerContext: ContextView,
+        lock: KeyGlobalLock,
+        frontToken: String,
+    ): Mono<ReqShieldData<T>> {
+        val lockType = LockType.CREATE
+        // True while this request must give the front lock back itself. Either the release or the handover sets it to false.
+        val holdsFront = AtomicBoolean(true)
+
+        fun releaseFrontOnce() {
+            if (holdsFront.compareAndSet(true, false)) releaseFrontLock(key, frontToken)
+        }
+
+        // The requests of this JVM that lost the front lock wait for this signal from now on
+        creationSignals.register(key, frontToken, CompletableFuture())
+        val nanosBeforeAttempt = nanosBeforeAttempt(lock)
+        return lock
+            .tryLock(key, lockType)
+            .flatMap { token ->
+                // The release of the global lock gives the front lock back too, and completes its signal. After a
+                // cancel the front lock is already free: the recheck below is cancelled and releases the token.
+                if (holdsFront.compareAndSet(true, false)) frontTokens[token] = frontToken
+                createUnderLock(key, callable, timeToLiveMillis, token, lockStartNanos(lock, nanosBeforeAttempt), callerContext)
+            }.switchIfEmpty(
+                Mono.defer {
+                    // A request of another JVM holds the global lock
+                    pollAsRepresentative(key, budget)
+                        .flatMap { waited ->
+                            // Given back before the result goes on, so the waiters of this JVM read the cache at once
+                            releaseFrontOnce()
+                            if (waited is Waited.Found) Mono.just(waited.data) else callWithoutLock(callable, timeToLiveMillis)
+                        }
+                        // A lock can emit on its client's event loop; keep the reads and the supplier call off that thread.
+                        .subscribeOn(reqShieldConfig.scheduler)
+                },
+            )
+            // A failed lock call: the front lock is given back before the error goes on
+            .doOnError { releaseFrontOnce() }
+            // A cancel: doFinally cancels the upstream first, so KeyGlobalLock releases its token before the waiters wake.
+            .doFinally { releaseFrontOnce() }
+    }
+
+    /**
+     * Holds the creation lock [token]: reads the cache once more and creates the entry on a miss. Each path ends in
+     * exactly one release of [token].
+     */
+    private fun createUnderLock(
+        key: String,
+        callable: Callable<Mono<T?>>,
+        timeToLiveMillis: Long,
+        token: String,
+        lockedAtNanos: Long,
+        callerContext: ContextView,
+    ): Mono<ReqShieldData<T>> {
+        val lockType = LockType.CREATE
+        val owner = AtomicReference(LockOwner.RECHECK)
+        // Another request may have filled the cache between our initial miss and lock acquisition.
+        return Mono
+            .defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key) }
+            // A global lock can emit on its client's event loop; keep cache reads off that thread.
+            .subscribeOn(reqShieldConfig.scheduler)
+            .flatMap { Mono.justOrEmpty(it) }
+            .switchIfEmpty(
+                Mono.defer {
+                    // A cancel that already released the lock leaves nothing to create.
+                    if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.CREATION)) {
+                        createReqShieldData(key, callable, timeToLiveMillis, lockType, token, owner, lockedAtNanos, callerContext)
+                    } else {
+                        Mono.empty()
+                    }
+                },
+            ).doFinally {
+                // A cache hit, read failure, or cancellation during the recheck must release our token.
+                // Once creation owns it, createReqShieldData releases it (error, cancel or after the write).
+                if (owner.compareAndSet(LockOwner.RECHECK, LockOwner.RELEASED)) {
+                    releaseLock(key, lockType, token, callerContext)
+                }
+            }
+    }
+
+    /** Calls the supplier without a lock, after a wait gave up. No lock was acquired, so nothing is released on failure. */
+    private fun callWithoutLock(
+        callable: Callable<Mono<T?>>,
+        timeToLiveMillis: Long,
+    ): Mono<ReqShieldData<T>> =
+        executeCallable(callable)
+            .map { data -> buildReqShieldData(data, timeToLiveMillis) }
+            .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
 
     /**
      * The clock before a lock attempt, for a lock whose start is read there. A lock in a store starts when the store
@@ -414,11 +517,7 @@ class ReqShield<T>(
                 when (waited) {
                     is Waited.Found -> Mono.just(waited.data)
                     Waited.Released -> createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
-                    // No lock was acquired by this request, so there is nothing to release on failure
-                    Waited.GaveUp ->
-                        executeCallable(callable)
-                            .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                            .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
+                    Waited.GaveUp -> callWithoutLock(callable, timeToLiveMillis)
                 }
             }
             // A lock can emit on its client's event loop; keep the reads and the supplier call off that thread.
@@ -509,6 +608,32 @@ class ReqShield<T>(
                             .doOnNext { released.set(it) }
                             .thenReturn(index)
                     }
+            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.GaveUp) }
+            .defaultIfEmpty(Waited.GaveUp)
+    }
+
+    /**
+     * Reads the cache while a request of another JVM holds the global lock. No signal of that request reaches this
+     * JVM, so the wait between two reads starts short and grows to the poll interval: see [representativePollMillis].
+     * The reads count in [budget] like the reads of any wait, and the supplier is never called from the loop.
+     *
+     * Emits [Waited.Found] with the entry, or [Waited.GaveUp] when the reads are used up or the cache looks unavailable.
+     */
+    private fun pollAsRepresentative(
+        key: String,
+        budget: ReadBudget,
+    ): Mono<Waited<T>> {
+        val maxReads = reqShieldConfig.maxAttemptGetCache
+        return Mono
+            .defer {
+                if (budget.reads.get() >= maxReads) return@defer Mono.just<Waited<T>>(Waited.GaveUp)
+                budget.reads.incrementAndGet()
+                getCacheWhileWaitingForLock(key, budget.consecutiveFailures).map<Waited<T>> { Waited.Found(it) }
+            }.repeatWhenEmpty { emptyReads ->
+                emptyReads
+                    // No wait after the last read
+                    .takeWhile { budget.reads.get() < maxReads }
+                    .concatMap { index -> waitForNextRead(null, representativePollMillis(index.toInt())).thenReturn(index) }
             }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.GaveUp) }
             .defaultIfEmpty(Waited.GaveUp)
     }
@@ -636,12 +761,38 @@ class ReqShield<T>(
             }.doFinally {
                 // Every lock release goes through here. The waiters are woken also after a failed release: they then
                 // read the cache and go on as after a poll interval.
-                val signals = if (lockType == LockType.CREATE) creationSignals else refreshSignals
-                signals.release(key, token)
+                if (lockType == LockType.UPDATE) {
+                    refreshSignals.release(key, token)
+                    return@doFinally
+                }
+                // A request that got a global lock holds the front lock of its JVM too, and registered its signal with it
+                val frontToken = frontTokens.remove(token)
+                if (frontToken != null) releaseFrontLock(key, frontToken) else creationSignals.release(key, token)
             }.contextWrite(callerContext)
             .subscribe(
                 { /* success - no action needed */ },
                 { e -> log.error("Failed to unlock key '{}': {}", key, e.message, e) },
+            )
+    }
+
+    private fun frontKeyOf(key: String): String = GLOBAL_CREATION_FRONT_KEY_PREFIX + key
+
+    /**
+     * Gives the front lock back and then wakes the requests that wait for [frontToken]. The order matters: a
+     * request that wakes while the front lock is still held loses it again, finds no signal, and reads the cache at
+     * the poll interval until its reads are used up.
+     */
+    private fun releaseFrontLock(
+        key: String,
+        frontToken: String,
+    ) {
+        // The front lock is a local lock: its unlock runs at once on this thread, before doFinally completes the signal
+        Mono
+            .defer { creationFrontLock.unLock(frontKeyOf(key), LockType.CREATE, frontToken) }
+            .doFinally { creationSignals.release(key, frontToken) }
+            .subscribe(
+                { /* success - no action needed */ },
+                { e -> log.error("Failed to unlock the front lock of key '{}': {}", key, e.message, e) },
             )
     }
 

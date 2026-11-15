@@ -150,6 +150,10 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   command reaches the store before the lock command, the lock still stays until its timeout ends.
 - The example modules contain working implementations for `RedisTemplate`, `ReactiveRedisTemplate` and the coroutine
   extensions.
+- A global lock also uses the local lock map of the JVM (see "Local lock map size"). Its entries have the cache key
+  with the prefix `creation-front:` (the request that asks the lock store for a creation lock) or `refresh-attempt:`
+  (the last request that asked for a refresh lock). `req-shield.lock.max-entries` applies to them. Once the map is
+  full, each request for a new key asks the lock store itself, as in versions before this change.
 
 ### Local lock map size
 
@@ -253,8 +257,15 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   between two reads.
 - If the request that holds the lock runs in the same JVM, the waiting request reads the cache as soon as that request
   gave the lock back: after its cache write, or after its supplier failed. It does not wait for the rest of the 50 ms.
-  If the holder runs in another JVM (global lock), or the lock is a custom `KeyLock` that another component holds, the
-  waiting request reads the cache every 50 ms.
+  If the lock is a custom `KeyLock` that another component holds, the waiting request reads the cache every 50 ms.
+- With a global lock (`isLocalLock = false`), one request of a JVM asks the lock store for the creation lock of a
+  key. The other requests of that JVM for the key wait for that request and do not call the lock store. So a cache
+  miss of 100 concurrent requests costs one lock call and one unlock call, not 101 lock calls.
+- If a request of another JVM holds the global lock, that one request reads the cache for its JVM: 5, 15, 35 and
+  75 ms after its first read, then every 50 ms. When it finds the entry, the other requests of its JVM read the cache
+  at once. An entry is found at most one of these waits after it was written, and never later than with a fixed
+  50 ms interval. If the holder in the other JVM fails and writes no entry, the requests still wait until their reads
+  are used up (about 3 s with the defaults), as before.
 - If the holder gave the lock back and the cache still has no entry (the supplier of the holder failed, for example),
   the waiting request tries to get the lock itself. One waiting request becomes the next holder and calls the
   supplier; the others wait for it. So after a failed holder the supplier is called by one request at a time, not by
