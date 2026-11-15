@@ -120,6 +120,84 @@ class ReqShieldInstanceIsolationTest {
         assertEquals(1L, endOther.count)
     }
 
+    /** Instance a refreshes its old entry and its supplier is held. Instance b has no entry in its own cache. */
+    private fun aCreationShouldNotWaitForARefreshOfAnotherInstance(global: Boolean) {
+        val storeA = ProbeStore()
+        val storeB = ProbeStore()
+        storeA.putOldEntry(key)
+        val a = ProbeShields.shield(storeA, global)
+        val b = ProbeShields.shield(storeB, global)
+        val aRefreshing = CountDownLatch(1)
+        assertEquals(
+            "old",
+            a(key) {
+                aRefreshing.countDown()
+                endOther.await(20, TimeUnit.SECONDS)
+                "a"
+            },
+        )
+        assertTrue(aRefreshing.await(5, TimeUnit.SECONDS), "the refresh of instance a did not start")
+        val supplierCalls = AtomicInteger()
+
+        val results =
+            ProbeShields.burst(5) {
+                b(key) {
+                    supplierCalls.incrementAndGet()
+                    "b"
+                }
+            }
+
+        assertEquals(setOf<String?>("b"), results.map { it.first }.toSet())
+        assertEquals(1, supplierCalls.get())
+        assertEquals(1L, endOther.count, "the requests returned only after the refresh of the other instance ended")
+        // Far below the 3 s that a wait for the refresh of instance a would take
+        assertTrue(results.maxOf { it.second } < 2_000, "the slowest request took ${results.maxOf { it.second }} ms")
+    }
+
+    @Test
+    fun aCreationShouldNotWaitForARefreshOfAnotherInstanceWithTheLocalLock() =
+        aCreationShouldNotWaitForARefreshOfAnotherInstance(
+            global = false,
+        )
+
+    @Test
+    fun aCreationShouldNotWaitForARefreshOfAnotherInstanceWithAGlobalLock() =
+        aCreationShouldNotWaitForARefreshOfAnotherInstance(
+            global = true,
+        )
+
+    @Test
+    fun aRefreshShouldNotWaitForARefreshOfAnotherInstanceWithAGlobalLock() {
+        val storeA = ProbeStore()
+        val storeB = ProbeStore()
+        storeA.putOldEntry(key)
+        storeB.putOldEntry(key)
+        val a = ProbeShields.shield(storeA, global = true)
+        val b = ProbeShields.shield(storeB, global = true)
+        val aRefreshing = CountDownLatch(1)
+        val bRefreshing = CountDownLatch(1)
+
+        assertEquals(
+            "old",
+            a(key) {
+                aRefreshing.countDown()
+                endOther.await(20, TimeUnit.SECONDS)
+                "a"
+            },
+        )
+        assertTrue(aRefreshing.await(5, TimeUnit.SECONDS), "the refresh of instance a did not start")
+        assertEquals(
+            "old",
+            b(key) {
+                bRefreshing.countDown()
+                "b"
+            },
+        )
+
+        assertTrue(bRefreshing.await(5, TimeUnit.SECONDS), "instance b did not refresh while instance a refreshed")
+        assertEquals(1L, endOther.count)
+    }
+
     @Test
     fun eachInstanceShouldAskItsOwnStoreForTheRefreshLock() {
         val storeA = ProbeStore()

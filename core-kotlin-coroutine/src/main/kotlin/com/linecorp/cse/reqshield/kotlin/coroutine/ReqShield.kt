@@ -74,15 +74,11 @@ class ReqShield<T>(
         if (reqShieldConfig.keyLock is KeyLocalLock) Companion.creationSignals else ReleaseSignals { it.complete(Unit) }
 
     /**
-     * The refreshes that requests of this instance wait for. Shared in the JVM only when the refresh lock is the
-     * configured local lock. In [ReqShieldWorkMode.ONLY_CREATE_CACHE] the refresh lock belongs to this instance.
+     * The refreshes of this instance. A request that finds an entry gone waits for the refresh of its key. The
+     * registry is never shared: a request of another instance, with a cache of its own, must not wait for a refresh
+     * that writes to this cache. In version 1.2.0 such a request created its entry at once.
      */
-    internal val refreshSignals: ReleaseSignals<CompletableDeferred<Unit>> =
-        if (reqShieldConfig.keyLock is KeyLocalLock && reqShieldConfig.reqShieldWorkMode != ReqShieldWorkMode.ONLY_CREATE_CACHE) {
-            Companion.refreshSignals
-        } else {
-            ReleaseSignals { it.complete(Unit) }
-        }
+    internal val refreshSignals: ReleaseSignals<CompletableDeferred<Unit>> = ReleaseSignals { it.complete(Unit) }
 
     /**
      * Guards the refresh of an entry in [ReqShieldWorkMode.ONLY_CREATE_CACHE]. That mode does not call the configured
@@ -709,8 +705,5 @@ class ReqShield<T>(
          * those instances, so a waiter of one instance must see the creation that another instance runs.
          */
         internal val creationSignals = ReleaseSignals<CompletableDeferred<Unit>> { it.complete(Unit) }
-
-        /** For instances with a local lock: the refreshes that run in this JVM under that lock. */
-        internal val refreshSignals = ReleaseSignals<CompletableDeferred<Unit>> { it.complete(Unit) }
     }
 }
