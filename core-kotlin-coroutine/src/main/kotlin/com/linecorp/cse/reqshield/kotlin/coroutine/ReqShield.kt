@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
@@ -401,8 +402,15 @@ class ReqShield<T>(
             if (budget.reads < reqShieldConfig.maxAttemptGetCache) {
                 // A holder that got the lock a moment ago may have registered its signal only during the read
                 if (signal == null) signal = signals.find(key)
+                var waitMillis = GET_CACHE_INTERVAL_MILLIS
+                if (signal == null) {
+                    // Or just after it: look once more after a short pause, which is taken off the interval
+                    delay(SIGNAL_REGISTRATION_GRACE_MILLIS)
+                    waitMillis -= SIGNAL_REGISTRATION_GRACE_MILLIS
+                    signal = signals.find(key)
+                }
                 if (signal != null) lastSignal = signal
-                released = waitForNextRead(signal)
+                released = waitForNextRead(signal, waitMillis)
             }
         }
 
@@ -410,18 +418,21 @@ class ReqShield<T>(
     }
 
     /**
-     * Waits until the holder of [signal] gave its lock back, for at most the poll interval. A timeout of this wait
+     * Waits until the holder of [signal] gave its lock back, for at most [millis]. A timeout of this wait
      * cancels only this await: the signal stays open for the other waiters.
      *
      * @return true when the holder gave the lock back in that time.
      */
-    private suspend fun waitForNextRead(signal: CompletableDeferred<Unit>?): Boolean {
+    private suspend fun waitForNextRead(
+        signal: CompletableDeferred<Unit>?,
+        millis: Long,
+    ): Boolean {
         if (signal == null) {
-            delay(GET_CACHE_INTERVAL_MILLIS)
+            delay(millis)
             return false
         }
         // The signal is read again: a release at the moment of the timeout must not look like a holder that still works
-        return withTimeoutOrNull(GET_CACHE_INTERVAL_MILLIS) { signal.await() } != null || signal.isCompleted
+        return withTimeoutOrNull(millis) { signal.await() } != null || signal.isCompleted
     }
 
     private fun buildReqShieldData(

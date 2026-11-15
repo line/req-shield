@@ -136,6 +136,70 @@ class ReqShieldCreationSignalTest {
     }
 
     @Test
+    fun aWaiterThatLostTheLockBeforeTheHolderRegisteredItsSignalShouldStillWaitForThatSignal() {
+        val holderHasTheLock = CountDownLatch(1)
+        val waiterLostTheLock = CountDownLatch(1)
+        val localLock = KeyLocalLock(3000)
+        // The first request gets the lock, but its lock call returns only after the second request lost the lock.
+        // So the second request looks for the signal before the first one can register it.
+        val lock =
+            object : KeyLock {
+                override fun tryLock(
+                    key: String,
+                    lockType: LockType,
+                ): String? {
+                    val token = localLock.tryLock(key, lockType)
+                    if (lockType == LockType.CREATE) {
+                        if (token != null) {
+                            holderHasTheLock.countDown()
+                            check(waiterLostTheLock.await(5, TimeUnit.SECONDS))
+                        } else {
+                            waiterLostTheLock.countDown()
+                        }
+                    }
+                    return token
+                }
+
+                override fun unLock(
+                    key: String,
+                    lockType: LockType,
+                    token: String,
+                ): Boolean = localLock.unLock(key, lockType, token)
+            }
+        val shield =
+            ReqShield(
+                ReqShieldConfiguration(
+                    setCacheFunction = { cacheKey, data, _ ->
+                        cache[cacheKey] = data
+                        true
+                    },
+                    getCacheFunction = { cacheKey -> cache[cacheKey] },
+                    executor = pool,
+                    keyLock = lock,
+                ),
+            )
+        val supplierCalls = AtomicInteger()
+        val supplier =
+            Callable<Product?> {
+                supplierCalls.incrementAndGet()
+                Thread.sleep(15)
+                product
+            }
+        val holder = pool.submit<ReqShieldData<Product>> { shield.getAndSetReqShieldData(key, supplier, 10_000) }
+        assertTrue(holderHasTheLock.await(2, TimeUnit.SECONDS))
+
+        val startedAtNanos = System.nanoTime()
+        val waited = shield.getAndSetReqShieldData(key, supplier, 10_000)
+        val waitedMillis = (System.nanoTime() - startedAtNanos) / 1_000_000
+
+        assertEquals(product, waited.value)
+        assertEquals(product, holder.get(2, TimeUnit.SECONDS).value)
+        assertEquals(1, supplierCalls.get())
+        // The supplier takes 15 ms. A request that found no signal and slept the whole interval would need 50 ms.
+        assertTrue(waitedMillis < 45, "the waiter ended after $waitedMillis ms")
+    }
+
+    @Test
     fun aWaiterWithoutASignalShouldKeepThePollIntervalAndTheReadCount() {
         // A lock that is held without a signal: the holder is in another JVM, for example
         val lock = KeyLocalLock(3000)

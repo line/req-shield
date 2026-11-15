@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
@@ -474,8 +475,19 @@ class ReqShield<T>(
                     .concatMap { index ->
                         // A holder that got the lock a moment ago may have registered its signal only during the read
                         val signal = signalOfRead.get() ?: signals.find(key)
-                        if (signal != null) lastSignal.set(signal)
-                        waitForNextRead(signal)
+                        val wait =
+                            if (signal != null) {
+                                lastSignal.set(signal)
+                                waitForNextRead(signal, GET_CACHE_INTERVAL_MILLIS)
+                            } else {
+                                // Or just after it: look once more after a short pause, which is taken off the interval
+                                Mono.delay(Duration.ofMillis(SIGNAL_REGISTRATION_GRACE_MILLIS)).flatMap {
+                                    val lateSignal = signals.find(key)
+                                    if (lateSignal != null) lastSignal.set(lateSignal)
+                                    waitForNextRead(lateSignal, GET_CACHE_INTERVAL_MILLIS - SIGNAL_REGISTRATION_GRACE_MILLIS)
+                                }
+                            }
+                        wait
                             .doOnNext { released.set(it) }
                             .thenReturn(index)
                     }
@@ -484,11 +496,14 @@ class ReqShield<T>(
     }
 
     /**
-     * Waits until the holder of [signal] gave its lock back, for at most the poll interval.
+     * Waits until the holder of [signal] gave its lock back, for at most [millis].
      * Emits true when the holder gave the lock back in that time.
      */
-    private fun waitForNextRead(signal: CompletableFuture<Unit>?): Mono<Boolean> {
-        val delay = Mono.delay(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
+    private fun waitForNextRead(
+        signal: CompletableFuture<Unit>?,
+        millis: Long,
+    ): Mono<Boolean> {
+        val delay = Mono.delay(Duration.ofMillis(millis))
         if (signal == null) return delay.thenReturn(false)
 
         // The signal is read again after the delay: a release at the moment of the timeout must not look like a

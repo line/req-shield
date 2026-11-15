@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
@@ -346,8 +347,15 @@ class ReqShield<T>(
             if (budget.reads < reqShieldConfig.maxAttemptGetCache) {
                 // A holder that got the lock a moment ago may have registered its signal only during the read
                 if (signal == null) signal = signals.find(key)
+                var waitMillis = GET_CACHE_INTERVAL_MILLIS
+                if (signal == null) {
+                    // Or just after it: look once more after a short pause, which is taken off the interval
+                    waitForNextRead(key, null, SIGNAL_REGISTRATION_GRACE_MILLIS)
+                    waitMillis -= SIGNAL_REGISTRATION_GRACE_MILLIS
+                    signal = signals.find(key)
+                }
                 if (signal != null) lastSignal = signal
-                released = waitForNextRead(key, signal)
+                released = waitForNextRead(key, signal, waitMillis)
             }
         }
 
@@ -355,21 +363,22 @@ class ReqShield<T>(
     }
 
     /**
-     * Waits until the holder of [signal] gave its lock back, for at most the poll interval.
+     * Waits until the holder of [signal] gave its lock back, for at most [millis].
      *
      * @return true when the holder gave the lock back in that time.
      */
     private fun waitForNextRead(
         key: String,
         signal: CountDownLatch?,
+        millis: Long,
     ): Boolean {
         try {
             if (signal == null) {
-                Thread.sleep(GET_CACHE_INTERVAL_MILLIS)
+                Thread.sleep(millis)
                 return false
             }
             // The count is read again: a release at the moment of the timeout must not look like a holder that still works
-            return signal.await(GET_CACHE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS) || signal.count == 0L
+            return signal.await(millis, TimeUnit.MILLISECONDS) || signal.count == 0L
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             log.warn("Interrupted while waiting for the cache to be created for key '{}'", key)

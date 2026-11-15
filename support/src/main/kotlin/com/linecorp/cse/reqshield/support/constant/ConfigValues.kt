@@ -27,6 +27,13 @@ object ConfigValues {
     const val GET_CACHE_INTERVAL_MILLIS = 50L
 
     /**
+     * A request that got a lock registers its signal just after the lock call. A request that lost the lock a
+     * moment earlier finds no signal yet, so it looks for the signal once more after this pause, which is part of
+     * [GET_CACHE_INTERVAL_MILLIS]. Without it, that request would wait the whole interval beside a holder of its JVM.
+     */
+    const val SIGNAL_REGISTRATION_GRACE_MILLIS = 2L
+
+    /**
      * While waiting for another request to fill the cache, this many consecutive cache-read
      * failures are treated as a cache outage and the waiter falls back to the supplier at once.
      */
