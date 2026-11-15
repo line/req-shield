@@ -278,8 +278,9 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 ### Thread pools and schedulers
 
 - `core` accepts any `java.util.concurrent.Executor` for its background cache writes; only `execute` is called and the
-  library never shuts a caller-supplied pool down. The default is a shared daemon pool. The Spring adapter runs the
-  writes on a daemon pool of its own that is shut down with the context, and registers no `Executor` bean, so Spring
+  library never shuts a caller-supplied pool down. The default is a shared daemon pool: a `ForkJoinPool` in FIFO mode
+  with 2 threads for each CPU. The Spring adapter runs the
+  writes on a daemon pool of its own, of the same kind, that is shut down with the context, and registers no `Executor` bean, so Spring
   Boot keeps its `applicationTaskExecutor`. To use your own pool, define an `Executor` bean named `reqShieldExecutor`;
   its lifecycle stays yours, and like any `Executor` bean it makes Spring Boot skip `applicationTaskExecutor`.
 - `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter uses the shared

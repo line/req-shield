@@ -24,6 +24,7 @@ import com.linecorp.cse.reqshield.spring.cache.GlobalLockSupport
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfValue
+import com.linecorp.cse.reqshield.support.utils.newBackgroundExecutor
 import com.linecorp.cse.reqshield.support.utils.requireOwnToString
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
@@ -47,8 +48,6 @@ import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicLong
 
 @Aspect
 class ReqShieldAspect<T>(
@@ -329,19 +328,8 @@ class ReqShieldAspect<T>(
         ownedExecutor?.shutdown()
     }
 
-    private fun createOwnedExecutor(): ExecutorService {
-        val threadCounter = AtomicLong(0)
-
-        // Daemon threads, so a pending cache write can never block JVM shutdown.
-        // Named apart from the core default pool so a thread dump shows which one ran a write.
-        return Executors.newScheduledThreadPool(
-            maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
-        ) { runnable ->
-            Thread(runnable, "req-shield-aspect-executor-${threadCounter.incrementAndGet()}").apply {
-                isDaemon = true
-            }
-        }
-    }
+    // Named apart from the core default pool so a thread dump shows which one ran a write.
+    private fun createOwnedExecutor(): ExecutorService = newBackgroundExecutor("req-shield-aspect-executor-")
 
     /** What a key needs that does not depend on the arguments: at most one of [expression] and [keyGenerator] is set. */
     private class KeySource(

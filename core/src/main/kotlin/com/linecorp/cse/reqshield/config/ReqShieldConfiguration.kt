@@ -24,10 +24,9 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIM
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import com.linecorp.cse.reqshield.support.utils.newBackgroundExecutor
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ExecutorService
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Boolean,
@@ -60,21 +59,11 @@ data class ReqShieldConfiguration<T>(
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 ) {
     companion object {
-        private val executorThreadCounter = AtomicLong(0)
-
         /**
          * Shared by every configuration instance: one ReqShield per cache key must not mean one
          * thread pool per cache key. Threads are daemons so the pool never blocks JVM shutdown.
          */
-        private val sharedExecutor: ScheduledExecutorService by lazy {
-            Executors.newScheduledThreadPool(
-                maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
-            ) { runnable ->
-                Thread(runnable, "req-shield-executor-${executorThreadCounter.incrementAndGet()}").apply {
-                    isDaemon = true
-                }
-            }
-        }
+        private val sharedExecutor: ExecutorService by lazy { newBackgroundExecutor("req-shield-executor-") }
     }
 
     init {

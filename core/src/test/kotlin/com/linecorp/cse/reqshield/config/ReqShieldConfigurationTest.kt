@@ -21,7 +21,9 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ForkJoinPool
+import java.util.concurrent.TimeUnit
 
 class ReqShieldConfigurationTest {
     @Test
@@ -61,15 +63,32 @@ class ReqShieldConfigurationTest {
                 getCacheFunction = { null },
             )
 
-        val executor = config.executor as? ThreadPoolExecutor
-        assertTrue(executor != null, "Executor should be ThreadPoolExecutor")
+        // The default pool is a ForkJoinPool: see newBackgroundExecutor in support
+        val executor = config.executor as? ForkJoinPool
+        assertTrue(executor != null, "Executor should be ForkJoinPool")
 
         val expectedSize = maxOf(2, Runtime.getRuntime().availableProcessors() * 2)
-        assertEquals(expectedSize, executor!!.corePoolSize, "Thread pool size should be optimal")
+        assertEquals(expectedSize, executor!!.parallelism, "Thread pool size should be optimal")
         assertTrue(
-            executor.corePoolSize <= Runtime.getRuntime().availableProcessors() * 2,
+            executor.parallelism <= maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
             "Thread pool should not be excessive",
         )
+    }
+
+    @Test
+    fun theDefaultPoolShouldRunTasksOnNamedDaemonThreads() {
+        val config =
+            ReqShieldConfiguration<String>(
+                setCacheFunction = { _, _, _ -> true },
+                getCacheFunction = { null },
+            )
+        val worker = CompletableFuture<Thread>()
+
+        config.executor.execute { worker.complete(Thread.currentThread()) }
+
+        val thread = worker.get(5, TimeUnit.SECONDS)
+        assertTrue(thread.name.startsWith("req-shield-executor-"), "the worker is named ${thread.name}")
+        assertTrue(thread.isDaemon)
     }
 
     @Test
