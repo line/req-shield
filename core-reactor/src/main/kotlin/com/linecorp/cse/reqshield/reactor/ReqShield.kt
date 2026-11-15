@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield.reactor
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -63,6 +64,13 @@ class ReqShield<T>(
      * lives in this JVM only and expires like any other local lock.
      */
     private val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    /**
+     * Limits how often this JVM asks the lock store for the refresh lock of one key: once in
+     * [GET_CACHE_INTERVAL_MILLIS]. Without it each read of an old entry would call the store while a request of
+     * another JVM holds the lock. An attempt takes this local lock and never gives it back: it expires.
+     */
+    private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS) }
 
     private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
 
@@ -155,11 +163,21 @@ class ReqShield<T>(
             } else {
                 // A global or custom lock can take time and can emit on its client's event loop, so its call and all
                 // that follows stay on the scheduler.
-                token
-                    .flatMap { acquired ->
-                        refreshSignals.register(key, acquired, CompletableFuture())
-                        processMono(acquired, lockStartNanos(lock, nanosBeforeAttempt))
-                    }.subscribeOn(reqShieldConfig.scheduler)
+                val attempt =
+                    token
+                        .flatMap { acquired ->
+                            refreshSignals.register(key, acquired, CompletableFuture())
+                            processMono(acquired, lockStartNanos(lock, nanosBeforeAttempt))
+                        }.subscribeOn(reqShieldConfig.scheduler)
+                if (lock is KeyGlobalLock) {
+                    // A refresh of this JVM runs: the store would only answer no
+                    if (refreshSignals.find(key) != null) return
+                    // The guard is a local lock, so it answers on this thread. Only the read that gets it reaches the
+                    // scheduler and the store: one read in each interval, see refreshAttemptGuard.
+                    refreshAttemptGuard.tryLock(GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX + key, lockType).flatMap { attempt }
+                } else {
+                    attempt
+                }
             }
 
         updateMono

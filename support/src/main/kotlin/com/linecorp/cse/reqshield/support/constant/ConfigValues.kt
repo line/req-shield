@@ -39,6 +39,13 @@ object ConfigValues {
      */
     const val MAX_CONSECUTIVE_GET_CACHE_FAILURES = 3
 
+    /**
+     * With a global lock, a JVM asks the lock store for the refresh lock of one key at most once in
+     * [GET_CACHE_INTERVAL_MILLIS]. The local lock that counts those attempts has keys with this prefix, so they do
+     * not collide with the local locks of the cache keys.
+     */
+    const val GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX = "refresh-attempt:"
+
     /** Prefix applied to every lock key so lock entries can never collide with cache entries. */
     const val LOCK_KEY_PREFIX = "reqshield:lock:"
 

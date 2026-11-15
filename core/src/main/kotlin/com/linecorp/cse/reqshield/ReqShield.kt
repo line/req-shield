@@ -19,6 +19,7 @@ package com.linecorp.cse.reqshield
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
@@ -45,6 +46,13 @@ class ReqShield<T>(
      * executor. This lock lives in this JVM only and expires like any other local lock.
      */
     private val localRefreshLock: KeyLock by lazy { KeyLocalLock(reqShieldConfig.lockTimeoutMillis) }
+
+    /**
+     * Limits how often this JVM asks the lock store for the refresh lock of one key: once in
+     * [GET_CACHE_INTERVAL_MILLIS]. Without it each read of an old entry would call the store while a request of
+     * another JVM holds the lock. An attempt takes this local lock and never gives it back: it expires.
+     */
+    private val refreshAttemptGuard: KeyLock by lazy { KeyLocalLock(GET_CACHE_INTERVAL_MILLIS) }
 
     private val lockTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(reqShieldConfig.lockTimeoutMillis)
 
@@ -84,6 +92,7 @@ class ReqShield<T>(
     ) {
         val lockType = LockType.UPDATE
         val lock = lockFor(lockType)
+        if (lock is KeyGlobalLock && !mayAskForGlobalRefreshLock(key)) return
         val nanosBeforeAttempt = nanosBeforeAttempt(lock)
 
         val token =
@@ -106,6 +115,17 @@ class ReqShield<T>(
                 )
             writeUnlessSuperseded(key, reqShieldData, lockType, token, lockedAtNanos, seenCreatedAt)
         }
+    }
+
+    /**
+     * Whether a read of an old entry may ask the store of a global lock for the refresh lock.
+     * It may not while a refresh of this JVM runs: the store would only answer no. Else it may when no request of
+     * this JVM asked in the last [GET_CACHE_INTERVAL_MILLIS]. So a refresh in another JVM, or a store that keeps
+     * the lock of a failed refresh, costs one call of the store in that time, not one for each read.
+     */
+    private fun mayAskForGlobalRefreshLock(key: String): Boolean {
+        if (refreshSignals.find(key) != null) return false
+        return refreshAttemptGuard.tryLock(GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX + key, LockType.UPDATE) != null
     }
 
     private fun handleLockForCacheCreation(
