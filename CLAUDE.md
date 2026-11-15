@@ -96,7 +96,7 @@ Contains shared:
 - `executor` (core) / `scheduler` (reactor) / `scope` (coroutine): where background cache writes run; defaults are shared. The Spring adapters register none of them as beans (an `Executor` bean would make Spring Boot drop its `applicationTaskExecutor`, and any library bean would clash with an application bean of the same name): each aspect uses an application bean named `reqShieldExecutor` / `reqShieldScheduler` / `reqShieldCoroutineScope` if one exists (a bean of that name with another type fails the context refresh), otherwise its own default (an aspect-owned pool / the shared `boundedElastic` / an aspect-owned scope), and only shuts down what it owns
 - `lockTimeoutMillis`: Lock acquisition timeout (default: 3000ms)
 - `decisionForUpdate`: Percentage of TTL after which to trigger async cache refresh (default: 80)
-- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60, 50ms apart). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
+- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60 reads for the wait for a holder and 60 for the wait for a refresh, at most 50ms apart; a waiter in the JVM of the lock holder reads the cache as soon as the holder releases its lock, retries the creation lock when the holder wrote no entry, and a cache miss during a refresh of the same JVM waits for that refresh). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
 - `reqShieldWorkMode`: CREATE_AND_UPDATE_CACHE | ONLY_CREATE_CACHE | ONLY_UPDATE_CACHE
 
 ### Work Modes

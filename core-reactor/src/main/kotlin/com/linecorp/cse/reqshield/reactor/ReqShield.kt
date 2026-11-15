@@ -23,22 +23,26 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import com.linecorp.cse.reqshield.support.signal.ReleaseSignals
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Schedulers
 import reactor.util.context.ContextView
 import java.time.Duration
 import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 /**
- * Internal signal telling the lock waiter to stop polling the cache because the cache
- * itself looks unavailable. Never leaves [ReqShield]: it is always resumed into the
- * supplier fallback. Stack trace is disabled because it carries no diagnostic value.
+ * Internal signal telling a waiting request to stop reading the cache because the cache
+ * itself looks unavailable. Never leaves [ReqShield]: the wait always ends with it as given up.
+ * Stack trace is disabled because it carries no diagnostic value.
  */
 private class GetCacheUnavailableException : RuntimeException(null, null, false, false)
 
@@ -124,7 +128,11 @@ class ReqShield<T>(
         val updateMono =
             Mono
                 .defer { lockFor(lockType).tryLock(key, lockType) }
-                .flatMap { token -> processMono(token) }
+                .flatMap { token ->
+                    // A request that finds the entry gone during this refresh waits for this signal instead of a supplier call
+                    refreshSignals.register(key, token, CompletableFuture())
+                    processMono(token)
+                }
 
         updateMono
             .subscribeOn(reqShieldConfig.scheduler)
@@ -135,10 +143,46 @@ class ReqShield<T>(
             )
     }
 
+    /**
+     * Creates the entry of [key] after a cache miss.
+     *
+     * If a refresh of [key] runs in this JVM, it is about to write the entry. This request then first reads the cache
+     * until the refresh released its lock, and calls no supplier in that time. If the refresh ends without an entry,
+     * or the reads are used up, this request goes on as on any miss. All waits of this request share one [ReadBudget].
+     */
     private fun handleLockForCacheCreation(
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
+        callerContext: ContextView,
+    ): Mono<ReqShieldData<T>> {
+        val budget = ReadBudget()
+        val refresh =
+            refreshSignals.find(key)
+                ?: return createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
+
+        // The wait for the refresh has its own reads. If they were taken from the reads for the creation lock, a
+        // refresh that outlasts them would leave none: each request that then loses the lock would call the
+        // supplier at once, without a lock.
+        return readUntilReleased(key, refreshSignals, ReadBudget(), refresh).flatMap { waited ->
+            if (waited is Waited.Found) {
+                Mono.just(waited.data)
+            } else {
+                createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
+            }
+        }
+    }
+
+    /**
+     * Tries the creation lock once. The request that gets it creates the entry. A request that loses waits for the
+     * holder and, if the holder gives the lock back without an entry, tries the lock again. Each try after the first
+     * spends at least two reads of [budget], so the number of tries is at most `maxAttemptGetCache / 2 + 1`.
+     */
+    private fun createOrWaitForHolder(
+        key: String,
+        callable: Callable<Mono<T?>>,
+        timeToLiveMillis: Long,
+        budget: ReadBudget,
         callerContext: ContextView,
     ): Mono<ReqShieldData<T>> {
         val lockType = LockType.CREATE
@@ -152,6 +196,8 @@ class ReqShield<T>(
         return reqShieldConfig.keyLock
             .tryLock(key, lockType)
             .flatMap { token ->
+                // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
+                creationSignals.register(key, token, CompletableFuture())
                 val owner = AtomicReference(LockOwner.RECHECK)
                 // Another request may have filled the cache between our initial miss and lock acquisition.
                 Mono.defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key) }
@@ -174,10 +220,9 @@ class ReqShield<T>(
                             releaseLock(key, lockType, token, callerContext)
                         }
                     }
-            }
-            .switchIfEmpty(
+            }.switchIfEmpty(
                 Mono.defer {
-                    handleLockFailure(key, callable, timeToLiveMillis)
+                    handleLockFailure(key, callable, timeToLiveMillis, budget, callerContext)
                 },
             )
     }
@@ -284,43 +329,135 @@ class ReqShield<T>(
             }
 
     /**
-     * Waits for the request that owns the lock to fill the cache.
+     * Waits for the request that owns the creation lock to fill the cache.
      *
-     * The cache is polled up to `maxAttemptGetCache` times, the first time at once. A read failure is logged and counted;
-     * [MAX_CONSECUTIVE_GET_CACHE_FAILURES] consecutive failures are treated as a cache outage and
-     * stop the polling immediately. Once polling gives up, the supplier is called directly, and a
-     * failing supplier surfaces as `ClientException(SUPPLIER_ERROR)` instead of a null-valued entry.
+     * [readUntilReleased] reads the cache. If the holder gives the lock back without an entry (its supplier failed,
+     * for example), this request tries to be the next holder, and the requests that lose again wait for the new
+     * holder. Only when the reads of [budget] are used up, or [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a
+     * row, does this request call the supplier itself without a lock. A failing supplier surfaces as
+     * `ClientException(SUPPLIER_ERROR)` instead of a null-valued entry.
      */
     private fun handleLockFailure(
         key: String,
         callable: Callable<Mono<T?>>,
         timeToLiveMillis: Long,
-    ): Mono<ReqShieldData<T>> {
-        val consecutiveGetCacheFailures = AtomicInteger(0)
-        val maxAttempts = reqShieldConfig.maxAttemptGetCache.toLong()
-        val polls =
-            if (maxAttempts <= 0) {
-                Mono.empty()
-            } else {
-                Mono
-                    .defer { getCacheWhileWaitingForLock(key, consecutiveGetCacheFailures) }
-                    // The companion emits the index of each empty poll; maxAttempts - 1 repeats make maxAttempts polls.
-                    .repeatWhenEmpty { companion ->
-                        companion
-                            .takeWhile { index -> index < maxAttempts - 1 }
-                            .delayElements(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
-                    }
+        budget: ReadBudget,
+        callerContext: ContextView,
+    ): Mono<ReqShieldData<T>> =
+        readUntilReleased(key, creationSignals, budget)
+            .flatMap { waited ->
+                when (waited) {
+                    is Waited.Found -> Mono.just(waited.data)
+                    Waited.Released -> createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
+                    // No lock was acquired by this request, so there is nothing to release on failure
+                    Waited.GaveUp ->
+                        executeCallable(callable)
+                            .map { data -> buildReqShieldData(data, timeToLiveMillis) }
+                            .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
+                }
             }
+            // A lock can emit on its client's event loop; keep the reads and the supplier call off that thread.
+            .subscribeOn(reqShieldConfig.scheduler)
 
-        return polls
-            .onErrorResume(GetCacheUnavailableException::class.java) { Mono.empty() }
-            .switchIfEmpty(
-                Mono.defer {
-                    executeCallable(callable)
-                        .map { data -> buildReqShieldData(data, timeToLiveMillis) }
-                        .switchIfEmpty(Mono.fromSupplier { buildReqShieldData(null, timeToLiveMillis) })
-                },
-            ).subscribeOn(reqShieldConfig.scheduler)
+    /**
+     * The cache reads that one request may spend on one kind of wait. The wait for a refresh has its own budget.
+     * All waits for the holder of the creation lock share one, so the lock retries cannot extend the wait.
+     */
+    private class ReadBudget {
+        val reads = AtomicInteger()
+        val consecutiveFailures = AtomicInteger()
+    }
+
+    private sealed interface Waited<out T> {
+        class Found<T>(
+            val data: ReqShieldData<T>,
+        ) : Waited<T>
+
+        /** The holder gave its lock back, and the read after that found no entry. */
+        object Released : Waited<Nothing>
+
+        /** The reads are used up, or the cache looks unavailable. */
+        object GaveUp : Waited<Nothing>
+    }
+
+    /**
+     * Another request holds the lock of [signals] for [key]: reads the cache until that request publishes its result.
+     *
+     * The first read runs at once. Between two reads this request waits for the signal of the holder, for at most
+     * [GET_CACHE_INTERVAL_MILLIS]. A holder in this JVM completes the signal when it gives the lock back, so the next
+     * read follows its cache write at once. If that read finds no entry, the holder wrote none and the wait ends as
+     * [Waited.Released]. Without a signal - the holder runs in another JVM - the wait is the whole interval, which
+     * makes this a poll at a fixed interval. The supplier is never called from the wait.
+     *
+     * The wait gives up after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget] over all waits of
+     * the request, with no wait after the last read. It gives up earlier when [MAX_CONSECUTIVE_GET_CACHE_FAILURES]
+     * reads failed in a row (the cache looks unavailable). A read that fails still counts, so the wait stays bounded.
+     */
+    private fun readUntilReleased(
+        key: String,
+        signals: ReleaseSignals<CompletableFuture<Unit>>,
+        budget: ReadBudget,
+        // The signal that made the request wait, when the caller already looked it up
+        firstSignal: CompletableFuture<Unit>? = null,
+    ): Mono<Waited<T>> {
+        val maxReads = reqShieldConfig.maxAttemptGetCache
+        // The signal that the current read found before it ran
+        val signalOfRead = AtomicReference<CompletableFuture<Unit>?>()
+        // True when the holder gave its lock back during the last wait
+        val released = AtomicBoolean(false)
+        // The last signal that this wait saw. When it is gone from the map and complete, its holder gave the lock back,
+        // also if that happened between two steps of this loop.
+        val lastSignal = AtomicReference(firstSignal)
+
+        return Mono
+            .defer {
+                if (budget.reads.get() >= maxReads) return@defer Mono.just<Waited<T>>(Waited.GaveUp)
+                budget.reads.incrementAndGet()
+                // Looked up before the read: the holder completes the signal after its cache write, so a write that
+                // this read misses still ends the wait at once.
+                val found = signals.find(key)
+                signalOfRead.set(found)
+                if (found == null && lastSignal.get()?.isDone == true) released.set(true)
+                getCacheWhileWaitingForLock(key, budget.consecutiveFailures)
+                    .map<Waited<T>> { Waited.Found(it) }
+                    // Empty drives the next read, after the next wait
+                    .switchIfEmpty(Mono.defer { if (released.get()) Mono.just(Waited.Released) else Mono.empty() })
+            }.repeatWhenEmpty { emptyReads ->
+                emptyReads
+                    .takeWhile { budget.reads.get() < maxReads }
+                    .concatMap { index ->
+                        // A holder that got the lock a moment ago may have registered its signal only during the read
+                        val signal = signalOfRead.get() ?: signals.find(key)
+                        if (signal != null) lastSignal.set(signal)
+                        waitForNextRead(signal)
+                            .doOnNext { released.set(it) }
+                            .thenReturn(index)
+                    }
+            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.GaveUp) }
+            .defaultIfEmpty(Waited.GaveUp)
+    }
+
+    /**
+     * Waits until the holder of [signal] gave its lock back, for at most the poll interval.
+     * Emits true when the holder gave the lock back in that time.
+     */
+    private fun waitForNextRead(signal: CompletableFuture<Unit>?): Mono<Boolean> {
+        val delay = Mono.delay(Duration.ofMillis(GET_CACHE_INTERVAL_MILLIS))
+        if (signal == null) return delay.thenReturn(false)
+
+        // The signal is read again after the delay: a release at the moment of the timeout must not look like a
+        // holder that still works.
+        val interval = delay.map { signal.isDone }
+        return Mono.firstWithSignal(
+            // Waiters share the signal: a waiter that stops waiting must not cancel it for the others.
+            Mono
+                .fromFuture(signal, true)
+                .thenReturn(true)
+                // The signal completes on the thread of the release. The next read moves to the scheduler of the
+                // interval timer, where a read after a full interval runs too, so it cannot be rejected.
+                .publishOn(Schedulers.parallel()),
+            interval,
+        )
     }
 
     /**
@@ -417,6 +554,11 @@ class ReqShield<T>(
                 if (!unlocked) {
                     log.debug("Lock already released or expired for key '{}'", key)
                 }
+            }.doFinally {
+                // Every lock release goes through here. The waiters are woken also after a failed release: they then
+                // read the cache and go on as after a poll interval.
+                val signals = if (lockType == LockType.CREATE) creationSignals else refreshSignals
+                signals.release(key, token)
             }.contextWrite(callerContext)
             .subscribe(
                 { /* success - no action needed */ },
@@ -430,4 +572,15 @@ class ReqShield<T>(
         Mono
             .defer { callable.call() }
             .onErrorMap { e -> ClientException(ErrorCode.SUPPLIER_ERROR, cause = e) }
+
+    companion object {
+        /**
+         * Shared by every instance, like the local lock map: requests for one key collapse across instances, so a
+         * waiter of one instance must see the creation that another instance runs.
+         */
+        internal val creationSignals = ReleaseSignals<CompletableFuture<Unit>> { it.complete(Unit) }
+
+        /** The refreshes that run in this JVM. A request that finds an entry gone waits for the refresh of its key. */
+        internal val refreshSignals = ReleaseSignals<CompletableFuture<Unit>> { it.complete(Unit) }
+    }
 }
