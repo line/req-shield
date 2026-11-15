@@ -47,6 +47,7 @@ import reactor.util.context.Context
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeoutException
@@ -66,7 +67,9 @@ class ReqShieldTest : BaseReqShieldTest {
     private lateinit var cacheGetter: (String) -> Mono<ReqShieldData<Product>?>
     private lateinit var keyLock: KeyLock
     private lateinit var keyGlobalLock: KeyLock
-    private val key = "testKey"
+
+    // The lock map and the signal registries are static, so each test has its own key
+    private val key = "testKey-${UUID.randomUUID()}"
     private val oldValue = Product("oldTestValue", "oldTestValue")
     private val value = Product("testValue", "testValue")
     private val callable: Callable<Mono<Product?>> = mockk()

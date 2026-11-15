@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.reactivestreams.Subscription
+import reactor.core.CoreSubscriber
 import reactor.core.Disposable
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
@@ -296,11 +298,7 @@ class ReqShieldCreationSignalTest {
         await().atMost(Duration.ofSeconds(2)).until { holderCalls.get() == 1 }
         val waiterCalls = AtomicInteger()
         val cancelledWaiter: Disposable = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).subscribe()
-        val waiterEndedAtNanos =
-            shield
-                .getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000)
-                .map { System.nanoTime() }
-                .toFuture()
+        val otherWaiter = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).toFuture()
         // Holder: 2 reads. Each waiter: 1 read before the lock attempt and its first read after it.
         await().atMost(Duration.ofSeconds(2)).until { cacheReads.get() >= 6 }
 
@@ -308,15 +306,16 @@ class ReqShieldCreationSignalTest {
         // Several poll intervals, in which the other waiter also stops each of its waits for the signal
         Thread.sleep(150)
 
-        assertFalse(waiterEndedAtNanos.isDone, "the other waiter must still wait")
+        assertFalse(otherWaiter.isDone, "the other waiter must still wait")
         val signal = ReqShield.creationSignals.find(key)
         assertNotNull(signal)
         assertFalse(signal!!.isDone, "the signal must still be pending")
-        val releasedAtNanos = System.nanoTime()
         finishSupplier.complete(product)
 
-        val waitAfterReleaseMillis = (waiterEndedAtNanos.get(2, TimeUnit.SECONDS) - releasedAtNanos) / 1_000_000
-        assertTrue(waitAfterReleaseMillis < 25, "the waiter ended $waitAfterReleaseMillis ms after the release")
+        // A waiter without the signal still finds the entry at its next poll, at most 50 ms later, so no time bound
+        // can tell the two apart. This bound only catches a waiter that stops reading. How soon the signal wakes a
+        // waiter is measured by aWaiterShouldGetTheEntryRightAfterTheHolderWroteIt.
+        assertEquals(product, otherWaiter.get(1, TimeUnit.SECONDS).value)
         assertEquals(product, holder.get(2, TimeUnit.SECONDS).value)
         assertEquals(0, waiterCalls.get())
     }
@@ -692,5 +691,50 @@ class ReqShieldCreationSignalTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun aTokenThatTheLockEmitsAfterTheCallerCancelledShouldBeReleased() {
+        val localLock = KeyLocalLock(60_000)
+        val lockCaller = AtomicReference<CoreSubscriber<in String>>()
+        val lockCallCancelled = AtomicBoolean(false)
+        // A lock call that ignores the cancel and emits its token later, as when the answer crosses the cancel
+        val lock =
+            object : KeyLock by localLock {
+                override fun tryLock(
+                    key: String,
+                    lockType: LockType,
+                ): Mono<String> =
+                    object : Mono<String>() {
+                        override fun subscribe(actual: CoreSubscriber<in String>) {
+                            actual.onSubscribe(
+                                object : Subscription {
+                                    override fun request(n: Long) {}
+
+                                    override fun cancel() = lockCallCancelled.set(true)
+                                },
+                            )
+                            lockCaller.set(actual)
+                        }
+                    }
+            }
+        val supplierCalls = AtomicInteger()
+        val caller = shield(keyLock = lock).getAndSetReqShieldData(key, countingSupplier(supplierCalls), 10_000).subscribe()
+        await().atMost(Duration.ofSeconds(2)).until { lockCaller.get() != null }
+
+        caller.dispose()
+        assertTrue(lockCallCancelled.get(), "the cancel did not reach the lock call")
+        val token = localLock.tryLock(key, LockType.CREATE).block(timeout)
+        lockCaller.get().onNext(token!!)
+        lockCaller.get().onComplete()
+
+        // The request that got the token released it, although its caller was gone
+        await().atMost(Duration.ofSeconds(2)).until {
+            val freeToken = localLock.tryLock(key, LockType.CREATE).block(timeout)
+            freeToken?.let { localLock.unLock(key, LockType.CREATE, it).block(timeout) }
+            freeToken != null
+        }
+        awaitNoSignal()
+        assertEquals(0, supplierCalls.get())
     }
 }

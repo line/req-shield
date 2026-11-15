@@ -240,8 +240,11 @@ class ReqShield<T>(
 
     /**
      * Launches [task] on the configured scope. The task releases the lock of [token] itself. If the dispatcher of
-     * the scope throws, `launch` throws and the task never runs, so the lock is released here before the exception
-     * goes on. A null [token] means this request holds no lock, so nothing is released.
+     * the scope throws, `launch` throws and the task never runs, so the lock is released here.
+     *
+     * The caller already has its data, so an exception of the dispatcher only skips that cache write or refresh: it
+     * is logged, and the caller gets its data. The caller's own cancellation and an [Error] go on after the release.
+     * A null [token] means this request holds no lock, so nothing is released.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun launchInScope(
@@ -256,7 +259,9 @@ class ReqShield<T>(
             reqShieldConfig.scope.launch(context, start = CoroutineStart.ATOMIC, block = task)
         } catch (e: Throwable) {
             if (token != null) releaseQuietly(key, lockType, token, "after the scope failed to start its task")
-            throw e
+            if (e !is Exception) throw e
+            rethrowIfCallerCancelled(e)
+            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key, e)
         }
     }
 

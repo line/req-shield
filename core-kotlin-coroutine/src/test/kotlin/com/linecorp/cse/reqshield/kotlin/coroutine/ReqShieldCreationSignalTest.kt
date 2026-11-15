@@ -21,10 +21,12 @@ import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
@@ -43,6 +45,7 @@ import org.junit.jupiter.api.Test
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -578,11 +581,7 @@ class ReqShieldCreationSignalTest {
             val holder = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
             withTimeout(2_000) { supplierStarted.await() }
             val cancelled = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
-            val other =
-                callers.async {
-                    shield.getAndSetReqShieldData(key, supplier, 10_000)
-                    System.nanoTime()
-                }
+            val other = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
             // The holder read twice, and each waiter read before its lock attempt and once in its wait
             awaitReads(6)
 
@@ -597,11 +596,12 @@ class ReqShieldCreationSignalTest {
             val readsWhileWaiting = cacheReads.get() - readsAtCancellation
             assertTrue(readsWhileWaiting <= 5, "the other waiter read $readsWhileWaiting times in 150 ms")
 
-            val releasedAtNanos = System.nanoTime()
             finishSupplier.complete(Unit)
 
-            val waitAfterReleaseMillis = (withTimeout(2_000) { other.await() } - releasedAtNanos) / 1_000_000
-            assertTrue(waitAfterReleaseMillis < 25, "the other waiter ended $waitAfterReleaseMillis ms after the release")
+            // A waiter without the signal still finds the entry at its next poll, at most 50 ms later, so no time
+            // bound can tell the two apart. This bound only catches a waiter that stops reading. How soon the signal
+            // wakes a waiter is measured by aWaiterShouldGetTheEntryRightAfterTheHolderWroteIt.
+            assertEquals(product, withTimeout(1_000) { other.await() }.value)
             assertEquals(product, holder.await().value)
             assertEquals(product, cache[key]?.value)
             assertTrue(cancelled.isCancelled)
@@ -991,45 +991,107 @@ class ReqShieldCreationSignalTest {
             assertEquals(old, cache[key])
         }
 
-    /** A scope whose dispatcher throws, so `launch` on it throws and its task never runs. */
-    private fun scopeWhoseDispatcherThrows() =
+    /** A scope whose dispatcher throws [error], so `launch` on it throws and its task never runs. */
+    private fun scopeWhoseDispatcherThrows(error: Throwable = IllegalStateException("the dispatcher is down")) =
         CoroutineScope(
             SupervisorJob() +
                 object : CoroutineDispatcher() {
                     override fun dispatch(
                         context: CoroutineContext,
                         block: Runnable,
-                    ) = throw IllegalStateException("the dispatcher is down")
+                    ) = throw error
                 },
         )
 
     @Test
-    fun theCreationLockShouldBeReleasedWhenTheScopeCannotStartTheCacheWrite() =
+    fun theCallerShouldGetItsDataAndTheCreationLockShouldBeReleasedWhenTheScopeCannotStartTheCacheWrite() =
         runBlocking {
             val lock = KeyLocalLock(60_000)
             val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows())
 
-            // The caller gets the exception of the dispatcher
-            val error = assertFailsWith<IllegalStateException> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+            // The supplier already returned, so only the cache write is skipped
+            val result = shield.getAndSetReqShieldData(key, { product }, 10_000)
 
-            assertEquals("the dispatcher is down", error.message)
+            assertEquals(product, result.value)
+            assertNull(cache[key], "the cache write ran although the scope could not start it")
             assertNull(signal())
             assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
         }
 
     @Test
-    fun theRefreshLockShouldBeReleasedWhenTheScopeCannotStartTheRefresh() =
+    fun theCallerShouldGetTheEntryItReadAndTheRefreshLockShouldBeReleasedWhenTheScopeCannotStartTheRefresh() =
         runBlocking {
-            cache[key] = oldEntry()
+            val old = oldEntry()
+            cache[key] = old
             val lock = KeyLocalLock(60_000)
             val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows())
+            val supplierCalls = AtomicInteger()
 
-            // The caller gets the exception of the dispatcher, although it read an entry
-            val error = assertFailsWith<IllegalStateException> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+            // The caller read an entry, so only the refresh is skipped
+            val result =
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        supplierCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
 
-            assertEquals("the dispatcher is down", error.message)
+            assertEquals(old, result)
+            assertEquals(0, supplierCalls.get(), "the supplier of the refresh was called")
+            assertEquals(old, cache[key])
             assertNull(refreshSignal())
             assertTrue(lock.isFree(LockType.UPDATE), "the refresh lock is still held")
+        }
+
+    @Test
+    fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileTheScopeCannotStartTheCacheWrite() =
+        runBlocking {
+            val lock = KeyLocalLock(60_000)
+            val caller = AtomicReference<Job>()
+            val returned = AtomicReference<ReqShieldData<Product>>()
+            // The dispatcher cancels the caller and then throws the caller's cancellation
+            val scope =
+                CoroutineScope(
+                    SupervisorJob() +
+                        object : CoroutineDispatcher() {
+                            override fun dispatch(
+                                context: CoroutineContext,
+                                block: Runnable,
+                            ) {
+                                caller.get().cancel()
+                                throw CancellationException("the caller is cancelled")
+                            }
+                        },
+                )
+            val shield = shield(keyLock = lock, scope = scope)
+
+            val request =
+                callers.async {
+                    caller.set(coroutineContext.job)
+                    returned.set(shield.getAndSetReqShieldData(key, { product }, 10_000))
+                }
+
+            withTimeout(2_000) { request.join() }
+            assertTrue(request.isCancelled, "the caller was not cancelled")
+            // The cancellation goes on instead of the data
+            assertNull(returned.get(), "the cancelled caller got its data")
+            assertNull(signal())
+            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
+        }
+
+    @Test
+    fun theCallerShouldGetAnErrorOfTheDispatcherAfterTheCreationLockWasReleased() =
+        runBlocking {
+            val lock = KeyLocalLock(60_000)
+            val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows(NotImplementedError("the dispatcher throws an Error")))
+
+            // An Error is not a failure to start the task, so it goes on unchanged
+            assertFailsWith<NotImplementedError> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+
+            assertNull(signal())
+            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
         }
 
     @Test

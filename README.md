@@ -143,6 +143,11 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
     - Lock: `SET {lockKey} {token} NX PX {ttlMillis}` (atomic; never `SETNX` followed by a separate `PEXPIRE`)
     - Unlock: compare-and-delete in a Lua script, e.g.
       `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`
+- In `core-reactor`, `core-kotlin-coroutine` and their Spring adapters, a request that is cancelled during its lock
+  call calls the unlock function with the token of that call. The store may have taken the lock before the
+  cancellation, and the token would otherwise be lost and the lock would stay until its timeout ends. So the unlock
+  function can get a token that never took the lock: the compare-and-delete above then deletes nothing. If the unlock
+  command reaches the store before the lock command, the lock still stays until its timeout ends.
 - The example modules contain working implementations for `RedisTemplate`, `ReactiveRedisTemplate` and the coroutine
   extensions.
 
@@ -285,6 +290,8 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
   `Dispatchers.IO`). The coroutine Spring adapter runs them on a supervisor scope of its own on `Dispatchers.IO` and
   cancels it on context shutdown; to use your own, define a `CoroutineScope` bean named `reqShieldCoroutineScope`.
+  If the scope cannot start a background cache write or refresh (its dispatcher throws), that task is skipped with a
+  warning and its lock is released; the caller still gets its data, as in `core` when the executor rejects the task.
 - The Spring adapters register none of these beans themselves, so an application bean of the same name replaces the
   default instead of clashing with it, and its lifecycle stays with the application. A bean of one of these names
   that is not of the expected type fails the application startup instead of being ignored.

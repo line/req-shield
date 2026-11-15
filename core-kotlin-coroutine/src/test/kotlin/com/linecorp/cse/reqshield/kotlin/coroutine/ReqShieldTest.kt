@@ -56,6 +56,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.Continuation
@@ -81,7 +82,9 @@ class ReqShieldTest : BaseReqShieldTest {
 
     /** Runs the fire-and-forget cache writes, so tests can await them instead of sleeping. */
     private lateinit var backgroundScope: CoroutineScope
-    private val key = "testKey"
+
+    // The lock map and the signal registries are static, so each test has its own key
+    private val key = "testKey-${UUID.randomUUID()}"
     private val createLockKey = lockKeyOf(key, LockType.CREATE)
     private val updateLockKey = lockKeyOf(key, LockType.UPDATE)
     private val oldValue = Product("oldTestValue", "oldTestName")
