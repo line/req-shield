@@ -43,6 +43,7 @@ include("req-shield-spring-boot4-example")
 include("req-shield-spring-boot4-webflux-example")
 include("req-shield-spring-boot4-webflux-kotlin-coroutine-example")
 include("support")
+include("req-shield-benchmark-example")
 
 dependencyResolutionManagement {
     versionCatalogs {

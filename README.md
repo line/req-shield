@@ -191,9 +191,27 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - In WebFlux the eviction also runs when the method completes empty (for example a `Mono<Void>` handler).
 - **Known limitation:** a value that is computed before an eviction can be written after it. A request returns its
   data first and writes the cache asynchronously, and a background refresh can be in flight, so an entry evicted in
-  that window comes back with the old value until its TTL ends. The eviction and the write can run on different
-  nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
+  that window comes back with the old value until its TTL ends. A request that finds the entry gone while a refresh
+  of that key runs in the same JVM waits for that refresh, so it also gets the value that was computed before the
+  eviction. The eviction and the write can run on different nodes, so the library cannot order them. If stale data after an update is not acceptable, use a short TTL or put a
   version of the data in the cache key.
+
+### Lock timeouts and work modes
+
+- If a supplier call takes longer than `lockTimeoutMillis`, the lock can pass to another request. Before such a late
+  write, the cache is read one more time. If another request wrote the entry in that time, the late write is skipped:
+  after a lock timeout the first write stays. In the usual case, one slow call that a later and faster call overtook,
+  the entry that stays is the newer one. If two calls both outlast the lock timeout, the entry of the call that ended
+  first stays, also when that call started first, because an entry does not hold the start time of its supplier call.
+  A supplier that is faster than the lock timeout causes no extra read. Keep `lockTimeoutMillis` longer than the
+  slowest supplier call.
+- `reqShieldWorkMode` sets where requests are collapsed:
+    - `CREATE_AND_UPDATE_CACHE` (default): on the creation and on the refresh of an entry, with the configured lock.
+    - `ONLY_CREATE_CACHE`: the configured lock is used for the creation only. A refresh takes a local lock of this
+      JVM, so one instance runs one refresh of a key at a time and the global lock gets no call for a refresh.
+      Instances do not see each other's refreshes in this mode.
+    - `ONLY_UPDATE_CACHE`: the configured lock is used for the refresh only. On a cache miss each request calls the
+      supplier.
 
 ### Background refresh and the caller's context
 
@@ -220,11 +238,25 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 
 ### Waiting for another request (lock not acquired)
 
-- A request that loses the lock polls the cache every 50 ms, up to `maxAttemptGetCache` times (default 60).
-- A cache read failure while polling is logged and counted as a failed attempt. Three consecutive failures are treated as a
+- A request that loses the lock reads the cache up to `maxAttemptGetCache` times (default 60), with at most 50 ms
+  between two reads.
+- If the request that holds the lock runs in the same JVM, the waiting request reads the cache as soon as that request
+  gave the lock back: after its cache write, or after its supplier failed. It does not wait for the rest of the 50 ms.
+  If the holder runs in another JVM (global lock), or the lock is a custom `KeyLock` that another component holds, the
+  waiting request reads the cache every 50 ms.
+- If the holder gave the lock back and the cache still has no entry (the supplier of the holder failed, for example),
+  the waiting request tries to get the lock itself. One waiting request becomes the next holder and calls the
+  supplier; the others wait for it. So after a failed holder the supplier is called by one request at a time, not by
+  all waiting requests at once.
+- A request that finds no entry while a refresh of that key runs in the same JVM waits for that refresh in the same
+  way, and does not call the supplier a second time. This happens when an entry expires before its refresh ends. If
+  the refresh ends without an entry, the request goes on as on any cache miss.
+- The wait for a refresh has the limit of `maxAttemptGetCache` reads. All waits of one request for a holder share
+  one such limit, so trying the lock again does not extend the wait.
+- A cache read failure while waiting is logged and counted as a read. Three consecutive failures are treated as a
   cache outage and the request falls back to calling the supplier itself right away.
-- When the attempts are exhausted the request calls the supplier once. A supplier failure is propagated as a
-  `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
+- When its reads are used up the request calls the supplier once, without a lock. A supplier failure is propagated as
+  a `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
 - In `core-kotlin-coroutine`, a `CancellationException` thrown by the supplier or by a cache get/set function while
   the calling coroutine is still active (a `withTimeout` inside the supplier, for example) is a failure of that
   function. It is reported as `ClientException` like any other failure. Only the cancellation of the calling coroutine
@@ -262,6 +294,28 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - `@ReqShieldCacheable` / `@ReqShieldCacheEvict` from `core-spring-webflux-kotlin-coroutine` require `suspend`
   functions. Annotating a regular function fails fast with an `IllegalArgumentException`; use `core-spring` or
   `core-spring-webflux` for blocking or `Mono`-returning methods.
+
+## Benchmarks
+
+The `req-shield-benchmark-example` module holds JMH benchmarks of the library. It is not published.
+
+```bash
+./gradlew :req-shield-benchmark-example:jmhJar
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar -l        # list the benchmarks
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar 'HitBenchmark' -t 8 -prof gc
+```
+
+- `HitBenchmark`, `MissBenchmark`, `StaleHitBenchmark`, `LockBenchmark`: the cost of one call on each path of `core`,
+  against a plain cache-aside call. `Reactor*` and `Coroutine*` do the same for `core-reactor` and
+  `core-kotlin-coroutine`, and `*AspectHitBenchmark` for the three Spring aspects.
+- `StampedeBenchmark`, `ReadAfterMissBenchmark`, `ExpiryLoadBenchmark`, `SpringAspectStampedeBenchmark`: one invocation is
+  one scenario run. The JMH score is the time of the run. The supplier call count and the latency of each request go
+  to a JSON-lines file: `build/jmh-events.jsonl` in the working directory, or the path in `-Dbench.events`
+  (pass it with `-jvmArgsAppend`).
+- Choose the module and the side with parameters, for example
+  `-p module=core,reactor,coroutine -p arm=cacheAside,reqShield -p supplierMillis=10,100`.
+- The cache of the benchmarks is a map in the JVM. A cache behind a network call takes far longer per call, so read a
+  difference of some nanoseconds as an absolute cost, not as a ratio.
 
 ## Contributing
 

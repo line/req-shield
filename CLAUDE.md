@@ -67,6 +67,12 @@ The library is organized into several core modules:
 ./gradlew :req-shield-spring-boot4-webflux-kotlin-coroutine-example:bootRun
 ```
 
+### Running Benchmarks
+```bash
+./gradlew :req-shield-benchmark-example:jmhJar      # JMH benchmarks of the library (not published); see README "Benchmarks"
+java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*-jmh.jar -l
+```
+
 ## Module Structure
 
 ### Core Modules
@@ -96,12 +102,12 @@ Contains shared:
 - `executor` (core) / `scheduler` (reactor) / `scope` (coroutine): where background cache writes run; defaults are shared. The Spring adapters register none of them as beans (an `Executor` bean would make Spring Boot drop its `applicationTaskExecutor`, and any library bean would clash with an application bean of the same name): each aspect uses an application bean named `reqShieldExecutor` / `reqShieldScheduler` / `reqShieldCoroutineScope` if one exists (a bean of that name with another type fails the context refresh), otherwise its own default (an aspect-owned pool / the shared `boundedElastic` / an aspect-owned scope), and only shuts down what it owns
 - `lockTimeoutMillis`: Lock acquisition timeout (default: 3000ms)
 - `decisionForUpdate`: Percentage of TTL after which to trigger async cache refresh (default: 80)
-- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60, 50ms apart). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
+- `maxAttemptGetCache`: Max retry attempts when waiting for cache (default: 60 reads for the wait for a holder and 60 for the wait for a refresh, at most 50ms apart; a waiter in the JVM of the lock holder reads the cache as soon as the holder releases its lock, retries the creation lock when the holder wrote no entry, and a cache miss during a refresh of the same JVM waits for that refresh). Three consecutive cache-read failures while waiting fall back to the supplier immediately; supplier failures propagate as `ClientException(SUPPLIER_ERROR)`
 - `reqShieldWorkMode`: CREATE_AND_UPDATE_CACHE | ONLY_CREATE_CACHE | ONLY_UPDATE_CACHE
 
 ### Work Modes
 - **CREATE_AND_UPDATE_CACHE**: Full functionality (default)
-- **ONLY_CREATE_CACHE**: Request collapsing (lock) applies only when a cache entry is being created; refreshes of existing entries still happen but without a lock, so every request past the `decisionForUpdate` threshold may trigger a refresh
+- **ONLY_CREATE_CACHE**: The configured lock applies only when a cache entry is being created. A refresh of an existing entry takes a local lock of the JVM instead (never the global lock), so one instance runs one refresh of a key at a time
 - **ONLY_UPDATE_CACHE**: Request collapsing (lock) applies only when an existing entry is being refreshed; on a cache miss every request calls the supplier and writes the cache without a lock
 
 ## Testing Guidelines

@@ -382,9 +382,10 @@ class ReqShieldTest : BaseReqShieldTest {
     }
 
     @Test
-    fun shouldReturnCachedDataWithoutTouchingLocksWhenExecutorRejectsAnUnlockedRefresh() {
+    fun shouldFreeItsOwnRefreshLockWhenExecutorRejectsARefreshInOnlyCreateCacheMode() {
+        val isolatedKey = "rejected-refresh-${java.util.UUID.randomUUID()}"
         val cached = updateTargetData(oldValue)
-        every { cacheGetter(key) } returns cached
+        every { cacheGetter(isolatedKey) } returns cached
         val shield =
             ReqShield(
                 ReqShieldConfiguration(
@@ -396,10 +397,13 @@ class ReqShieldTest : BaseReqShieldTest {
                 ),
             )
 
-        assertSame(cached, shield.getAndSetReqShieldData(key, callable, timeToLiveMillis))
+        assertSame(cached, shield.getAndSetReqShieldData(isolatedKey, callable, timeToLiveMillis))
+        // This mode guards a refresh with its own local lock, not with the configured lock
         verify(exactly = 0) { keyLock.tryLock(any(), any()) }
         verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
         verify(exactly = 0) { callable.call() }
+        // A leaked refresh lock would stop each refresh of this key until the lock times out
+        assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.UPDATE))
     }
 
     @Test
