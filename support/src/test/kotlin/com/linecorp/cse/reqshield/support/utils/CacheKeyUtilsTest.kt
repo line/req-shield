@@ -18,6 +18,7 @@ package com.linecorp.cse.reqshield.support.utils
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -115,6 +116,31 @@ class CacheKeyUtilsTest {
         requireOwnToString(listOf(1))
         assertThrows(IllegalArgumentException::class.java) { requireOwnToString(Any()) }
         assertThrows(IllegalArgumentException::class.java) { requireOwnToString(arrayOf("a")) }
+    }
+
+    @Test
+    fun ownToStringCheckShouldKeepItsAnswerPerClassOnRepeatedCalls() {
+        // The answer is kept per class, so the answer of one class must not leak into the next call of another
+        repeat(2) {
+            requireOwnToString("text")
+            val error = assertThrows(IllegalArgumentException::class.java) { requireOwnToString(NoToString("Aa")) }
+            requireOwnToString(Color.RED)
+            assertThrows(IllegalArgumentException::class.java) { requireOwnToString(Any()) }
+
+            assertEquals(
+                "${NoToString::class.java.name} does not override toString(), so it cannot be part of a cache key. " +
+                    "Override toString(), or set a key or keyGenerator that gives a text.",
+                error.message,
+            )
+        }
+    }
+
+    @Test
+    fun textWithoutACharacterToEscapeShouldBeReturnedWithoutACopy() {
+        val text = "product-1, [a]"
+
+        assertSame(text, keyOf(text))
+        assertEquals("a\\\\b", keyOf("a\\b"))
     }
 
     @Test

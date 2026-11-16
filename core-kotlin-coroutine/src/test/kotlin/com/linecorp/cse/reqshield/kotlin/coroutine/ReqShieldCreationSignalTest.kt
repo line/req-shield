@@ -21,10 +21,12 @@ import com.linecorp.cse.reqshield.kotlin.coroutine.config.ReqShieldWorkMode
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
@@ -43,6 +45,7 @@ import org.junit.jupiter.api.Test
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -53,6 +56,9 @@ import kotlin.test.assertNotNull
  * by the signal. The tests run in real time, because the waits are measured with the system clock.
  */
 class ReqShieldCreationSignalTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the local locks are shared by all instances, so each test has its own key
     private val key = "creation-signal-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
@@ -97,7 +103,7 @@ class ReqShieldCreationSignalTest {
                 reqShieldWorkMode = workMode,
                 scope = scope,
             ),
-        )
+        ).also { created = it }
 
     /** Waits until each task that the shield launched on its scope has ended. */
     private suspend fun awaitScopeTasks() = scope.coroutineContext.job.children.toList().forEach { it.join() }
@@ -107,9 +113,9 @@ class ReqShieldCreationSignalTest {
             while (cacheReads.get() < count) delay(1)
         }
 
-    private fun signal() = ReqShield.creationSignals.find(key)
+    private fun signal() = created.creationSignals.find(key)
 
-    private fun refreshSignal() = ReqShield.refreshSignals.find(key)
+    private fun refreshSignal() = created.refreshSignals.find(key)
 
     /** An entry that is old enough for a refresh: 9 s of its 10 s are over, and the refresh starts at 80 %. */
     private fun oldEntry(): ReqShieldData<Product> =
@@ -575,6 +581,140 @@ class ReqShieldCreationSignalTest {
         }
 
     @Test
+    fun aWaiterShouldCallTheSupplierWhenItsReadFailsAfterTheHolderGaveTheLockBack() =
+        runBlocking {
+            val holderStarted = CompletableDeferred<Unit>()
+            val failHolder = CompletableDeferred<Unit>()
+            // Each read with a number above this one fails, as with a cache that is down
+            val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
+            val shield =
+                shield(
+                    getCache = { cacheKey ->
+                        check(cacheReads.get() <= failReadsAfter.get()) { "the cache is down" }
+                        cache[cacheKey]
+                    },
+                )
+            val holder = callers.failingHolder(shield, holderStarted, failHolder)
+            withTimeout(2_000) { holderStarted.await() }
+            val waiterSupplierCalls = AtomicInteger()
+            val waiter =
+                callers.async {
+                    shield.getAndSetReqShieldData(
+                        key,
+                        {
+                            waiterSupplierCalls.incrementAndGet()
+                            product
+                        },
+                        10_000,
+                    )
+                }
+            // Holder: 2 reads. Waiter: 1 read before the lock attempt and 1 read after it.
+            awaitReads(4)
+            try {
+                // Each read from now on fails, and the holder gives the lock back without an entry
+                failReadsAfter.set(4)
+                failHolder.complete(Unit)
+
+                assertEquals(product, withTimeout(2_000) { waiter.await() }.value)
+                assertEquals(1, waiterSupplierCalls.get())
+                // One failed read after the release. No read under a creation lock follows.
+                assertEquals(5, cacheReads.get())
+                withTimeout(2_000) { holder.await() }
+            } finally {
+                failReadsAfter.set(Int.MAX_VALUE)
+            }
+            assertNull(signal())
+        }
+
+    /** Starts a refresh of the old entry whose supplier ends only when the returned signal completes. */
+    private suspend fun startHungRefresh(shield: ReqShield<Product>): CompletableDeferred<Unit> {
+        cache[key] = oldEntry()
+        val refreshStarted = CompletableDeferred<Unit>()
+        val finishRefresh = CompletableDeferred<Unit>()
+        shield.getAndSetReqShieldData(
+            key,
+            {
+                refreshStarted.complete(Unit)
+                finishRefresh.await()
+                Product("refreshed", "refreshed")
+            },
+            10_000,
+        )
+        withTimeout(2_000) { refreshStarted.await() }
+        return finishRefresh
+    }
+
+    @Test
+    fun aRequestShouldNotWaitForARefreshWhoseLockTimedOut() =
+        runBlocking {
+            val shield = shield(lockTimeoutMillis = 200)
+            val finishRefresh = startHungRefresh(shield)
+            try {
+                // The lock of the refresh timed out: another request could take the refresh over
+                delay(300)
+                cache.remove(key)
+                val readsBefore = cacheReads.get()
+                val supplierCalls = AtomicInteger()
+                val startedAtNanos = System.nanoTime()
+
+                val data =
+                    shield.getAndSetReqShieldData(
+                        key,
+                        {
+                            supplierCalls.incrementAndGet()
+                            product
+                        },
+                        10_000,
+                    )
+
+                val millis = (System.nanoTime() - startedAtNanos) / 1_000_000
+                assertEquals(product, data.value)
+                assertEquals(1, supplierCalls.get())
+                assertTrue(millis < 1_000, "the request took $millis ms")
+                // The read on the miss and the read under the creation lock. No read of a wait.
+                assertEquals(2, cacheReads.get() - readsBefore)
+            } finally {
+                finishRefresh.complete(Unit)
+            }
+            withTimeout(2_000) {
+                while (refreshSignal() != null) delay(1)
+            }
+        }
+
+    @Test
+    fun aRequestShouldStopWaitingForARefreshWhenTheLockOfTheRefreshTimesOut() =
+        runBlocking {
+            val shield = shield(lockTimeoutMillis = 300)
+            val finishRefresh = startHungRefresh(shield)
+            try {
+                cache.remove(key)
+                val supplierCalls = AtomicInteger()
+                val startedAtNanos = System.nanoTime()
+
+                val data =
+                    shield.getAndSetReqShieldData(
+                        key,
+                        {
+                            supplierCalls.incrementAndGet()
+                            product
+                        },
+                        10_000,
+                    )
+
+                val millis = (System.nanoTime() - startedAtNanos) / 1_000_000
+                assertEquals(product, data.value)
+                assertEquals(1, supplierCalls.get())
+                // The wait ends with the lock timeout of 300 ms, not with the 60 reads of about 3 s
+                assertTrue(millis in 150..1_500, "the request took $millis ms")
+            } finally {
+                finishRefresh.complete(Unit)
+            }
+            withTimeout(2_000) {
+                while (refreshSignal() != null) delay(1)
+            }
+        }
+
+    @Test
     fun aRequestShouldCreateTheEntryWhenARefreshOutlastsItsReads() =
         runBlocking {
             cache[key] = oldEntry()
@@ -634,11 +774,7 @@ class ReqShieldCreationSignalTest {
             val holder = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
             withTimeout(2_000) { supplierStarted.await() }
             val cancelled = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
-            val other =
-                callers.async {
-                    shield.getAndSetReqShieldData(key, supplier, 10_000)
-                    System.nanoTime()
-                }
+            val other = callers.async { shield.getAndSetReqShieldData(key, supplier, 10_000) }
             // The holder read twice, and each waiter read before its lock attempt and once in its wait
             awaitReads(6)
 
@@ -653,11 +789,12 @@ class ReqShieldCreationSignalTest {
             val readsWhileWaiting = cacheReads.get() - readsAtCancellation
             assertTrue(readsWhileWaiting <= 5, "the other waiter read $readsWhileWaiting times in 150 ms")
 
-            val releasedAtNanos = System.nanoTime()
             finishSupplier.complete(Unit)
 
-            val waitAfterReleaseMillis = (withTimeout(2_000) { other.await() } - releasedAtNanos) / 1_000_000
-            assertTrue(waitAfterReleaseMillis < 25, "the other waiter ended $waitAfterReleaseMillis ms after the release")
+            // A waiter without the signal still finds the entry at its next poll, at most 50 ms later, so no time
+            // bound can tell the two apart. This bound only catches a waiter that stops reading. How soon the signal
+            // wakes a waiter is measured by aWaiterShouldGetTheEntryRightAfterTheHolderWroteIt.
+            assertEquals(product, withTimeout(1_000) { other.await() }.value)
             assertEquals(product, holder.await().value)
             assertEquals(product, cache[key]?.value)
             assertTrue(cancelled.isCancelled)
@@ -830,13 +967,14 @@ class ReqShieldCreationSignalTest {
                         return true
                     }
                 }
+            val shield = shield(keyLock = keyLock)
             val creationSignal = CompletableDeferred<Unit>()
-            ReqShield.creationSignals.register(key, sameToken, creationSignal)
+            shield.creationSignals.register(key, sameToken, creationSignal)
             cache[key] = oldEntry()
             var refreshSignalDuringSupplier: CompletableDeferred<Unit>? = null
 
             try {
-                shield(keyLock = keyLock).getAndSetReqShieldData(
+                shield.getAndSetReqShieldData(
                     key,
                     {
                         refreshSignalDuringSupplier = refreshSignal()
@@ -854,7 +992,7 @@ class ReqShieldCreationSignalTest {
                 assertTrue(refreshSignalDuringSupplier!!.isCompleted)
                 assertNull(refreshSignal())
             } finally {
-                ReqShield.creationSignals.release(key, sameToken)
+                shield.creationSignals.release(key, sameToken)
             }
         }
 
@@ -1047,45 +1185,107 @@ class ReqShieldCreationSignalTest {
             assertEquals(old, cache[key])
         }
 
-    /** A scope whose dispatcher throws, so `launch` on it throws and its task never runs. */
-    private fun scopeWhoseDispatcherThrows() =
+    /** A scope whose dispatcher throws [error], so `launch` on it throws and its task never runs. */
+    private fun scopeWhoseDispatcherThrows(error: Throwable = IllegalStateException("the dispatcher is down")) =
         CoroutineScope(
             SupervisorJob() +
                 object : CoroutineDispatcher() {
                     override fun dispatch(
                         context: CoroutineContext,
                         block: Runnable,
-                    ) = throw IllegalStateException("the dispatcher is down")
+                    ) = throw error
                 },
         )
 
     @Test
-    fun theCreationLockShouldBeReleasedWhenTheScopeCannotStartTheCacheWrite() =
+    fun theCallerShouldGetItsDataAndTheCreationLockShouldBeReleasedWhenTheScopeCannotStartTheCacheWrite() =
         runBlocking {
             val lock = KeyLocalLock(60_000)
             val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows())
 
-            // The caller gets the exception of the dispatcher
-            val error = assertFailsWith<IllegalStateException> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+            // The supplier already returned, so only the cache write is skipped
+            val result = shield.getAndSetReqShieldData(key, { product }, 10_000)
 
-            assertEquals("the dispatcher is down", error.message)
+            assertEquals(product, result.value)
+            assertNull(cache[key], "the cache write ran although the scope could not start it")
             assertNull(signal())
             assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
         }
 
     @Test
-    fun theRefreshLockShouldBeReleasedWhenTheScopeCannotStartTheRefresh() =
+    fun theCallerShouldGetTheEntryItReadAndTheRefreshLockShouldBeReleasedWhenTheScopeCannotStartTheRefresh() =
         runBlocking {
-            cache[key] = oldEntry()
+            val old = oldEntry()
+            cache[key] = old
             val lock = KeyLocalLock(60_000)
             val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows())
+            val supplierCalls = AtomicInteger()
 
-            // The caller gets the exception of the dispatcher, although it read an entry
-            val error = assertFailsWith<IllegalStateException> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+            // The caller read an entry, so only the refresh is skipped
+            val result =
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        supplierCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
 
-            assertEquals("the dispatcher is down", error.message)
+            assertEquals(old, result)
+            assertEquals(0, supplierCalls.get(), "the supplier of the refresh was called")
+            assertEquals(old, cache[key])
             assertNull(refreshSignal())
             assertTrue(lock.isFree(LockType.UPDATE), "the refresh lock is still held")
+        }
+
+    @Test
+    fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileTheScopeCannotStartTheCacheWrite() =
+        runBlocking {
+            val lock = KeyLocalLock(60_000)
+            val caller = AtomicReference<Job>()
+            val returned = AtomicReference<ReqShieldData<Product>>()
+            // The dispatcher cancels the caller and then throws the caller's cancellation
+            val scope =
+                CoroutineScope(
+                    SupervisorJob() +
+                        object : CoroutineDispatcher() {
+                            override fun dispatch(
+                                context: CoroutineContext,
+                                block: Runnable,
+                            ) {
+                                caller.get().cancel()
+                                throw CancellationException("the caller is cancelled")
+                            }
+                        },
+                )
+            val shield = shield(keyLock = lock, scope = scope)
+
+            val request =
+                callers.async {
+                    caller.set(coroutineContext.job)
+                    returned.set(shield.getAndSetReqShieldData(key, { product }, 10_000))
+                }
+
+            withTimeout(2_000) { request.join() }
+            assertTrue(request.isCancelled, "the caller was not cancelled")
+            // The cancellation goes on instead of the data
+            assertNull(returned.get(), "the cancelled caller got its data")
+            assertNull(signal())
+            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
+        }
+
+    @Test
+    fun theCallerShouldGetAnErrorOfTheDispatcherAfterTheCreationLockWasReleased() =
+        runBlocking {
+            val lock = KeyLocalLock(60_000)
+            val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows(NotImplementedError("the dispatcher throws an Error")))
+
+            // An Error is not a failure to start the task, so it goes on unchanged
+            assertFailsWith<NotImplementedError> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+
+            assertNull(signal())
+            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
         }
 
     @Test

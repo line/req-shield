@@ -27,6 +27,7 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
+import reactor.util.context.ContextView
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
@@ -54,6 +55,20 @@ data class ReqShieldConfiguration<T>(
     val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache functions or the lock functions choose
+     * their store from the Reactor `Context` of the caller (one store for each tenant, for example): give the
+     * same text for requests that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It gets the `Context` of the caller and runs at most once for a request, not at all for a request that finds
+     * a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`, and a request that got an old entry skips the refresh.
+     */
+    val storeScopeFunction: ((ContextView) -> String)? = null,
 ) {
     init {
         if (!isLocalLock) {

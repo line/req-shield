@@ -24,10 +24,9 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIM
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import com.linecorp.cse.reqshield.support.utils.newBackgroundExecutor
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ExecutorService
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Boolean,
@@ -58,23 +57,31 @@ data class ReqShieldConfiguration<T>(
     val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
     val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache or lock functions choose their store
+     * from the calling thread, for example from a `ThreadLocal` with the tenant. Give the same text for requests
+     * that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It runs on the caller's thread, so it can read a `ThreadLocal`. It runs at most once for a request, not at all
+     * for a request that finds a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`. If it throws for a request that got an old entry, that request skips the
+     * refresh and logs a warning.
+     *
+     * The cache writes, the cache read before a late write, and some lock releases run on [executor]. A store that
+     * is chosen from a `ThreadLocal` needs an executor that copies that `ThreadLocal` into its tasks.
+     */
+    val storeScopeFunction: (() -> String)? = null,
 ) {
     companion object {
-        private val executorThreadCounter = AtomicLong(0)
-
         /**
          * Shared by every configuration instance: one ReqShield per cache key must not mean one
          * thread pool per cache key. Threads are daemons so the pool never blocks JVM shutdown.
          */
-        private val sharedExecutor: ScheduledExecutorService by lazy {
-            Executors.newScheduledThreadPool(
-                maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
-            ) { runnable ->
-                Thread(runnable, "req-shield-executor-${executorThreadCounter.incrementAndGet()}").apply {
-                    isDaemon = true
-                }
-            }
-        }
+        private val sharedExecutor: ExecutorService by lazy { newBackgroundExecutor("req-shield-executor-") }
     }
 
     init {

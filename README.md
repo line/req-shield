@@ -143,8 +143,37 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
     - Lock: `SET {lockKey} {token} NX PX {ttlMillis}` (atomic; never `SETNX` followed by a separate `PEXPIRE`)
     - Unlock: compare-and-delete in a Lua script, e.g.
       `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`
+- In `core-reactor`, `core-kotlin-coroutine` and their Spring adapters, a request that is cancelled during its lock
+  call calls the unlock function with the token of that call. The store may have taken the lock before the
+  cancellation, and the token would otherwise be lost and the lock would stay until its timeout ends. So the unlock
+  function can get a token that never took the lock: the compare-and-delete above then deletes nothing. If the unlock
+  command reaches the store before the lock command, the lock still stays until its timeout ends.
 - The example modules contain working implementations for `RedisTemplate`, `ReactiveRedisTemplate` and the coroutine
   extensions.
+- A global lock also uses the local lock map of the JVM (see "Local lock map size"). Its entries have the cache key
+  with the prefix `creation-front:` (the request that asks the lock store for a creation lock) or `refresh-attempt:`
+  (the last request that asked for a refresh lock), and the number of the `ReqShield` instance in front of that.
+  `req-shield.lock.max-entries` applies to them. Once the map is full, each request for a new key asks the lock store
+  itself, as in versions before this change.
+- These entries belong to one `ReqShield` instance. Two instances that use the same key with a global lock or a
+  custom `KeyLock` never wait for each other inside the JVM: only their lock decides. The same holds for the refresh
+  guard of `ONLY_CREATE_CACHE`. Instances with the local lock share the lock of a key, as before, because the local
+  lock map is one map for the JVM.
+- **One instance with a store for each request.** If the cache functions or the lock functions of one `ReqShield`
+  (or of one cache bean) choose their store for each request - from the Reactor `Context`, the coroutine context
+  or a `ThreadLocal`, one store for each tenant for example - name that store:
+    - Core modules: set `storeScopeFunction` in `ReqShieldConfiguration`. It gets the Reactor `ContextView`
+      (`core-reactor`) or the `CoroutineContext` (`core-kotlin-coroutine`) of the caller, and runs on the caller's
+      thread in `core`.
+    - Spring adapters: implement `StoreScopeSupport` on the cache bean, next to `GlobalLockSupport`.
+    - Give the same text for requests that use the same store, and another text for another store. The function
+      runs at most once for a request, not at all for a request that finds a fresh entry, and must not block.
+  The locks and signals inside the JVM then have that text in their key, so requests of two stores never wait for
+  each other there, and requests of one store still collapse. **Without it**, a request of one store can wait for
+  a creation or a refresh that a request of another store runs for the same key. For a creation with a global
+  lock it waits until its reads are used up (about 3 s with the defaults) and then gets its value from the
+  supplier, without a cache entry. Version 1.2.0 had no such wait with a global lock, so set the function when you
+  upgrade such a setup. With the local lock, the requests of all stores share the lock of a key, as in 1.2.0.
 
 ### Local lock map size
 
@@ -218,6 +247,12 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 - Once an entry is older than `decisionForUpdate` percent of its TTL, a read returns it and starts a refresh in the
   background, unless another request already holds the update lock of that key. The refresh calls the supplier on its
   own and can still be running after the caller has its data.
+- Choose the TTL and `decisionForUpdate` so that a supplier call ends inside the refresh window. The window is the
+  last part of the TTL: `timeToLiveMillis × (100 − decisionForUpdate) / 100`, which is 20 % of the TTL with the
+  default of 80. A refresh that ends inside the window is not seen by any request: each read gets the old entry at
+  once and the new entry after the write. If the supplier takes longer than the window, the entry expires before
+  its refresh ends, and the requests for that key then wait for the refresh. If the supplier takes about as long as
+  the TTL, the requests wait for most of each TTL: use a longer TTL, or a smaller `decisionForUpdate`.
 - `core-reactor` and the WebFlux adapter subscribe the refresh with the caller's Reactor `Context`, so a supplier that
   reads it (for example `ReactiveSecurityContextHolder`) works in a refresh as it does in a request. A reactive
   transaction of the caller is part of that `Context` too; a supplier that must not run in it should not be refreshed
@@ -226,7 +261,8 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   caller's Reactor `Context` too, on a cache miss and in a refresh. This includes the cache write and the lock
   release, which run in the background after the caller has its data. Functions that choose the cache or the lock
   store from the `Context` (one store for each tenant, for example) therefore write and release in the store that
-  the read and the lock used.
+  the read and the lock used. Such a setup must also name the store of a request: see "One instance with a store
+  for each request" in "Global lock guidance".
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
   coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
   the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A
@@ -242,19 +278,31 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   between two reads.
 - If the request that holds the lock runs in the same JVM, the waiting request reads the cache as soon as that request
   gave the lock back: after its cache write, or after its supplier failed. It does not wait for the rest of the 50 ms.
-  If the holder runs in another JVM (global lock), or the lock is a custom `KeyLock` that another component holds, the
-  waiting request reads the cache every 50 ms.
+  If the lock is a custom `KeyLock` that another component holds, the waiting request reads the cache every 50 ms.
+- With a global lock (`isLocalLock = false`), one request of a JVM asks the lock store for the creation lock of a
+  key. The other requests of that JVM for the key wait for that request and do not call the lock store. So a cache
+  miss of 100 concurrent requests costs one lock call and one unlock call, not 101 lock calls.
+- If a request of another JVM holds the global lock, that one request reads the cache for its JVM: 5, 15, 35 and
+  75 ms after its first read, then every 50 ms. When it finds the entry, the other requests of its JVM read the cache
+  at once. An entry is found at most one of these waits after it was written, so at most 50 ms after the write, as
+  with the fixed interval. The reads fall at other times than before, so an entry of a slow supplier can be found
+  up to 25 ms earlier or later than with the fixed interval. If the holder in the other JVM fails and writes no entry, the requests still wait until their reads
+  are used up (about 3 s with the defaults), as before.
 - If the holder gave the lock back and the cache still has no entry (the supplier of the holder failed, for example),
   the waiting request tries to get the lock itself. One waiting request becomes the next holder and calls the
   supplier; the others wait for it. So after a failed holder the supplier is called by one request at a time, not by
   all waiting requests at once.
 - A request that finds no entry while a refresh of that key runs in the same JVM waits for that refresh in the same
   way, and does not call the supplier a second time. This happens when an entry expires before its refresh ends. If
-  the refresh ends without an entry, the request goes on as on any cache miss.
+  the refresh ends without an entry, the request goes on as on any cache miss. The request waits for a refresh only
+  while the refresh can hold its lock: after `lockTimeoutMillis` it goes on as on any cache miss too, and with a
+  global lock the next read of the old entry asks the lock store for a refresh again.
 - The wait for a refresh has the limit of `maxAttemptGetCache` reads. All waits of one request for a holder share
   one such limit, so trying the lock again does not extend the wait.
 - A cache read failure while waiting is logged and counted as a read. Three consecutive failures are treated as a
-  cache outage and the request falls back to calling the supplier itself right away.
+  cache outage and the request falls back to calling the supplier itself right away. A read that fails right after
+  the holder gave the lock back is treated the same way: the request does not take the lock, which would only read
+  the failing cache again.
 - When its reads are used up the request calls the supplier once, without a lock. A supplier failure is propagated as
   a `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
 - In `core-kotlin-coroutine`, a `CancellationException` thrown by the supplier or by a cache get/set function while
@@ -267,15 +315,21 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
 ### Thread pools and schedulers
 
 - `core` accepts any `java.util.concurrent.Executor` for its background cache writes; only `execute` is called and the
-  library never shuts a caller-supplied pool down. The default is a shared daemon pool. The Spring adapter runs the
-  writes on a daemon pool of its own that is shut down with the context, and registers no `Executor` bean, so Spring
+  library never shuts a caller-supplied pool down. The default is a shared daemon pool: a `ForkJoinPool` in FIFO mode
+  with 2 threads for each CPU. The Spring adapter runs the
+  writes on a daemon pool of its own, of the same kind, that is shut down with the context, and registers no `Executor` bean, so Spring
   Boot keeps its `applicationTaskExecutor`. To use your own pool, define an `Executor` bean named `reqShieldExecutor`;
   its lifecycle stays yours, and like any `Executor` bean it makes Spring Boot skip `applicationTaskExecutor`.
 - `core-reactor` accepts a `Scheduler` (default `boundedElastic`). The Spring WebFlux adapter uses the shared
   `boundedElastic` too and never disposes it; to use your own, define a `Scheduler` bean named `reqShieldScheduler`.
+  With the local lock, a read of an entry that is due for a refresh asks for the update lock on its own thread, and
+  only the read that gets the lock hands the refresh to the scheduler. A global lock or a custom `KeyLock` is called
+  on the scheduler.
 - `core-kotlin-coroutine` accepts a `CoroutineScope` for background cache writes (default: a shared supervisor scope on
   `Dispatchers.IO`). The coroutine Spring adapter runs them on a supervisor scope of its own on `Dispatchers.IO` and
   cancels it on context shutdown; to use your own, define a `CoroutineScope` bean named `reqShieldCoroutineScope`.
+  If the scope cannot start a background cache write or refresh (its dispatcher throws), that task is skipped with a
+  warning and its lock is released; the caller still gets its data, as in `core` when the executor rejects the task.
 - The Spring adapters register none of these beans themselves, so an application bean of the same name replaces the
   default instead of clashing with it, and its lifecycle stays with the application. A bean of one of these names
   that is not of the expected type fails the application startup instead of being ignored.
@@ -314,6 +368,10 @@ java -jar req-shield-benchmark-example/build/libs/req-shield-benchmark-example-*
   (pass it with `-jvmArgsAppend`).
 - Choose the module and the side with parameters, for example
   `-p module=core,reactor,coroutine -p arm=cacheAside,reqShield -p supplierMillis=10,100`.
+- The scenario benchmarks also take `-p lock=global` (lock functions on the store, not the lock map of the JVM) and
+  `-p store=redis` (a Redis server as the cache and the lock store, at the URL in `-Dbench.redis`, default
+  `redis://localhost:6379`). `RemoteHolderBenchmark` shows a waiter whose lock holder is in another JVM, and
+  `ReactiveAspectStampedeBenchmark` a stampede through the WebFlux and the coroutine aspect.
 - The cache of the benchmarks is a map in the JVM. A cache behind a network call takes far longer per call, so read a
   difference of some nanoseconds as an absolute cost, not as a ratio.
 

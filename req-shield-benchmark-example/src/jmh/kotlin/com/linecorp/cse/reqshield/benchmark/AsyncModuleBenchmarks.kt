@@ -293,7 +293,9 @@ class CoroutineHitBenchmark {
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 class CoroutineStaleHitBenchmark {
     private val cache = ConcurrentHashMap<String, ReqShieldData<String>>()
+    private val refreshes = AtomicInteger()
     private val supplier: suspend () -> String? = {
+        refreshes.incrementAndGet()
         delay(10)
         "value"
     }
@@ -311,10 +313,18 @@ class CoroutineStaleHitBenchmark {
         cache["coroutine-fresh-hot"] = freshEntry()
     }
 
+    /** Records how many refreshes ran, to show that a fast stale hit is not a refresh that stopped. */
     @TearDown(Level.Iteration)
-    fun settle() {
+    fun settle(
+        benchmark: BenchmarkParams,
+        iteration: IterationParams,
+    ) {
         // Lets the refresh that the iteration started finish before the next iteration starts.
         Thread.sleep(200)
+        Events.write(
+            """{"event":"refreshes","benchmark":"${benchmark.benchmark}","threads":${benchmark.threads},""" +
+                """"iteration":"${iteration.type}","supplierCalls":${refreshes.getAndSet(0)}}""",
+        )
     }
 
     @Benchmark

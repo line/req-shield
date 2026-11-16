@@ -24,6 +24,7 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
@@ -56,6 +57,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.Continuation
@@ -81,7 +83,9 @@ class ReqShieldTest : BaseReqShieldTest {
 
     /** Runs the fire-and-forget cache writes, so tests can await them instead of sleeping. */
     private lateinit var backgroundScope: CoroutineScope
-    private val key = "testKey"
+
+    // The lock map and the signal registries are static, so each test has its own key
+    private val key = "testKey-${UUID.randomUUID()}"
     private val createLockKey = lockKeyOf(key, LockType.CREATE)
     private val updateLockKey = lockKeyOf(key, LockType.UPDATE)
     private val oldValue = Product("oldTestValue", "oldTestName")
@@ -827,7 +831,7 @@ class ReqShieldTest : BaseReqShieldTest {
             coEvery { cacheSetter.invoke(any(), any(), any()) } throws Exception("set cache error")
             val exception =
                 assertFailsWith<InvocationTargetException> {
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, LOCAL_TOKEN, continuation)
+                    method.invoke(reqShield, cacheSetter, RequestKey.of(key, null), reqShieldData, lockType, LOCAL_TOKEN, continuation)
                 }
 
             val cause = exception.cause
@@ -860,7 +864,7 @@ class ReqShieldTest : BaseReqShieldTest {
             coEvery { cacheSetter.invoke(any(), any(), any()) } throws Exception("set cache error")
 
             assertFailsWith<InvocationTargetException> {
-                method.invoke(reqShield, cacheSetter, key, reqShieldData, LockType.CREATE, null, continuation)
+                method.invoke(reqShield, cacheSetter, RequestKey.of(key, null), reqShieldData, LockType.CREATE, null, continuation)
             }
 
             // A null token means this call never held the lock, so it must not release anyone else's.

@@ -18,6 +18,8 @@ package com.linecorp.cse.reqshield.kotlin.coroutine
 
 import com.linecorp.cse.reqshield.support.config.LocalLockLimit
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_MONITOR_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.UNLIMITED_LOCK_ENTRIES
+import com.linecorp.cse.reqshield.support.utils.nextLocalLockToken
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -30,13 +32,22 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 
 private val log = LoggerFactory.getLogger(KeyLocalLock::class.java)
 
 class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScope {
+    /**
+     * A text in front of each key of this lock. The lock map is shared in the JVM by key, so a lock that guards
+     * something inside one ReqShield instance sets this to keep its entries apart from those of other instances.
+     */
+    private var keyScope: String = ""
+
+    internal constructor(lockTimeoutMillis: Long, keyScope: String) : this(lockTimeoutMillis) {
+        this.keyScope = keyScope
+    }
+
     /**
      * Internal lock state holder.
      * Using class instead of data class to allow mutable expiresAt for atomic updates.
@@ -66,18 +77,16 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
     )
 
     companion object {
-        private val lockMap = ConcurrentHashMap<String, LockInfo>()
+        // An entry lives only while its lock is held, so the map is almost empty. With the default 16 bins, locks of
+        // different keys would contend for the same bins.
+        private val lockMap = ConcurrentHashMap<String, LockInfo>(LOCK_MAP_INITIAL_CAPACITY)
 
-        /**
-         * Source of local ownership tokens. A monotonic counter is enough because tokens never
-         * leave this JVM, and it is far cheaper than a UUID on the lock acquisition path.
-         */
-        private val tokenSequence = AtomicLong()
+        private const val LOCK_MAP_INITIAL_CAPACITY = 1024
 
         @Volatile
         private var monitorJob: Job? = null
 
-        private fun nextToken(): String = "local-${tokenSequence.incrementAndGet()}"
+        private fun nextToken(): String = nextLocalLockToken()
 
         private fun ensureMonitorStarted() {
             if (monitorJob?.isActive == true) return
@@ -146,8 +155,12 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
         key: String,
         lockType: LockType,
     ): String? {
-        val completeKey = lockKeyOf(key, lockType)
+        val completeKey = lockKeyOf(keyScope + key, lockType)
         val now = nowToEpochTime()
+        // An entry exists only while its lock is held, so an entry that has not expired means the lock is taken.
+        // A failed attempt changes nothing, so it needs no lock on the map bin. Only an attempt that can get the lock
+        // goes on to compute(): a new key, or an entry that expired.
+        lockMap[completeKey]?.let { if (now <= it.expiresAt) return null }
         val acquiredToken = AtomicReference<String?>(null)
 
         // Use compute() for atomic lock acquisition.
@@ -178,7 +191,10 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
                 // The caller then takes its normal path and writes the cache; making it wait
                 // would stall it on a holder that does not exist. Only this key's collapsing
                 // is lost, and the later unLock simply finds nothing to release.
-                if (LocalLockLimit.rejectsNewEntry(lockMap.mappingCount())) {
+                // mappingCount() adds up the counter cells of the map, so it is read only while a cap is set
+                if (LocalLockLimit.maxEntries != UNLIMITED_LOCK_ENTRIES &&
+                    LocalLockLimit.rejectsNewEntry(lockMap.mappingCount())
+                ) {
                     acquiredToken.set(nextToken())
                     return@compute null
                 }
@@ -200,7 +216,7 @@ class KeyLocalLock(private val lockTimeoutMillis: Long) : KeyLock, CoroutineScop
         lockType: LockType,
         token: String,
     ): Boolean {
-        val completeKey = lockKeyOf(key, lockType)
+        val completeKey = lockKeyOf(keyScope + key, lockType)
         val released = AtomicBoolean(false)
 
         // Release inside compute() so that it is atomic with respect to acquisition and cleanup

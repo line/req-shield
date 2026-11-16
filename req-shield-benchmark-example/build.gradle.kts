@@ -37,6 +37,9 @@ dependencies {
     jmh(rootProject.libs.reactor)
     jmh(rootProject.libs.kotlin.coroutine)
     jmh(rootProject.libs.kotlin.coroutine.reactor)
+    jmh(rootProject.libs.kotlin.coroutine.reactive)
+    // The Redis client of the scenario benchmarks with -p store=redis
+    jmh(rootProject.libs.lettuce)
     jmh(rootProject.libs.spring.context)
     jmh(rootProject.libs.aspectj)
     // Spring reads the parameter names of Kotlin methods for SpEL keys through kotlin-reflect

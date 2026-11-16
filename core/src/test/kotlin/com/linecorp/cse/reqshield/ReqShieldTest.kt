@@ -25,6 +25,7 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
@@ -403,7 +404,7 @@ class ReqShieldTest : BaseReqShieldTest {
         verify(exactly = 0) { keyLock.unLock(any(), any(), any()) }
         verify(exactly = 0) { callable.call() }
         // A leaked refresh lock would stop each refresh of this key until the lock times out
-        assertNotNull(KeyLocalLock(DEFAULT_LOCK_TIMEOUT_MILLIS).tryLock(isolatedKey, LockType.UPDATE))
+        assertNotNull(shield.localRefreshLock.tryLock(isolatedKey, LockType.UPDATE))
     }
 
     @Test
@@ -780,7 +781,7 @@ class ReqShieldTest : BaseReqShieldTest {
 
         val exception =
             assertFailsWith<InvocationTargetException> {
-                method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, createToken)
+                method.invoke(reqShield, cacheSetter, RequestKey.of(key, null), reqShieldData, lockType, createToken)
             }
 
         val cause = exception.cause

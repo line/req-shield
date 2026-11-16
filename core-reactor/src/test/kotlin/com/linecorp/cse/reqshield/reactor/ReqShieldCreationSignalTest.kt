@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.reactivestreams.Subscription
+import reactor.core.CoreSubscriber
 import reactor.core.Disposable
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
@@ -49,6 +51,9 @@ import java.util.concurrent.atomic.AtomicReference
  * by the signal.
  */
 class ReqShieldCreationSignalTest {
+    /** The ReqShield that the test made last. Its signals and guard locks are the ones the test looks at. */
+    private lateinit var created: ReqShield<Product>
+
     // The signals and the local locks are shared by all instances, so each test has its own key
     private val key = "creation-signal-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
@@ -88,7 +93,7 @@ class ReqShieldCreationSignalTest {
                 lockTimeoutMillis = lockTimeoutMillis,
                 reqShieldWorkMode = workMode,
             )
-        return ReqShield(if (keyLock == null) configuration else configuration.copy(keyLock = keyLock))
+        return ReqShield(if (keyLock == null) configuration else configuration.copy(keyLock = keyLock)).also { created = it }
     }
 
     /** A supplier that emits [product] once [finish] completes, and counts its calls in [calls]. */
@@ -108,7 +113,7 @@ class ReqShieldCreationSignalTest {
         }
 
     /** The release runs in doFinally, which can run after the caller got its result, so the removal is awaited. */
-    private fun awaitNoSignal() = await().atMost(Duration.ofSeconds(2)).until { ReqShield.creationSignals.find(key) == null }
+    private fun awaitNoSignal() = await().atMost(Duration.ofSeconds(2)).until { created.creationSignals.find(key) == null }
 
     private fun millisSince(startNanos: Long): Long = (System.nanoTime() - startNanos) / 1_000_000
 
@@ -296,11 +301,7 @@ class ReqShieldCreationSignalTest {
         await().atMost(Duration.ofSeconds(2)).until { holderCalls.get() == 1 }
         val waiterCalls = AtomicInteger()
         val cancelledWaiter: Disposable = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).subscribe()
-        val waiterEndedAtNanos =
-            shield
-                .getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000)
-                .map { System.nanoTime() }
-                .toFuture()
+        val otherWaiter = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).toFuture()
         // Holder: 2 reads. Each waiter: 1 read before the lock attempt and its first read after it.
         await().atMost(Duration.ofSeconds(2)).until { cacheReads.get() >= 6 }
 
@@ -308,15 +309,16 @@ class ReqShieldCreationSignalTest {
         // Several poll intervals, in which the other waiter also stops each of its waits for the signal
         Thread.sleep(150)
 
-        assertFalse(waiterEndedAtNanos.isDone, "the other waiter must still wait")
-        val signal = ReqShield.creationSignals.find(key)
+        assertFalse(otherWaiter.isDone, "the other waiter must still wait")
+        val signal = created.creationSignals.find(key)
         assertNotNull(signal)
         assertFalse(signal!!.isDone, "the signal must still be pending")
-        val releasedAtNanos = System.nanoTime()
         finishSupplier.complete(product)
 
-        val waitAfterReleaseMillis = (waiterEndedAtNanos.get(2, TimeUnit.SECONDS) - releasedAtNanos) / 1_000_000
-        assertTrue(waitAfterReleaseMillis < 25, "the waiter ended $waitAfterReleaseMillis ms after the release")
+        // A waiter without the signal still finds the entry at its next poll, at most 50 ms later, so no time bound
+        // can tell the two apart. This bound only catches a waiter that stops reading. How soon the signal wakes a
+        // waiter is measured by aWaiterShouldGetTheEntryRightAfterTheHolderWroteIt.
+        assertEquals(product, otherWaiter.get(1, TimeUnit.SECONDS).value)
         assertEquals(product, holder.get(2, TimeUnit.SECONDS).value)
         assertEquals(0, waiterCalls.get())
     }
@@ -345,14 +347,14 @@ class ReqShieldCreationSignalTest {
         result: () -> Mono<Product?>,
     ): Callable<Mono<Product?>> =
         Callable {
-            signalDuringRefresh.set(ReqShield.refreshSignals.find(key))
+            signalDuringRefresh.set(created.refreshSignals.find(key))
             result()
         }
 
     private fun awaitNoRefreshSignal(signalDuringRefresh: AtomicReference<CompletableFuture<Unit>?>) {
         // Without this, the check below could pass before the refresh even registered its signal
         await().atMost(Duration.ofSeconds(2)).until { signalDuringRefresh.get() != null }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
         assertTrue(signalDuringRefresh.get()!!.isDone, "the release completes the signal")
     }
 
@@ -381,7 +383,7 @@ class ReqShieldCreationSignalTest {
         val waitAfterRefreshMillis = (endedAtNanos - refreshEndedAtNanos) / 1_000_000
         assertTrue(waitAfterRefreshMillis < 25, "the request ended $waitAfterRefreshMillis ms after the refresh")
         assertEquals(1, supplierCalls.get())
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -409,7 +411,7 @@ class ReqShieldCreationSignalTest {
         assertTrue(waitAfterFailureMillis < 25, "the request ended $waitAfterFailureMillis ms after the failed refresh")
         assertEquals(1, waiterCalls.get())
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(product, cache[key]?.value) }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -441,12 +443,101 @@ class ReqShieldCreationSignalTest {
             assertEquals(1, waiterCalls.get())
             // The read on the miss and the three failed reads of the wait. No read under a creation lock follows.
             assertEquals(1 + 3, cacheReads.get() - readsBefore)
-            assertEquals(null, ReqShield.creationSignals.find(key), "the request took no creation lock")
+            assertEquals(null, created.creationSignals.find(key), "the request took no creation lock")
         } finally {
             failReadsAfter.set(Int.MAX_VALUE)
             finishRefresh.complete(Product("refreshed", "refreshed"))
         }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
+    }
+
+    @Test
+    fun aWaiterShouldCallTheSupplierWhenItsReadFailsAfterTheHolderGaveTheLockBack() {
+        val failHolder = CompletableFuture<Product?>()
+        val holderCalls = AtomicInteger()
+        // Each read with a number above this one fails, as with a cache that is down
+        val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
+        val shield =
+            shield(
+                getCacheFunction = { cacheKey ->
+                    Mono.fromCallable {
+                        check(cacheReads.incrementAndGet() <= failReadsAfter.get()) { "the cache is down" }
+                        cache[cacheKey]
+                    }
+                },
+            )
+        val holder = shield.getAndSetReqShieldData(key, blockedSupplier(failHolder, holderCalls), 10_000).toFuture()
+        await().atMost(Duration.ofSeconds(2)).pollInterval(Duration.ofMillis(1)).until { holderCalls.get() == 1 }
+        val waiterCalls = AtomicInteger()
+        val waiter = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).toFuture()
+        // Holder: 2 reads. Waiter: 1 read before the lock attempt and its first read after it.
+        await().atMost(Duration.ofSeconds(2)).pollInterval(Duration.ofMillis(1)).until { cacheReads.get() == 4 }
+        try {
+            // Each read from now on fails, and the holder gives the lock back without an entry
+            failReadsAfter.set(4)
+            failHolder.completeExceptionally(IllegalStateException("the supplier of the holder fails"))
+
+            assertEquals(product, waiter.get(2, TimeUnit.SECONDS).value)
+            assertEquals(1, waiterCalls.get())
+            // One failed read after the release. No read under a creation lock follows.
+            assertEquals(5, cacheReads.get())
+            assertThrows(Exception::class.java) { holder.get(2, TimeUnit.SECONDS) }
+        } finally {
+            failReadsAfter.set(Int.MAX_VALUE)
+        }
+        awaitNoSignal()
+    }
+
+    @Test
+    fun aRequestShouldNotWaitForARefreshWhoseLockTimedOut() {
+        val finishRefresh = CompletableFuture<Product?>()
+        val refreshCalls = AtomicInteger()
+        val shield = shield(lockTimeoutMillis = 200)
+        try {
+            startRefresh(shield, blockedSupplier(finishRefresh, refreshCalls), refreshCalls)
+            // The lock of the refresh timed out: another request could take the refresh over
+            Thread.sleep(300)
+            cache.remove(key)
+            val readsBefore = cacheReads.get()
+            val waiterCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).block(timeout)
+
+            val millis = millisSince(startedAtNanos)
+            assertEquals(product, data?.value)
+            assertEquals(1, waiterCalls.get())
+            assertTrue(millis < 1_000, "the request took $millis ms")
+            // The read on the miss and the read under the creation lock. No read of a wait.
+            assertEquals(readsBefore + 2, cacheReads.get())
+        } finally {
+            finishRefresh.complete(Product("refreshed", "refreshed"))
+        }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
+    }
+
+    @Test
+    fun aRequestShouldStopWaitingForARefreshWhenTheLockOfTheRefreshTimesOut() {
+        val finishRefresh = CompletableFuture<Product?>()
+        val refreshCalls = AtomicInteger()
+        val shield = shield(lockTimeoutMillis = 300)
+        try {
+            startRefresh(shield, blockedSupplier(finishRefresh, refreshCalls), refreshCalls)
+            cache.remove(key)
+            val waiterCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).block(timeout)
+
+            val millis = millisSince(startedAtNanos)
+            assertEquals(product, data?.value)
+            assertEquals(1, waiterCalls.get())
+            // The wait ends with the lock timeout of 300 ms, not with the 60 reads of about 3 s
+            assertTrue(millis in 150..1_500, "the request took $millis ms")
+        } finally {
+            finishRefresh.complete(Product("refreshed", "refreshed"))
+        }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -472,7 +563,7 @@ class ReqShieldCreationSignalTest {
         } finally {
             finishRefresh.complete(Product("refreshed", "refreshed"))
         }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -504,7 +595,7 @@ class ReqShieldCreationSignalTest {
         } finally {
             finishRefresh.complete(Product("refreshed", "refreshed"))
         }
-        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
     }
 
     @Test
@@ -581,14 +672,14 @@ class ReqShieldCreationSignalTest {
                 ReqShieldConfiguration<Product>(
                     setCacheFunction = { cacheKey, data, _ ->
                         Mono.fromCallable {
-                            signalDuringWrite.set(ReqShield.creationSignals.find(cacheKey))
+                            signalDuringWrite.set(created.creationSignals.find(cacheKey))
                             cache[cacheKey] = data
                             true
                         }
                     },
                     getCacheFunction = { cacheKey -> Mono.fromCallable { cache[cacheKey] } },
                 ),
-            )
+            ).also { created = it }
 
         shield.getAndSetReqShieldData(key, { Mono.just(product) }, 10_000).block(timeout)
 
@@ -609,7 +700,7 @@ class ReqShieldCreationSignalTest {
                     if (reads.incrementAndGet() == 1) {
                         null
                     } else {
-                        signalDuringRecheck.set(ReqShield.creationSignals.find(cacheKey))
+                        signalDuringRecheck.set(created.creationSignals.find(cacheKey))
                         entry
                     }
                 }
@@ -630,7 +721,7 @@ class ReqShieldCreationSignalTest {
                 .getAndSetReqShieldData(
                     key,
                     {
-                        signalDuringSupplier.set(ReqShield.creationSignals.find(key))
+                        signalDuringSupplier.set(created.creationSignals.find(key))
                         Mono.error(IllegalStateException("the supplier fails"))
                     },
                     10_000,
@@ -648,7 +739,7 @@ class ReqShieldCreationSignalTest {
         // The supplier runs right before the write is scheduled, so only the write is rejected
         val supplier =
             Callable<Mono<Product?>> {
-                signalDuringSupplier.set(ReqShield.creationSignals.find(key))
+                signalDuringSupplier.set(created.creationSignals.find(key))
                 scheduler.rejecting.set(true)
                 Mono.just(product)
             }
@@ -671,7 +762,7 @@ class ReqShieldCreationSignalTest {
             .getAndSetReqShieldData(
                 key,
                 {
-                    signalDuringSupplier.set(ReqShield.creationSignals.find(key))
+                    signalDuringSupplier.set(created.creationSignals.find(key))
                     Mono.delay(Duration.ofMillis(60)).map {
                         cache[key] = ReqShieldData(other, 10_000)
                         product
@@ -699,7 +790,7 @@ class ReqShieldCreationSignalTest {
                 .getAndSetReqShieldData(
                     key,
                     {
-                        signalDuringSupplier.set(ReqShield.creationSignals.find(key))
+                        signalDuringSupplier.set(created.creationSignals.find(key))
                         Mono.delay(Duration.ofMillis(60)).map {
                             scheduler.rejecting.set(true)
                             product
@@ -729,5 +820,50 @@ class ReqShieldCreationSignalTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun aTokenThatTheLockEmitsAfterTheCallerCancelledShouldBeReleased() {
+        val localLock = KeyLocalLock(60_000)
+        val lockCaller = AtomicReference<CoreSubscriber<in String>>()
+        val lockCallCancelled = AtomicBoolean(false)
+        // A lock call that ignores the cancel and emits its token later, as when the answer crosses the cancel
+        val lock =
+            object : KeyLock by localLock {
+                override fun tryLock(
+                    key: String,
+                    lockType: LockType,
+                ): Mono<String> =
+                    object : Mono<String>() {
+                        override fun subscribe(actual: CoreSubscriber<in String>) {
+                            actual.onSubscribe(
+                                object : Subscription {
+                                    override fun request(n: Long) {}
+
+                                    override fun cancel() = lockCallCancelled.set(true)
+                                },
+                            )
+                            lockCaller.set(actual)
+                        }
+                    }
+            }
+        val supplierCalls = AtomicInteger()
+        val caller = shield(keyLock = lock).getAndSetReqShieldData(key, countingSupplier(supplierCalls), 10_000).subscribe()
+        await().atMost(Duration.ofSeconds(2)).until { lockCaller.get() != null }
+
+        caller.dispose()
+        assertTrue(lockCallCancelled.get(), "the cancel did not reach the lock call")
+        val token = localLock.tryLock(key, LockType.CREATE).block(timeout)
+        lockCaller.get().onNext(token!!)
+        lockCaller.get().onComplete()
+
+        // The request that got the token released it, although its caller was gone
+        await().atMost(Duration.ofSeconds(2)).until {
+            val freeToken = localLock.tryLock(key, LockType.CREATE).block(timeout)
+            freeToken?.let { localLock.unLock(key, LockType.CREATE, it).block(timeout) }
+            freeToken != null
+        }
+        awaitNoSignal()
+        assertEquals(0, supplierCalls.get())
     }
 }

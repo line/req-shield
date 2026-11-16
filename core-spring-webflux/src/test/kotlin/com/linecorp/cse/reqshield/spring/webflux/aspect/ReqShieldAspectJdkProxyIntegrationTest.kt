@@ -16,20 +16,28 @@
 
 package com.linecorp.cse.reqshield.spring.webflux.aspect
 
+import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.config.LibAutoConfiguration
+import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.test.context.ContextConfiguration
 import org.springframework.test.context.junit.jupiter.SpringExtension
 import reactor.core.publisher.Mono
 import java.lang.reflect.Proxy
+import java.time.Duration
 
 private const val JDK_PROXY_CACHE_NAME = "jdkProxy"
 
@@ -49,6 +57,90 @@ class ReqShieldAspectJdkProxyIntegrationTest {
     fun annotatedMethodShouldBeResolvedBehindAJdkDynamicProxy() {
         assertTrue(Proxy.isProxyClass(service.javaClass), "expected a JDK dynamic proxy but was ${service.javaClass}")
         assertEquals("product-1", service.findName("1").block())
+    }
+
+    /**
+     * Both beans report the same interface method to the aspect. Only the target class tells their annotations
+     * apart, so each must get its own cache name, its own entries and its own ReqShield. The context is built here,
+     * so this test shares no aspect with the cached context of the class.
+     */
+    @Test
+    fun implementationsOfOneInterfaceShouldEachUseTheirOwnAnnotation() {
+        AnnotationConfigApplicationContext(LibAutoConfiguration::class.java, TwoLabelServicesConfig::class.java).use { twoBeans ->
+            val alpha = twoBeans.getBean("alphaLabelService", LabelService::class.java)
+            val beta = twoBeans.getBean("betaLabelService", LabelService::class.java)
+            val cache = twoBeans.getBean(InMemoryAsyncCache::class.java)
+            assertTrue(Proxy.isProxyClass(alpha.javaClass) && Proxy.isProxyClass(beta.javaClass))
+
+            assertEquals("alpha-1", alpha.label("1").block())
+            await().atMost(Duration.ofSeconds(5)).until { cache.get("alpha::1").block() != null }
+            assertEquals("beta-1", beta.label("1").block())
+            await().atMost(Duration.ofSeconds(5)).until { cache.get("beta::1").block() != null }
+
+            // Both entries are now hits, and each bean still reads its own
+            assertEquals("alpha-1", alpha.label("1").block())
+            assertEquals("beta-1", beta.label("1").block())
+
+            val reqShieldMap = twoBeans.getBean(ReqShieldAspect::class.java).reqShieldMap
+            val alphaMethod = AlphaLabelService::class.java.getMethod("label", String::class.java)
+            val betaMethod = BetaLabelService::class.java.getMethod("label", String::class.java)
+            assertEquals(setOf(alphaMethod, betaMethod), reqShieldMap.keys)
+            assertNotSame(reqShieldMap[alphaMethod], reqShieldMap[betaMethod])
+        }
+    }
+
+    /** Like the cacheable advice, each eviction must use the cache name of its own implementation. */
+    @Test
+    fun implementationsOfOneInterfaceShouldEachEvictTheirOwnEntry() {
+        AnnotationConfigApplicationContext(LibAutoConfiguration::class.java, TwoLabelServicesConfig::class.java).use { twoBeans ->
+            val alpha = twoBeans.getBean("alphaLabelService", LabelService::class.java)
+            val beta = twoBeans.getBean("betaLabelService", LabelService::class.java)
+            val cache = twoBeans.getBean(InMemoryAsyncCache::class.java) as InMemoryAsyncCache<String>
+            cache.put("alpha::1", ReqShieldData("alpha-1", 10_000), 10_000).block()
+            cache.put("beta::1", ReqShieldData("beta-1", 10_000), 10_000).block()
+
+            // Alpha resolves its eviction first, so beta must not reuse what alpha resolved
+            alpha.forget("1").block()
+            assertNull(cache.get("alpha::1").block())
+            assertNotNull(cache.get("beta::1").block())
+
+            beta.forget("1").block()
+            assertNull(cache.get("beta::1").block())
+        }
+    }
+
+    @Configuration
+    open class TwoLabelServicesConfig {
+        @Bean
+        open fun asyncCache(): AsyncCache<String> = InMemoryAsyncCache()
+
+        @Bean
+        open fun alphaLabelService(): LabelService = AlphaLabelService()
+
+        @Bean
+        open fun betaLabelService(): LabelService = BetaLabelService()
+    }
+
+    interface LabelService {
+        fun label(id: String): Mono<String>
+
+        fun forget(id: String): Mono<Boolean>
+    }
+
+    class AlphaLabelService : LabelService {
+        @ReqShieldCacheable(cacheName = "alpha", key = "#id", timeToLiveMillis = 10_000)
+        override fun label(id: String): Mono<String> = Mono.just("alpha-$id")
+
+        @ReqShieldCacheEvict(cacheName = "alpha", key = "#id")
+        override fun forget(id: String): Mono<Boolean> = Mono.just(true)
+    }
+
+    class BetaLabelService : LabelService {
+        @ReqShieldCacheable(cacheName = "beta", key = "#id", timeToLiveMillis = 10_000)
+        override fun label(id: String): Mono<String> = Mono.just("beta-$id")
+
+        @ReqShieldCacheEvict(cacheName = "beta", key = "#id")
+        override fun forget(id: String): Mono<Boolean> = Mono.just(true)
     }
 
     @Configuration

@@ -22,6 +22,7 @@ import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
@@ -47,6 +48,7 @@ import reactor.util.context.Context
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeoutException
@@ -66,7 +68,9 @@ class ReqShieldTest : BaseReqShieldTest {
     private lateinit var cacheGetter: (String) -> Mono<ReqShieldData<Product>?>
     private lateinit var keyLock: KeyLock
     private lateinit var keyGlobalLock: KeyLock
-    private val key = "testKey"
+
+    // The lock map and the signal registries are static, so each test has its own key
+    private val key = "testKey-${UUID.randomUUID()}"
     private val oldValue = Product("oldTestValue", "oldTestValue")
     private val value = Product("testValue", "testValue")
     private val callable: Callable<Mono<Product?>> = mockk()
@@ -1047,8 +1051,9 @@ class ReqShieldTest : BaseReqShieldTest {
         val mono =
             Mono.defer {
                 try {
+                    val requestKey = RequestKey.of(key, null)
                     @Suppress("UNCHECKED_CAST")
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
+                    method.invoke(reqShield, cacheSetter, requestKey, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
                 } catch (e: InvocationTargetException) {
                     Mono.error(e.cause ?: e)
                 }

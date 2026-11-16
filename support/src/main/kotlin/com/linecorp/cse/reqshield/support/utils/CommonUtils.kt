@@ -16,6 +16,32 @@
 
 package com.linecorp.cse.reqshield.support.utils
 
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.GET_CACHE_INTERVAL_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.REPRESENTATIVE_FIRST_POLL_MILLIS
+
+/**
+ * The wait before the next cache read of the request that reads the cache for its JVM, while a request of another
+ * JVM holds the global lock: 5, 10, 20, 40 ms and then the poll interval of 50 ms. [waitIndex] is 0 for the wait
+ * after the first read.
+ *
+ * Only one request of a JVM reads at these short waits, so the cache gets few extra reads, and the other requests
+ * of that JVM get an entry of a fast supplier long before a whole poll interval ends. No wait is longer than the
+ * poll interval, so an entry is found at most one poll interval after its write, as with the fixed interval. The
+ * reads fall at other times than with the fixed interval, so one entry can be found earlier or later than before.
+ */
+fun representativePollMillis(waitIndex: Int): Long {
+    require(waitIndex >= 0) { "waitIndex must not be negative, but was $waitIndex" }
+    // 5 shl 4 is 80, which is over the interval already: larger shifts are not computed, so they cannot overflow
+    return if (waitIndex >= 4) {
+        GET_CACHE_INTERVAL_MILLIS
+    } else {
+        minOf(
+            GET_CACHE_INTERVAL_MILLIS,
+            REPRESENTATIVE_FIRST_POLL_MILLIS shl waitIndex,
+        )
+    }
+}
+
 fun decideToUpdateCache(
     createdAt: Long,
     timeToLiveMillis: Long,

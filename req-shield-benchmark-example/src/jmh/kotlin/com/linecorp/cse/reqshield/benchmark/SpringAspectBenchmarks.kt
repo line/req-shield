@@ -20,6 +20,7 @@ import com.linecorp.cse.reqshield.ReqShield
 import com.linecorp.cse.reqshield.config.ReqShieldConfiguration
 import com.linecorp.cse.reqshield.spring.cache.ReqShieldCache
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.openjdk.jmh.annotations.Benchmark
 import org.openjdk.jmh.annotations.BenchmarkMode
@@ -42,6 +43,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
 import reactor.core.publisher.Mono
+import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -355,9 +357,22 @@ open class ReactiveProductService {
     open fun spelKey(id: String): Mono<String> = Mono.just("value")
 }
 
+/** A reactive method that takes time, as an origin call does. It counts its calls in [SlowOrigin]. */
+open class SlowReactiveService {
+    @ReactiveCacheable(cacheName = "slow")
+    open fun load(id: String): Mono<String> =
+        Mono.defer {
+            SlowOrigin.calls.incrementAndGet()
+            Mono.delay(Duration.ofMillis(SlowOrigin.delayMillis)).map { "value" }
+        }
+}
+
 @Configuration
 @Import(ReactiveAutoConfiguration::class)
 open class ReactiveBenchConfig {
+    @Bean
+    open fun slowReactiveService() = SlowReactiveService()
+
     @Bean
     open fun asyncCache(): ReactiveAsyncCache<String> = MapReactiveCache()
 
@@ -441,9 +456,22 @@ open class SuspendProductService {
     open suspend fun spelKey(id: String): String = "value"
 }
 
+/** A suspend method that takes time, as an origin call does. It counts its calls in [SlowOrigin]. */
+open class SlowSuspendService {
+    @SuspendCacheable(cacheName = "slow")
+    open suspend fun load(id: String): String {
+        SlowOrigin.calls.incrementAndGet()
+        delay(SlowOrigin.delayMillis)
+        return "value"
+    }
+}
+
 @Configuration
 @Import(SuspendAutoConfiguration::class)
 open class SuspendBenchConfig {
+    @Bean
+    open fun slowSuspendService() = SlowSuspendService()
+
     @Bean
     open fun asyncCache(): SuspendAsyncCache<String> = MapSuspendCache()
 
@@ -498,4 +526,103 @@ class CoroutineAspectHitBenchmark {
 
     @Benchmark
     fun aspectSpelKey(cursor: KeyCursor): String = runBlocking { service.spelKey(ids[cursor.next()]) }
+}
+
+/**
+ * One invocation is one stampede through the WebFlux aspect or the coroutine aspect: `callers` threads call the same
+ * method with the same new argument at the same moment, and each blocks for its result.
+ * The events file has the method call count and the latency of each caller.
+ */
+@State(Scope.Benchmark)
+@BenchmarkMode(Mode.SingleShotTime)
+@OutputTimeUnit(TimeUnit.MILLISECONDS)
+class ReactiveAspectStampedeBenchmark {
+    @Param("webfluxAspect", "coroutineAspect")
+    @JvmField
+    final var arm: String = ""
+
+    @Param("100")
+    @JvmField
+    final var callers: Int = 0
+
+    @Param("10", "100")
+    @JvmField
+    final var supplierMillis: Long = 0
+
+    private lateinit var context: AnnotationConfigApplicationContext
+    private lateinit var call: (String) -> String?
+    private lateinit var workers: ExecutorService
+    private val latencies = ArrayList<Long>()
+    private val callsPerRun = ArrayList<Int>()
+    private var measuring = false
+    private var sequence = 0
+
+    @Setup(Level.Trial)
+    fun setup() {
+        SlowOrigin.delayMillis = supplierMillis
+        call =
+            when (arm) {
+                "webfluxAspect" -> {
+                    context = AnnotationConfigApplicationContext(ReactiveBenchConfig::class.java)
+                    val service = context.getBean(SlowReactiveService::class.java);
+                    { id -> service.load(id).block() }
+                }
+                "coroutineAspect" -> {
+                    context = AnnotationConfigApplicationContext(SuspendBenchConfig::class.java)
+                    val service = context.getBean(SlowSuspendService::class.java);
+                    { id -> runBlocking { service.load(id) } }
+                }
+                else -> error("unknown arm $arm")
+            }
+        workers = Executors.newFixedThreadPool(callers)
+    }
+
+    @Setup(Level.Iteration)
+    fun beforeRun(iteration: IterationParams) {
+        measuring = iteration.type == IterationType.MEASUREMENT
+        // The cache write and the unlock of the last run happen in the background, just after its supplier call
+        Thread.sleep(30)
+        SlowOrigin.calls.set(0)
+    }
+
+    @TearDown(Level.Trial)
+    fun tearDown() {
+        workers.shutdownNow()
+        context.close()
+        val sorted = latencies.toLongArray().also { it.sort() }
+
+        fun millis(p: Double) = "%.2f".format(percentile(sorted, p) / 1e6)
+        Events.write(
+            """{"event":"aspectStampede","arm":"$arm","callers":$callers,"supplierMillis":$supplierMillis,""" +
+                """"runs":${callsPerRun.size},"methodCallsMin":${callsPerRun.minOrNull()},"methodCallsMax":${callsPerRun.maxOrNull()},""" +
+                """"latencyMsP50":${millis(0.50)},"latencyMsP90":${millis(0.90)},"latencyMsP99":${millis(0.99)},""" +
+                """"latencyMsMax":${millis(1.0)}}""",
+        )
+    }
+
+    @Benchmark
+    fun stampede() {
+        val id = "$arm-$supplierMillis-${sequence++}"
+        val ready = CountDownLatch(callers)
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(callers)
+        val nanos = LongArray(callers)
+        repeat(callers) { i ->
+            workers.execute {
+                ready.countDown()
+                start.await()
+                val begin = System.nanoTime()
+                call(id)
+                nanos[i] = System.nanoTime() - begin
+                done.countDown()
+            }
+        }
+        ready.await()
+        start.countDown()
+        done.await()
+        if (measuring) {
+            nanos.forEach { latencies.add(it) }
+            callsPerRun.add(SlowOrigin.calls.get())
+        }
+    }
 }

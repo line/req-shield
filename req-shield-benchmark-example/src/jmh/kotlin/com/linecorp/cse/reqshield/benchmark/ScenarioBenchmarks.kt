@@ -36,7 +36,6 @@ import org.openjdk.jmh.runner.IterationType
 import reactor.core.publisher.Mono
 import java.time.Duration
 import java.util.concurrent.Callable
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -46,7 +45,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-/** The parts that the two scenario benchmarks share: the cache, the arms and the supplier call count. */
+/** The parts that the scenario benchmarks share: the cache, the lock, the arms and the call counts. */
 @State(Scope.Benchmark)
 abstract class ScenarioState {
     /** The req-shield module under test: core (blocking), reactor or coroutine. */
@@ -62,12 +61,28 @@ abstract class ScenarioState {
     @JvmField
     final var supplierMillis: Long = 0
 
-    /** Time of one cache write. 0 models an in-process cache, 1 models a cache behind a network call. */
+    /** Time of one cache write of the in-memory store. 0 models a cache in the process, 1 a cache behind a network call. */
     @Param("0")
     @JvmField
     final var setMillis: Long = 0
 
-    protected val cache = ConcurrentHashMap<String, ReqShieldData<String>>()
+    /** The cache and lock store: `memory`, or `redis` (a server at the URL in -Dbench.redis, default redis://localhost:6379). */
+    @Param("memory")
+    @JvmField
+    final var store: String = ""
+
+    /** The lock of req-shield: `local` (the lock map of the JVM) or `global` (lock functions on the store). */
+    @Param("local")
+    @JvmField
+    final var lock: String = ""
+
+    /** Time of one lock or unlock call of the in-memory store. */
+    @Param("0")
+    @JvmField
+    final var lockMillis: Long = 0
+
+    protected val calls = StoreCalls()
+    protected lateinit var backend: Backend
     protected val supplierCalls = AtomicInteger()
 
     /** Time of one supplier call. A subclass can make it random. */
@@ -86,26 +101,27 @@ abstract class ScenarioState {
     private fun randomSupplierMillis(): Long =
         ThreadLocalRandom.current().nextLong(supplierMinMillis, supplierMaxMillis + 1).also { supplierMillisTotal.addAndGet(it) }
 
-    /** Reads like a cache with expiry (Redis, for example): an entry older than its time to live is gone. */
-    private fun read(key: String): ReqShieldData<String>? =
-        cache[key]?.takeIf { System.currentTimeMillis() < it.createdAt + it.timeToLiveMillis }
-
-    private val cacheWrites = AtomicInteger()
     protected lateinit var executor: ScheduledThreadPoolExecutor
     protected lateinit var call: (String) -> ReqShieldData<String>
     protected var measuring = false
     private var keySequence = 0
 
-    private fun store(
-        key: String,
-        data: ReqShieldData<String>,
-    ): Boolean {
-        cache[key] = data
-        cacheWrites.incrementAndGet()
-        return true
-    }
+    /** Cache reads and lock calls of each measured run, taken after its background work ended. */
+    protected val cacheReadsPerRun = ArrayList<Int>()
+    protected val lockCallsPerRun = ArrayList<Int>()
+    private var lastRunMeasured = false
+
+    private val globalLock: Boolean
+        get() = lock == "global"
 
     protected fun setupArms() {
+        backend =
+            when (store) {
+                "memory" -> MemoryBackend(calls, setMillis, lockMillis)
+                "redis" -> RedisBackend(calls, System.getProperty("bench.redis", "redis://localhost:6379"))
+                else -> error("unknown store $store")
+            }
+        backend.clear()
         executor = libraryLikeExecutor()
         val useReqShield = arm == "reqShield"
         call =
@@ -124,16 +140,26 @@ abstract class ScenarioState {
                 Thread.sleep(supplierDelayMillis())
                 "value"
             }
-        val get: (String) -> ReqShieldData<String>? = { read(it) }
-        val set: (String, ReqShieldData<String>, Long) -> Boolean = { key, data, _ ->
-            if (setMillis > 0) Thread.sleep(setMillis)
-            store(key, data)
-        }
+        val get: (String) -> ReqShieldData<String>? = { backend.get(it) }
+        val set: (String, ReqShieldData<String>, Long) -> Boolean = { key, data, _ -> backend.set(key, data) }
         if (!useReqShield) {
             val aside = CacheAside(get, set)
             return { key -> aside.get(key, supplier, timeToLive) }
         }
-        val shield = ReqShield(ReqShieldConfiguration(setCacheFunction = set, getCacheFunction = get, executor = executor))
+        val config =
+            if (globalLock) {
+                ReqShieldConfiguration(
+                    setCacheFunction = set,
+                    getCacheFunction = get,
+                    globalLockFunction = { lockKey, token, ttl -> backend.lock(lockKey, token, ttl) },
+                    globalUnLockFunction = { lockKey, token -> backend.unlock(lockKey, token) },
+                    isLocalLock = false,
+                    executor = executor,
+                )
+            } else {
+                ReqShieldConfiguration(setCacheFunction = set, getCacheFunction = get, executor = executor)
+            }
+        val shield = ReqShield(config)
         return { key -> shield.getAndSetReqShieldData(key, supplier, timeToLive) }
     }
 
@@ -146,15 +172,25 @@ abstract class ScenarioState {
                     Mono.delay(Duration.ofMillis(supplierDelayMillis())).map { "value" }
                 }
             }
-        val get: (String) -> Mono<ReqShieldData<String>?> = { key -> Mono.fromCallable { read(key) } }
-        val set: (String, ReqShieldData<String>, Long) -> Mono<Boolean> = { key, data, _ ->
-            Mono.delay(Duration.ofMillis(setMillis)).map { store(key, data) }
-        }
+        val get: (String) -> Mono<ReqShieldData<String>?> = { key -> backend.getMono(key) }
+        val set: (String, ReqShieldData<String>, Long) -> Mono<Boolean> = { key, data, _ -> backend.setMono(key, data) }
         if (!useReqShield) {
             val aside = ReactorCacheAside(get, set)
             return { key -> aside.get(key, supplier, timeToLive).block()!! }
         }
-        val shield = ReactorReqShield(ReactorConfig(setCacheFunction = set, getCacheFunction = get))
+        val config =
+            if (globalLock) {
+                ReactorConfig(
+                    setCacheFunction = set,
+                    getCacheFunction = get,
+                    globalLockFunction = { lockKey, token, ttl -> backend.lockMono(lockKey, token, ttl) },
+                    globalUnLockFunction = { lockKey, token -> backend.unlockMono(lockKey, token) },
+                    isLocalLock = false,
+                )
+            } else {
+                ReactorConfig(setCacheFunction = set, getCacheFunction = get)
+            }
+        val shield = ReactorReqShield(config)
         return { key -> shield.getAndSetReqShieldData(key, supplier, timeToLive).block()!! }
     }
 
@@ -165,36 +201,66 @@ abstract class ScenarioState {
             delay(supplierDelayMillis())
             "value"
         }
-        val get: suspend (String) -> ReqShieldData<String>? = { read(it) }
-        val set: suspend (String, ReqShieldData<String>, Long) -> Boolean = { key, data, _ ->
-            if (setMillis > 0) delay(setMillis)
-            store(key, data)
-        }
+        val get: suspend (String) -> ReqShieldData<String>? = { backend.getSuspend(it) }
+        val set: suspend (String, ReqShieldData<String>, Long) -> Boolean = { key, data, _ -> backend.setSuspend(key, data) }
         if (!useReqShield) {
             val aside = CoroutineCacheAside(get, set)
             return { key -> runBlocking { aside.get(key, supplier, timeToLive) } }
         }
-        val shield = CoroutineReqShield(CoroutineConfig(setCacheFunction = set, getCacheFunction = get))
+        val config =
+            if (globalLock) {
+                CoroutineConfig(
+                    setCacheFunction = set,
+                    getCacheFunction = get,
+                    globalLockFunction = { lockKey, token, ttl -> backend.lockSuspend(lockKey, token, ttl) },
+                    globalUnLockFunction = { lockKey, token -> backend.unlockSuspend(lockKey, token) },
+                    isLocalLock = false,
+                )
+            } else {
+                CoroutineConfig(setCacheFunction = set, getCacheFunction = get)
+            }
+        val shield = CoroutineReqShield(config)
         return { key -> runBlocking { shield.getAndSetReqShieldData(key, supplier, timeToLive) } }
     }
 
-    protected fun freshKey(): String = "$module-$arm-$supplierMillis-$setMillis-${keySequence++}"
+    protected fun freshKey(): String = "$module-$arm-$lock-$supplierMillis-$setMillis-${keySequence++}"
+
+    /** Waits until the background work of the last run ended, then keeps its call counts if it was measured. */
+    protected fun settleLastRun() {
+        // In these scenarios each supplier call is followed by one cache write, on some background thread.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (calls.cacheWrites.get() < supplierCalls.get() && System.nanoTime() < deadline) Thread.sleep(1)
+        check(calls.cacheWrites.get() >= supplierCalls.get()) { "background cache writes of the last run did not finish" }
+        awaitQuiescence(executor)
+        // The unlock runs just after the write, on the same background thread.
+        Thread.sleep(10)
+        if (lastRunMeasured) {
+            cacheReadsPerRun.add(calls.cacheReads.get())
+            lockCallsPerRun.add(calls.lockCalls.get())
+            lastRunMeasured = false
+        }
+    }
 
     /** Each single-shot iteration is one scenario run. It starts with no background work left from the last run. */
     @Setup(Level.Iteration)
     fun beforeRun(iteration: IterationParams) {
+        settleLastRun()
         measuring = iteration.type == IterationType.MEASUREMENT
-        // In these scenarios each supplier call is followed by one cache write, on some background thread.
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        while (cacheWrites.get() < supplierCalls.get() && System.nanoTime() < deadline) Thread.sleep(1)
-        check(cacheWrites.get() >= supplierCalls.get()) { "background cache writes of the last run did not finish" }
-        awaitQuiescence(executor)
-        // The unlock runs just after the write, on the same background thread.
-        Thread.sleep(5)
-        cache.clear()
+        lastRunMeasured = measuring
+        backend.clear()
         supplierCalls.set(0)
-        cacheWrites.set(0)
+        calls.reset()
     }
+
+    protected fun closeArms() {
+        executor.shutdownNow()
+        backend.close()
+    }
+
+    protected fun storeCallsJson(): String =
+        """"store":"$store","lock":"$lock","lockMillis":$lockMillis,""" +
+            """"cacheReadsMean":${"%.1f".format(cacheReadsPerRun.average())},""" +
+            """"lockCallsMean":${"%.1f".format(lockCallsPerRun.average())}"""
 }
 
 /**
@@ -223,7 +289,8 @@ class StampedeBenchmark : ScenarioState() {
     @TearDown(Level.Trial)
     fun tearDown() {
         workers.shutdownNow()
-        executor.shutdownNow()
+        settleLastRun()
+        closeArms()
         val sorted = latencies.toLongArray().also { it.sort() }
 
         fun millis(p: Double) = "%.2f".format(percentile(sorted, p) / 1e6)
@@ -233,7 +300,7 @@ class StampedeBenchmark : ScenarioState() {
                 """"supplierCallsMax":${supplierCallsPerRun.maxOrNull()},""" +
                 """"supplierCallsMean":${"%.2f".format(supplierCallsPerRun.average())},""" +
                 """"latencyMsP50":${millis(0.50)},"latencyMsP90":${millis(0.90)},"latencyMsP99":${millis(0.99)},""" +
-                """"latencyMsMax":${millis(1.0)}}""",
+                """"latencyMsMax":${millis(1.0)},${storeCallsJson()}}""",
         )
     }
 
@@ -266,7 +333,7 @@ class StampedeBenchmark : ScenarioState() {
 
 /**
  * One thread reads a new key, then reads it again at once. req-shield returns the first read before its background
- * cache write, so the second read can find the cache empty and the lock taken.
+ * cache write, so the second read waits for that write.
  * The JMH score is the time of both reads. The events file has the latency of the second read.
  */
 @State(Scope.Benchmark)
@@ -283,7 +350,8 @@ class ReadAfterMissBenchmark : ScenarioState() {
 
     @TearDown(Level.Trial)
     fun tearDown() {
-        executor.shutdownNow()
+        settleLastRun()
+        closeArms()
         val sorted = secondReadNanos.toLongArray().also { it.sort() }
 
         fun millis(p: Double) = "%.3f".format(percentile(sorted, p) / 1e6)
@@ -368,7 +436,8 @@ class ExpiryLoadBenchmark : ScenarioState() {
     @TearDown(Level.Trial)
     fun tearDown() {
         workers.shutdownNow()
-        executor.shutdownNow()
+        settleLastRun()
+        closeArms()
         val sorted = latencies.toLongArray().also { it.sort() }
 
         fun millis(p: Double) = "%.3f".format(percentile(sorted, p) / 1e6)
@@ -394,7 +463,12 @@ class ExpiryLoadBenchmark : ScenarioState() {
         // The entries start at different ages, so the keys do not all expire at the same moment.
         val keys =
             Array(hotKeys) { i ->
-                freshKey().also { cache[it] = ReqShieldData("value", ReqShieldData.Status.NEW, now - i * ttlMillis / hotKeys, ttlMillis) }
+                freshKey().also {
+                    backend.set(
+                        it,
+                        ReqShieldData("value", ReqShieldData.Status.NEW, now - i * ttlMillis / hotKeys, ttlMillis),
+                    )
+                }
             }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(runMillis)
         val start = CountDownLatch(1)
@@ -421,6 +495,82 @@ class ExpiryLoadBenchmark : ScenarioState() {
             perCaller.forEach { latencies.addAll(it) }
             supplierCallsTotal += supplierCalls.get()
             runs++
+        }
+    }
+}
+
+/**
+ * A holder in another JVM: a thread outside req-shield takes the global lock in the store, waits `supplierMillis`,
+ * writes the entry and releases the lock, as a request on another node would. At the same moment `callers` threads of
+ * this JVM ask req-shield for that key. They cannot get the lock and this JVM knows of no holder, so this shows how
+ * a waiter behaves that has no signal. Run it with -p lock=global -p arm=reqShield.
+ * The events file has the latency of each caller, the cache reads and the lock calls of each run.
+ */
+@State(Scope.Benchmark)
+@BenchmarkMode(Mode.SingleShotTime)
+@OutputTimeUnit(TimeUnit.MILLISECONDS)
+class RemoteHolderBenchmark : ScenarioState() {
+    @Param("100")
+    @JvmField
+    final var callers: Int = 0
+
+    private lateinit var workers: ExecutorService
+    private val latencies = ArrayList<Long>()
+    private val supplierCallsPerRun = ArrayList<Int>()
+
+    @Setup(Level.Trial)
+    fun setup() {
+        check(lock == "global" && arm == "reqShield") { "run with -p lock=global -p arm=reqShield" }
+        setupArms()
+        workers = Executors.newFixedThreadPool(callers + 1)
+    }
+
+    @TearDown(Level.Trial)
+    fun tearDown() {
+        workers.shutdownNow()
+        settleLastRun()
+        closeArms()
+        val sorted = latencies.toLongArray().also { it.sort() }
+
+        fun millis(p: Double) = "%.2f".format(percentile(sorted, p) / 1e6)
+        Events.write(
+            """{"event":"remoteHolder","module":"$module","callers":$callers,"supplierMillis":$supplierMillis,""" +
+                """"runs":${supplierCallsPerRun.size},"callerSupplierCallsMax":${supplierCallsPerRun.maxOrNull()},""" +
+                """"latencyMsP50":${millis(0.50)},"latencyMsP90":${millis(0.90)},"latencyMsP99":${millis(0.99)},""" +
+                """"latencyMsMax":${millis(1.0)},${storeCallsJson()}}""",
+        )
+    }
+
+    @Benchmark
+    fun waitForRemoteHolder() {
+        val key = freshKey()
+        // The lock key that req-shield builds for a creation
+        val lockKey = "reqshield:lock:${key}_CREATE"
+        val remoteToken = "remote-$key"
+        check(backend.lock(lockKey, remoteToken, 3000)) { "the remote holder did not get the lock" }
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(callers)
+        val nanos = LongArray(callers)
+        workers.execute {
+            start.await()
+            Thread.sleep(supplierMillis)
+            backend.set(key, ReqShieldData("value", timeToLive))
+            backend.unlock(lockKey, remoteToken)
+        }
+        repeat(callers) { i ->
+            workers.execute {
+                start.await()
+                val begin = System.nanoTime()
+                call(key)
+                nanos[i] = System.nanoTime() - begin
+                done.countDown()
+            }
+        }
+        start.countDown()
+        done.await()
+        if (measuring) {
+            nanos.forEach { latencies.add(it) }
+            supplierCallsPerRun.add(supplierCalls.get())
         }
     }
 }

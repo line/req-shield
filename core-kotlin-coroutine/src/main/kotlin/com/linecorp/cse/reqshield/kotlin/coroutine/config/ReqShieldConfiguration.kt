@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import org.slf4j.LoggerFactory
+import kotlin.coroutines.CoroutineContext
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: suspend (String, ReqShieldData<T>, Long) -> Boolean,
@@ -63,6 +64,20 @@ data class ReqShieldConfiguration<T>(
      * their own scope and cancel it themselves.
      */
     val scope: CoroutineScope = defaultScope,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache functions or the lock functions choose
+     * their store from the coroutine context of the caller. An example is one store for each tenant. Give the same
+     * text for requests that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It gets the coroutine context of the caller and runs at most once for a request. It does not run for a request
+     * that finds a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`. A request that got an old entry then skips the refresh and logs a warning.
+     */
+    val storeScopeFunction: ((CoroutineContext) -> String)? = null,
 ) {
     init {
         if (!isLocalLock) {

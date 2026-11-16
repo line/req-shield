@@ -25,4 +25,5 @@ enum class ErrorCode(
     SET_CACHE_ERROR("1003", "An error occurred in the set cache function provided by client."),
     DOES_NOT_EXIST_GLOBAL_LOCK_FUNCTION("1004", "If isLocalLock is false, globalLockFunction must be implemented."),
     DOES_NOT_EXIST_GLOBAL_UNLOCK_FUNCTION("1005", "If isLocalLock is false, globalUnLockFunction must be implemented."),
+    STORE_SCOPE_ERROR("1006", "An error occurred in the store scope function provided by client."),
 }
