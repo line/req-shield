@@ -452,6 +452,95 @@ class ReqShieldCreationSignalTest {
     }
 
     @Test
+    fun aWaiterShouldCallTheSupplierWhenItsReadFailsAfterTheHolderGaveTheLockBack() {
+        val failHolder = CompletableFuture<Product?>()
+        val holderCalls = AtomicInteger()
+        // Each read with a number above this one fails, as with a cache that is down
+        val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
+        val shield =
+            shield(
+                getCacheFunction = { cacheKey ->
+                    Mono.fromCallable {
+                        check(cacheReads.incrementAndGet() <= failReadsAfter.get()) { "the cache is down" }
+                        cache[cacheKey]
+                    }
+                },
+            )
+        val holder = shield.getAndSetReqShieldData(key, blockedSupplier(failHolder, holderCalls), 10_000).toFuture()
+        await().atMost(Duration.ofSeconds(2)).pollInterval(Duration.ofMillis(1)).until { holderCalls.get() == 1 }
+        val waiterCalls = AtomicInteger()
+        val waiter = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).toFuture()
+        // Holder: 2 reads. Waiter: 1 read before the lock attempt and its first read after it.
+        await().atMost(Duration.ofSeconds(2)).pollInterval(Duration.ofMillis(1)).until { cacheReads.get() == 4 }
+        try {
+            // Each read from now on fails, and the holder gives the lock back without an entry
+            failReadsAfter.set(4)
+            failHolder.completeExceptionally(IllegalStateException("the supplier of the holder fails"))
+
+            assertEquals(product, waiter.get(2, TimeUnit.SECONDS).value)
+            assertEquals(1, waiterCalls.get())
+            // One failed read after the release. No read under a creation lock follows.
+            assertEquals(5, cacheReads.get())
+            assertThrows(Exception::class.java) { holder.get(2, TimeUnit.SECONDS) }
+        } finally {
+            failReadsAfter.set(Int.MAX_VALUE)
+        }
+        awaitNoSignal()
+    }
+
+    @Test
+    fun aRequestShouldNotWaitForARefreshWhoseLockTimedOut() {
+        val finishRefresh = CompletableFuture<Product?>()
+        val refreshCalls = AtomicInteger()
+        val shield = shield(lockTimeoutMillis = 200)
+        try {
+            startRefresh(shield, blockedSupplier(finishRefresh, refreshCalls), refreshCalls)
+            // The lock of the refresh timed out: another request could take the refresh over
+            Thread.sleep(300)
+            cache.remove(key)
+            val readsBefore = cacheReads.get()
+            val waiterCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).block(timeout)
+
+            val millis = millisSince(startedAtNanos)
+            assertEquals(product, data?.value)
+            assertEquals(1, waiterCalls.get())
+            assertTrue(millis < 1_000, "the request took $millis ms")
+            // The read on the miss and the read under the creation lock. No read of a wait.
+            assertEquals(readsBefore + 2, cacheReads.get())
+        } finally {
+            finishRefresh.complete(Product("refreshed", "refreshed"))
+        }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
+    }
+
+    @Test
+    fun aRequestShouldStopWaitingForARefreshWhenTheLockOfTheRefreshTimesOut() {
+        val finishRefresh = CompletableFuture<Product?>()
+        val refreshCalls = AtomicInteger()
+        val shield = shield(lockTimeoutMillis = 300)
+        try {
+            startRefresh(shield, blockedSupplier(finishRefresh, refreshCalls), refreshCalls)
+            cache.remove(key)
+            val waiterCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).block(timeout)
+
+            val millis = millisSince(startedAtNanos)
+            assertEquals(product, data?.value)
+            assertEquals(1, waiterCalls.get())
+            // The wait ends with the lock timeout of 300 ms, not with the 60 reads of about 3 s
+            assertTrue(millis in 150..1_500, "the request took $millis ms")
+        } finally {
+            finishRefresh.complete(Product("refreshed", "refreshed"))
+        }
+        await().atMost(Duration.ofSeconds(2)).until { created.refreshSignals.find(key) == null }
+    }
+
+    @Test
     fun aRequestShouldCreateTheEntryWhenARefreshOutlastsItsReads() {
         val finishRefresh = CompletableFuture<Product?>()
         val refreshCalls = AtomicInteger()

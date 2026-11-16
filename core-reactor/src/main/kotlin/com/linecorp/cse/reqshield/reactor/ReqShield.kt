@@ -82,8 +82,12 @@ class ReqShield<T>(
      * The refreshes of this instance. A request that finds an entry gone waits for the refresh of its key. The
      * registry is never shared: a request of another instance, with a cache of its own, must not wait for a refresh
      * that writes to this cache. In version 1.2.0 such a request created its entry at once.
+     *
+     * A signal stands for its refresh only until the lock timeout: after it another request can take the refresh
+     * over, so no request waits for the slow one, and the global refresh guard asks the store again.
      */
-    internal val refreshSignals: ReleaseSignals<CompletableFuture<Unit>> = ReleaseSignals { it.complete(Unit) }
+    internal val refreshSignals: ReleaseSignals<CompletableFuture<Unit>> =
+        ReleaseSignals(reqShieldConfig.lockTimeoutMillis) { it.complete(Unit) }
 
     /**
      * Guards the refresh of an entry in [ReqShieldWorkMode.ONLY_CREATE_CACHE]. That mode does not call the configured
@@ -569,7 +573,10 @@ class ReqShield<T>(
         /** The reads are used up. The cache answered, but it has no entry. */
         object GaveUp : Waited<Nothing>
 
-        /** [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row, so no further read is worth a try. */
+        /**
+         * The cache looks unavailable, so no further read is worth a try: [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads
+         * failed in a row, or the read after the holder gave its lock back failed.
+         */
         object CacheUnavailable : Waited<Nothing>
     }
 
@@ -615,7 +622,16 @@ class ReqShield<T>(
                 getCacheWhileWaitingForLock(key, budget.consecutiveFailures)
                     .map<Waited<T>> { Waited.Found(it) }
                     // Empty drives the next read, after the next wait
-                    .switchIfEmpty(Mono.defer { if (released.get()) Mono.just(Waited.Released) else Mono.empty() })
+                    .switchIfEmpty(
+                        Mono.defer {
+                            when {
+                                !released.get() -> Mono.empty()
+                                // After a failed read the creation path would only read the failing cache again, under its lock
+                                budget.consecutiveFailures.get() > 0 -> Mono.just(Waited.CacheUnavailable)
+                                else -> Mono.just(Waited.Released)
+                            }
+                        },
+                    )
             }.repeatWhenEmpty { emptyReads ->
                 emptyReads
                     .takeWhile { budget.reads.get() < maxReads }

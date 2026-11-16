@@ -467,6 +467,137 @@ class ReqShieldCreationSignalTest {
     }
 
     @Test
+    fun aWaiterShouldCallTheSupplierWhenItsReadFailsAfterTheHolderGaveTheLockBack() {
+        val failHolder = CountDownLatch(1)
+        val shield = shield()
+        val holder =
+            pool.submit<Unit> {
+                assertThrows(ClientException::class.java) {
+                    shield.getAndSetReqShieldData(
+                        key,
+                        {
+                            check(failHolder.await(5, TimeUnit.SECONDS))
+                            error("the supplier of the holder fails")
+                        },
+                        10_000,
+                    )
+                }
+            }
+        // The holder read the cache twice: before the lock and after it
+        await().atMost(Duration.ofSeconds(2)).until { cacheReads.get() == 2 }
+        val waiterCalls = AtomicInteger()
+        val waiter =
+            pool.submit<ReqShieldData<Product>> {
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        waiterCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
+            }
+        // The waiter read the cache twice: on its miss and at the start of its wait
+        await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(2)).until { cacheReads.get() == 4 }
+        try {
+            // Each read from now on fails, and the holder gives the lock back without an entry
+            failReadsAfter.set(4)
+            failHolder.countDown()
+
+            assertEquals(product, waiter.get(2, TimeUnit.SECONDS).value)
+            assertEquals(1, waiterCalls.get())
+            // One failed read after the release. No read under a creation lock follows.
+            assertEquals(5, cacheReads.get())
+            holder.get(2, TimeUnit.SECONDS)
+        } finally {
+            failReadsAfter.set(Int.MAX_VALUE)
+        }
+        awaitNoSignal()
+    }
+
+    /** Starts a refresh of the old entry whose supplier ends only when the returned latch is counted down. */
+    private fun startHungRefresh(shield: ReqShield<Product>): CountDownLatch {
+        cache[key] = oldEntry()
+        val finishRefresh = CountDownLatch(1)
+        val refreshStarted = CountDownLatch(1)
+        shield.getAndSetReqShieldData(
+            key,
+            {
+                refreshStarted.countDown()
+                check(finishRefresh.await(5, TimeUnit.SECONDS))
+                Product("refreshed", "refreshed")
+            },
+            10_000,
+        )
+        assertTrue(refreshStarted.await(2, TimeUnit.SECONDS))
+        return finishRefresh
+    }
+
+    @Test
+    fun aRequestShouldNotWaitForARefreshWhoseLockTimedOut() {
+        val shield = shield(lockTimeoutMillis = 200)
+        val finishRefresh = startHungRefresh(shield)
+        try {
+            // The lock of the refresh timed out: another request could take the refresh over
+            Thread.sleep(300)
+            cache.remove(key)
+            val readsBefore = cacheReads.get()
+            val supplierCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data =
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        supplierCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
+
+            val millis = (System.nanoTime() - startedAtNanos) / 1_000_000
+            assertEquals(product, data.value)
+            assertEquals(1, supplierCalls.get())
+            assertTrue(millis < 1_000, "the request took $millis ms")
+            // The read on the miss and the read under the creation lock. No read of a wait.
+            assertEquals(2, cacheReads.get() - readsBefore)
+        } finally {
+            finishRefresh.countDown()
+        }
+        awaitNoRefreshSignal()
+    }
+
+    @Test
+    fun aRequestShouldStopWaitingForARefreshWhenTheLockOfTheRefreshTimesOut() {
+        val shield = shield(lockTimeoutMillis = 300)
+        val finishRefresh = startHungRefresh(shield)
+        try {
+            cache.remove(key)
+            val supplierCalls = AtomicInteger()
+            val startedAtNanos = System.nanoTime()
+
+            val data =
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        supplierCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
+
+            val millis = (System.nanoTime() - startedAtNanos) / 1_000_000
+            assertEquals(product, data.value)
+            assertEquals(1, supplierCalls.get())
+            // The wait ends with the lock timeout of 300 ms, not with the 60 reads of about 3 s
+            assertTrue(millis in 150..1_500, "the request took $millis ms")
+        } finally {
+            finishRefresh.countDown()
+        }
+        awaitNoRefreshSignal()
+    }
+
+    @Test
     fun aRequestShouldCreateTheEntryWhenARefreshOutlastsItsReads() {
         cache[key] = oldEntry()
         val finishRefresh = CountDownLatch(1)

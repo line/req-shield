@@ -278,11 +278,15 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   all waiting requests at once.
 - A request that finds no entry while a refresh of that key runs in the same JVM waits for that refresh in the same
   way, and does not call the supplier a second time. This happens when an entry expires before its refresh ends. If
-  the refresh ends without an entry, the request goes on as on any cache miss.
+  the refresh ends without an entry, the request goes on as on any cache miss. The request waits for a refresh only
+  while the refresh can hold its lock: after `lockTimeoutMillis` it goes on as on any cache miss too, and with a
+  global lock the next read of the old entry asks the lock store for a refresh again.
 - The wait for a refresh has the limit of `maxAttemptGetCache` reads. All waits of one request for a holder share
   one such limit, so trying the lock again does not extend the wait.
 - A cache read failure while waiting is logged and counted as a read. Three consecutive failures are treated as a
-  cache outage and the request falls back to calling the supplier itself right away.
+  cache outage and the request falls back to calling the supplier itself right away. A read that fails right after
+  the holder gave the lock back is treated the same way: the request does not take the lock, which would only read
+  the failing cache again.
 - When its reads are used up the request calls the supplier once, without a lock. A supplier failure is propagated as
   a `ClientException(SUPPLIER_ERROR)` with the original exception as `cause`; it is never turned into a cached `null`.
 - In `core-kotlin-coroutine`, a `CancellationException` thrown by the supplier or by a cache get/set function while

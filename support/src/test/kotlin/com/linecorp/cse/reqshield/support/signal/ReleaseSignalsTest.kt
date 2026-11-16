@@ -98,4 +98,59 @@ class ReleaseSignalsTest {
         assertEquals(0, second.completions.get())
         assertSame(second, signals.find("second"))
     }
+
+    /** Signals that stand for their lock for 100 ms. */
+    private val limited = ReleaseSignals<Signal>(validMillis = 100) { it.completions.incrementAndGet() }
+
+    @Test
+    fun aSignalWithATimeLimitShouldBeFoundBeforeTheLimit() {
+        // A limit that no test run reaches
+        val longLimited = ReleaseSignals<Signal>(validMillis = 60_000) { it.completions.incrementAndGet() }
+        val signal = Signal()
+
+        longLimited.register("key", "token", signal)
+
+        assertSame(signal, longLimited.find("key"))
+        assertEquals(0, signal.completions.get())
+    }
+
+    @Test
+    fun aSignalPastItsTimeLimitShouldBeCompletedOnceAndNotFound() {
+        val signal = Signal()
+        limited.register("key", "token", signal)
+        Thread.sleep(150)
+
+        assertNull(limited.find("key"))
+        assertNull(limited.find("key"))
+        // The holder ends later and releases its lock
+        limited.release("key", "token")
+
+        assertEquals(1, signal.completions.get())
+    }
+
+    @Test
+    fun theHolderOfASignalPastItsTimeLimitShouldLeaveTheSignalOfTheNextHolder() {
+        val earlier = Signal()
+        val next = Signal()
+        limited.register("key", "earlier-token", earlier)
+        Thread.sleep(150)
+        assertNull(limited.find("key"))
+        limited.register("key", "next-token", next)
+
+        limited.release("key", "earlier-token")
+
+        assertSame(next, limited.find("key"))
+        assertEquals(0, next.completions.get())
+        assertEquals(1, earlier.completions.get())
+    }
+
+    @Test
+    fun aSignalWithoutATimeLimitShouldStayUntilItsRelease() {
+        val signal = Signal()
+        signals.register("key", "token", signal)
+        Thread.sleep(150)
+
+        assertSame(signal, signals.find("key"))
+        assertEquals(0, signal.completions.get())
+    }
 }

@@ -42,7 +42,10 @@ class ReqShieldGlobalRefreshAttemptTest {
     private val newProduct = Product("new", "new")
     private val timeout = Duration.ofSeconds(5)
 
-    private fun shield(storeGivesTheLock: Boolean): ReqShield<Product> =
+    private fun shield(
+        storeGivesTheLock: Boolean,
+        lockTimeoutMillis: Long = 3000,
+    ): ReqShield<Product> =
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = { cacheKey, data, _ ->
@@ -60,6 +63,7 @@ class ReqShieldGlobalRefreshAttemptTest {
                 },
                 globalUnLockFunction = { _, _ -> Mono.just(true) },
                 isLocalLock = false,
+                lockTimeoutMillis = lockTimeoutMillis,
             ),
         )
 
@@ -125,5 +129,36 @@ class ReqShieldGlobalRefreshAttemptTest {
             finishSupplier.complete(newProduct)
         }
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(newProduct, cache[key]?.value) }
+    }
+
+    @Test
+    fun aReadShouldAskTheStoreAgainAfterTheLockOfARefreshOfThisJvmTimedOut() {
+        cache[key] = oldEntry()
+        val finishSupplier = CompletableFuture<Product?>()
+        val slowCalls = AtomicInteger()
+        // The supplier of the first refresh is slower than the lock timeout
+        val slowSupplier =
+            Callable<Mono<Product?>> {
+                Mono.defer {
+                    slowCalls.incrementAndGet()
+                    Mono.fromFuture(finishSupplier)
+                }
+            }
+        val shield = shield(storeGivesTheLock = true, lockTimeoutMillis = 200)
+
+        try {
+            read(shield, slowSupplier)
+            await().atMost(Duration.ofSeconds(2)).until { slowCalls.get() == 1 }
+            assertEquals(1, lockCalls.get())
+            // The lock of the first refresh timed out, so the store gives it to the next request
+            Thread.sleep(300)
+
+            assertEquals(oldProduct, read(shield) { Mono.just(newProduct) })
+
+            await().atMost(Duration.ofSeconds(2)).until { lockCalls.get() == 2 }
+            await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(newProduct, cache[key]?.value) }
+        } finally {
+            finishSupplier.complete(oldProduct)
+        }
     }
 }

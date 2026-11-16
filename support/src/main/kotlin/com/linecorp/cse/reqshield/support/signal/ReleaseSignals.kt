@@ -17,6 +17,7 @@
 package com.linecorp.cse.reqshield.support.signal
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * The signals of the locks that requests of this JVM hold, by cache key. A request that got a lock registers a
@@ -34,17 +35,27 @@ import java.util.concurrent.ConcurrentHashMap
  * release never runs (an executor that drops its task without an exception, for example) leaves its entry behind
  * until the lock of that key is taken again.
  *
+ * With [validMillis], a signal stands for its lock only for that time: the timeout of the lock. After it the holder
+ * no longer holds the lock, so [find] completes the signal and answers null. Without it, the waiters of a holder
+ * that is slower than its lock timeout would wait for work that another request may already take over.
+ *
  * Each core module keeps one instance for creation locks and one for refresh locks. [S] is the signal type of the
  * module: each core module waits in its own way. [complete] wakes the waiters of a signal and must be safe to call
  * from any thread.
  */
 class ReleaseSignals<S : Any>(
+    /** The timeout of the locks of these signals, in milliseconds. Null: a signal stays until its release. */
+    validMillis: Long? = null,
     private val complete: (S) -> Unit,
 ) {
     private class Entry<S>(
         val token: String,
         val signal: S,
+        // Read only when the signals have a time limit
+        val registeredAtNanos: Long,
     )
+
+    private val validNanos: Long? = validMillis?.let(TimeUnit.MILLISECONDS::toNanos)
 
     // An entry lives only while a lock is held, so the map is almost empty. With the default 16 bins, holders
     // of different keys would contend for the same bins.
@@ -59,11 +70,22 @@ class ReleaseSignals<S : Any>(
         token: String,
         signal: S,
     ) {
-        entries.put(key, Entry(token, signal))?.let { complete(it.signal) }
+        val registeredAtNanos = if (validNanos == null) 0L else System.nanoTime()
+        entries.put(key, Entry(token, signal, registeredAtNanos))?.let { complete(it.signal) }
     }
 
-    /** The signal of the holder that works on [key], or null when this JVM knows of none. */
-    fun find(key: String): S? = entries[key]?.signal
+    /**
+     * The signal of the holder that works on [key], or null when this JVM knows of none. A signal whose time limit
+     * is over is completed here and not answered: its waiters read the cache and go on as after a release.
+     */
+    fun find(key: String): S? {
+        val entry = entries[key] ?: return null
+        if (validNanos != null && System.nanoTime() - entry.registeredAtNanos >= validNanos) {
+            if (entries.remove(key, entry)) complete(entry.signal)
+            return null
+        }
+        return entry.signal
+    }
 
     /**
      * Completes the signal that [register] stored for [token]. A holder whose lock timed out does not touch the

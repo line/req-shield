@@ -51,7 +51,10 @@ class ReqShieldGlobalRefreshAttemptTest {
         assertTrue(pool.awaitTermination(2, TimeUnit.SECONDS))
     }
 
-    private fun shield(storeGivesTheLock: Boolean): ReqShield<Product> =
+    private fun shield(
+        storeGivesTheLock: Boolean,
+        lockTimeoutMillis: Long = 3000,
+    ): ReqShield<Product> =
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = { cacheKey, data, _ ->
@@ -66,6 +69,7 @@ class ReqShieldGlobalRefreshAttemptTest {
                 globalUnLockFunction = { _, _ -> true },
                 isLocalLock = false,
                 executor = pool,
+                lockTimeoutMillis = lockTimeoutMillis,
             ),
         )
 
@@ -116,6 +120,36 @@ class ReqShieldGlobalRefreshAttemptTest {
             finishSupplier.countDown()
         }
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(newProduct, cache[key]?.value) }
+    }
+
+    @Test
+    fun aReadShouldAskTheStoreAgainAfterTheLockOfARefreshOfThisJvmTimedOut() {
+        cache[key] = oldEntry()
+        val supplierStarted = CountDownLatch(1)
+        val finishSupplier = CountDownLatch(1)
+        // The supplier of the first refresh is slower than the lock timeout
+        val slowSupplier =
+            Callable<Product?> {
+                supplierStarted.countDown()
+                check(finishSupplier.await(5, TimeUnit.SECONDS))
+                oldProduct
+            }
+        val shield = shield(storeGivesTheLock = true, lockTimeoutMillis = 200)
+
+        try {
+            shield.getAndSetReqShieldData(key, slowSupplier, 10_000)
+            assertTrue(supplierStarted.await(2, TimeUnit.SECONDS))
+            assertEquals(1, lockCalls.get())
+            // The lock of the first refresh timed out, so the store gives it to the next request
+            Thread.sleep(300)
+
+            assertEquals(oldProduct, shield.getAndSetReqShieldData(key, { newProduct }, 10_000).value)
+
+            assertEquals(2, lockCalls.get())
+            await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(newProduct, cache[key]?.value) }
+        } finally {
+            finishSupplier.countDown()
+        }
     }
 
     @Test

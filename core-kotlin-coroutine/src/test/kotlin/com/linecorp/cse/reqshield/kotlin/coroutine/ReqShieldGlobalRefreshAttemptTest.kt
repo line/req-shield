@@ -40,7 +40,10 @@ class ReqShieldGlobalRefreshAttemptTest {
     private val oldProduct = Product("old", "old")
     private val newProduct = Product("new", "new")
 
-    private fun shield(storeGivesTheLock: Boolean): ReqShield<Product> =
+    private fun shield(
+        storeGivesTheLock: Boolean,
+        lockTimeoutMillis: Long = 3000,
+    ): ReqShield<Product> =
         ReqShield(
             ReqShieldConfiguration(
                 setCacheFunction = { cacheKey, data, _ ->
@@ -54,6 +57,7 @@ class ReqShieldGlobalRefreshAttemptTest {
                 },
                 globalUnLockFunction = { _, _ -> true },
                 isLocalLock = false,
+                lockTimeoutMillis = lockTimeoutMillis,
             ),
         )
 
@@ -106,6 +110,37 @@ class ReqShieldGlobalRefreshAttemptTest {
             }
             withTimeout(2_000) {
                 while (cache[key]?.value != newProduct) delay(5)
+            }
+        }
+
+    @Test
+    fun aReadShouldAskTheStoreAgainAfterTheLockOfARefreshOfThisJvmTimedOut() =
+        runBlocking {
+            cache[key] = oldEntry()
+            val supplierStarted = CompletableDeferred<Unit>()
+            val finishSupplier = CompletableDeferred<Unit>()
+            // The supplier of the first refresh is slower than the lock timeout
+            val slowSupplier: suspend () -> Product? = {
+                supplierStarted.complete(Unit)
+                finishSupplier.await()
+                oldProduct
+            }
+            val shield = shield(storeGivesTheLock = true, lockTimeoutMillis = 200)
+
+            try {
+                shield.getAndSetReqShieldData(key, slowSupplier, 10_000)
+                withTimeout(2_000) { supplierStarted.await() }
+                assertEquals(1, lockCalls.get())
+                // The lock of the first refresh timed out, so the store gives it to the next request
+                delay(300)
+
+                assertEquals(oldProduct, shield.getAndSetReqShieldData(key, { newProduct }, 10_000).value)
+
+                withTimeout(2_000) {
+                    while (lockCalls.get() != 2 || cache[key]?.value != newProduct) delay(5)
+                }
+            } finally {
+                finishSupplier.complete(Unit)
             }
         }
 }
