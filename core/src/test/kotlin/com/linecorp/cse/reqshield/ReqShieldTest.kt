@@ -25,6 +25,7 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_GET_CACHE_FAILURES
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import io.mockk.every
@@ -780,7 +781,7 @@ class ReqShieldTest : BaseReqShieldTest {
 
         val exception =
             assertFailsWith<InvocationTargetException> {
-                method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, createToken)
+                method.invoke(reqShield, cacheSetter, RequestKey.of(key, null), reqShieldData, lockType, createToken)
             }
 
         val cause = exception.cause

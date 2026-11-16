@@ -159,6 +159,21 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   custom `KeyLock` never wait for each other inside the JVM: only their lock decides. The same holds for the refresh
   guard of `ONLY_CREATE_CACHE`. Instances with the local lock share the lock of a key, as before, because the local
   lock map is one map for the JVM.
+- **One instance with a store for each request.** If the cache functions or the lock functions of one `ReqShield`
+  (or of one cache bean) choose their store for each request - from the Reactor `Context`, the coroutine context
+  or a `ThreadLocal`, one store for each tenant for example - name that store:
+    - Core modules: set `storeScopeFunction` in `ReqShieldConfiguration`. It gets the Reactor `ContextView`
+      (`core-reactor`) or the `CoroutineContext` (`core-kotlin-coroutine`) of the caller, and runs on the caller's
+      thread in `core`.
+    - Spring adapters: implement `StoreScopeSupport` on the cache bean, next to `GlobalLockSupport`.
+    - Give the same text for requests that use the same store, and another text for another store. The function
+      runs at most once for a request, not at all for a request that finds a fresh entry, and must not block.
+  The locks and signals inside the JVM then have that text in their key, so requests of two stores never wait for
+  each other there, and requests of one store still collapse. **Without it**, a request of one store can wait for
+  a creation or a refresh that a request of another store runs for the same key. For a creation with a global
+  lock it waits until its reads are used up (about 3 s with the defaults) and then gets its value from the
+  supplier, without a cache entry. Version 1.2.0 had no such wait with a global lock, so set the function when you
+  upgrade such a setup. With the local lock, the requests of all stores share the lock of a key, as in 1.2.0.
 
 ### Local lock map size
 
@@ -246,7 +261,8 @@ refresh dependencies with `./gradlew build --refresh-dependencies`.
   caller's Reactor `Context` too, on a cache miss and in a refresh. This includes the cache write and the lock
   release, which run in the background after the caller has its data. Functions that choose the cache or the lock
   store from the `Context` (one store for each tenant, for example) therefore write and release in the store that
-  the read and the lock used.
+  the read and the lock used. Such a setup must also name the store of a request: see "One instance with a store
+  for each request" in "Global lock guidance".
 - `core-kotlin-coroutine` and the coroutine adapter launch the refresh in the configured scope with the caller's
   coroutine context elements, except its `Job`, dispatcher and exception handler: the refresh is not cancelled with
   the request and does not inherit its dispatcher. For any other element the scope's own one takes precedence. A

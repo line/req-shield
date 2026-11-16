@@ -23,6 +23,7 @@ import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.cache.GlobalLockSupport
+import com.linecorp.cse.reqshield.spring.webflux.cache.StoreScopeSupport
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfValue
 import com.linecorp.cse.reqshield.support.utils.requireOwnToString
@@ -71,6 +72,9 @@ open class ReqShieldAspect<T>(
 
     /** Global locking is only available when the cache implementation opts in to it. */
     private val lockSupport = asyncCache as? GlobalLockSupport
+
+    /** A cache that chooses its store from the Reactor Context names that store, so requests of two stores do not wait for each other. */
+    private val storeScopeSupport = asyncCache as? StoreScopeSupport
 
     /** What a call of one intercepted method needs that does not depend on its arguments. */
     private val cacheableMethods = ConcurrentHashMap<MethodClassKey, CacheableMethod<T>>()
@@ -185,6 +189,7 @@ open class ReqShieldAspect<T>(
                 decisionForUpdate = annotation.decisionForUpdate,
                 maxAttemptGetCache = annotation.maxAttemptGetCache,
                 reqShieldWorkMode = annotation.reqShieldWorkMode,
+                storeScopeFunction = storeScopeSupport?.let { support -> { context -> support.storeScope(context) } },
             )
 
         return ReqShield(reqShieldConfiguration)

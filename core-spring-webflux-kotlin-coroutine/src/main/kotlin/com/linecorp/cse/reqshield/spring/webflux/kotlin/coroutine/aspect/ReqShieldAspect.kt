@@ -22,6 +22,7 @@ import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.Req
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.AsyncCache
 import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.GlobalLockSupport
+import com.linecorp.cse.reqshield.spring.webflux.kotlin.coroutine.cache.StoreScopeSupport
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
 import com.linecorp.cse.reqshield.support.utils.cacheKeyOfValue
 import com.linecorp.cse.reqshield.support.utils.requireOwnToString
@@ -82,6 +83,9 @@ open class ReqShieldAspect<T>(
 
     /** Global locking is opt-in: only `isLocalLock = false` needs the cache to support it. */
     private val lockSupport = asyncCache as? GlobalLockSupport
+
+    /** A cache that chooses its store from the coroutine context names that store, so requests of two stores do not wait for each other. */
+    private val storeScopeSupport = asyncCache as? StoreScopeSupport
 
     /** What a call of one intercepted method needs that does not depend on its arguments, such as the parsed SpEL key. */
     private val cacheableMethods = ConcurrentHashMap<MethodClassKey, CacheableMethod<T>>()
@@ -295,6 +299,7 @@ open class ReqShieldAspect<T>(
                 decisionForUpdate = annotation.decisionForUpdate,
                 maxAttemptGetCache = annotation.maxAttemptGetCache,
                 reqShieldWorkMode = annotation.reqShieldWorkMode,
+                storeScopeFunction = storeScopeSupport?.let { support -> { context -> support.storeScope(context) } },
                 scope = scope,
             )
 

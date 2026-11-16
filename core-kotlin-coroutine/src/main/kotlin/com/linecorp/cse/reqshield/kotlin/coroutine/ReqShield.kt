@@ -25,6 +25,7 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_CONSECUTIVE_
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.SIGNAL_REGISTRATION_GRACE_MILLIS
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.signal.ReleaseSignals
 import com.linecorp.cse.reqshield.support.utils.decideToUpdateCache
@@ -118,13 +119,60 @@ class ReqShield<T>(
         val currentReqShieldData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
         currentReqShieldData?.let {
             if (shouldUpdateCache(it)) {
-                updateReqShieldData(key, callable, timeToLiveMillis, it.createdAt)
+                refreshKeyOf(key)?.let { requestKey -> updateReqShieldData(requestKey, callable, timeToLiveMillis, it.createdAt) }
             }
             return it
         } ?: run {
-            return handleLockForCacheCreation(key, callable, timeToLiveMillis)
+            return handleLockForCacheCreation(requestKeyOf(key), callable, timeToLiveMillis)
         }
     }
+
+    /**
+     * The key of this request for the cache and for the locks and signals of this JVM. It gives the coroutine context
+     * of the caller to the store scope function. It runs once for a request, so a request that finds a fresh entry
+     * never calls it.
+     */
+    private suspend fun requestKeyOf(key: String): RequestKey {
+        val storeScopeFunction = reqShieldConfig.storeScopeFunction ?: return RequestKey.of(key, null)
+        val storeScope =
+            try {
+                storeScopeFunction(currentCoroutineContext())
+            } catch (e: Exception) {
+                rethrowIfCallerCancelled(e)
+                throw ClientException(ErrorCode.STORE_SCOPE_ERROR, cause = e)
+            }
+        return RequestKey.of(key, storeScope)
+    }
+
+    /** [requestKeyOf] for a refresh. The caller already has its data, so a failing scope function only skips the refresh. */
+    private suspend fun refreshKeyOf(key: String): RequestKey? =
+        try {
+            requestKeyOf(key)
+        } catch (e: ClientException) {
+            log.warn("[Req-Shield] failed to get the store scope of key '{}', so its refresh is skipped", key, e)
+            null
+        }
+
+    /**
+     * The key of a creation signal. With a local lock it is the cache key, like the key of that lock: the lock
+     * already makes requests of all stores wait for each other, as in version 1.2.0, and the signal only ends that
+     * wait early. With any other lock it is the scoped key.
+     */
+    private fun creationSignalKey(key: RequestKey): String = if (reqShieldConfig.keyLock is KeyLocalLock) key.cache else key.scoped
+
+    /**
+     * The key for the lock of [lockFor]. The refresh lock of ONLY_CREATE_CACHE lives in this JVM only and is no
+     * lock of a store, so it gets the scoped key. The configured lock gets the cache key.
+     */
+    private fun lockKeyOf(
+        key: RequestKey,
+        lockType: LockType,
+    ): String =
+        if (lockType == LockType.UPDATE && reqShieldConfig.reqShieldWorkMode == ReqShieldWorkMode.ONLY_CREATE_CACHE) {
+            key.scoped
+        } else {
+            key.cache
+        }
 
     private fun shouldUpdateCache(reqShieldData: ReqShieldData<T>): Boolean =
         decideToUpdateCache(reqShieldData.createdAt, reqShieldData.timeToLiveMillis, reqShieldConfig.decisionForUpdate)
@@ -138,7 +186,7 @@ class ReqShield<T>(
         }
 
     private suspend fun updateReqShieldData(
-        key: String,
+        key: RequestKey,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
         // createdAt of the entry this request read, which tells that entry apart from one written during the refresh
@@ -150,16 +198,16 @@ class ReqShield<T>(
         val nanosBeforeAttempt = nanosBeforeAttempt(lock)
         val token =
             try {
-                lock.tryLock(key, lockType)
+                lock.tryLock(lockKeyOf(key, lockType), lockType)
             } catch (e: Exception) {
                 rethrowIfCallerCancelled(e)
                 // The caller already has its data: a failing lock store only skips this refresh
-                log.warn("[Req-Shield] failed to lock key '{}' for a cache refresh, so the refresh is skipped", key, e)
+                log.warn("[Req-Shield] failed to lock key '{}' for a cache refresh, so the refresh is skipped", key.cache, e)
                 return
             } ?: return // another request already refreshes this key
         val lockedAtNanos = lockStartNanos(lock, nanosBeforeAttempt)
         // A request that finds the entry gone during this refresh waits for this signal instead of a supplier call
-        refreshSignals.register(key, token, CompletableDeferred())
+        refreshSignals.register(key.scoped, token, CompletableDeferred())
 
         // The refresh can outlive the caller's request, so it takes the caller's context elements
         // (Reactor context, MDC, security). It never takes the caller's Job, dispatcher or exception handler: the
@@ -181,7 +229,7 @@ class ReqShield<T>(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                log.error("[Req-Shield] failed to update the cache of key '{}'", key, e)
+                log.error("[Req-Shield] failed to update the cache of key '{}'", key.cache, e)
             }
         }
     }
@@ -192,13 +240,13 @@ class ReqShield<T>(
      * this JVM asked in the last [GET_CACHE_INTERVAL_MILLIS]. So a refresh in another JVM, or a store that keeps
      * the lock of a failed refresh, costs one call of the store in that time, not one for each read.
      */
-    private suspend fun mayAskForGlobalRefreshLock(key: String): Boolean {
-        if (refreshSignals.find(key) != null) return false
-        return refreshAttemptGuard.tryLock(GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX + key, LockType.UPDATE) != null
+    private suspend fun mayAskForGlobalRefreshLock(key: RequestKey): Boolean {
+        if (refreshSignals.find(key.scoped) != null) return false
+        return refreshAttemptGuard.tryLock(GLOBAL_REFRESH_ATTEMPT_KEY_PREFIX + key.scoped, LockType.UPDATE) != null
     }
 
     private suspend fun handleLockForCacheCreation(
-        key: String,
+        key: RequestKey,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> {
@@ -209,11 +257,11 @@ class ReqShield<T>(
 
         // The entry is gone, but a refresh that runs in this JVM is about to write it. Waiting for that refresh
         // saves a second supplier call. If the refresh ends without an entry, this request goes on as on any miss.
-        refreshSignals.find(key)?.let { refresh ->
+        refreshSignals.find(key.scoped)?.let { refresh ->
             // The wait for the refresh has its own reads. If they were taken from the reads for the creation lock, a
             // refresh that outlasts them would leave none: each request that then loses the lock would call the
             // supplier at once, without a lock.
-            when (val waited = readUntilReleased(key, refreshSignals, ReadBudget(), refresh)) {
+            when (val waited = readUntilReleased(key.cache, refreshSignals, key.scoped, ReadBudget(), refresh)) {
                 is Waited.Found -> return waited.data
                 // The creation path reads the cache again under its lock, and that read would fail the request
                 Waited.CacheUnavailable -> return callWithoutLock(callable, key, timeToLiveMillis)
@@ -238,11 +286,11 @@ class ReqShield<T>(
             if (asksTheLock) {
                 // The requests of this JVM that lost the front lock wait for this signal from now on.
                 // Nothing between the front lock and the try below suspends, so no cancellation skips the release.
-                if (frontToken != null) creationSignals.register(key, frontToken, CompletableDeferred())
+                if (frontToken != null) creationSignals.register(creationSignalKey(key), frontToken, CompletableDeferred())
                 val nanosBeforeAttempt = nanosBeforeAttempt(lock)
                 token =
                     try {
-                        lock.tryLock(key, lockType)
+                        lock.tryLock(key.cache, lockType)
                     } catch (e: Throwable) {
                         // A failed or cancelled store call gives the front lock back, and the error goes on unchanged
                         if (frontToken != null) releaseFrontLock(key, frontToken)
@@ -257,12 +305,12 @@ class ReqShield<T>(
                     frontTokens[token] = frontToken
                 } else {
                     // From here on, requests of this JVM that lose the lock wait for this signal instead of a full poll interval.
-                    creationSignals.register(key, token, CompletableDeferred())
+                    creationSignals.register(creationSignalKey(key), token, CompletableDeferred())
                 }
                 var cacheCreationRequired = false
                 try {
                     // Another request may have filled the cache between our initial miss and lock acquisition.
-                    val cachedData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
+                    val cachedData = executeGetCacheFunction(reqShieldConfig.getCacheFunction, key.cache)
                     if (cachedData != null) return cachedData
                     cacheCreationRequired = true
                 } finally {
@@ -282,12 +330,12 @@ class ReqShield<T>(
                     // A request of another JVM holds the global lock. This request reads the cache for all requests
                     // of this JVM, and they wait for its signal. The finally also runs on a cancellation.
                     try {
-                        pollAsRepresentative(key, budget)
+                        pollAsRepresentative(key.cache, budget)
                     } finally {
                         releaseFrontLock(key, frontToken)
                     }
                 } else {
-                    readUntilReleased(key, creationSignals, budget)
+                    readUntilReleased(key.cache, creationSignals, creationSignalKey(key), budget)
                 }
             when (waited) {
                 is Waited.Found -> return waited.data
@@ -324,12 +372,12 @@ class ReqShield<T>(
      */
     private suspend fun callWithoutLock(
         callable: suspend () -> T?,
-        key: String,
+        key: RequestKey,
         timeToLiveMillis: Long,
     ): ReqShieldData<T> = buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
 
     private suspend fun createReqShieldData(
-        key: String,
+        key: RequestKey,
         callable: suspend () -> T?,
         timeToLiveMillis: Long,
         lockType: LockType,
@@ -347,7 +395,7 @@ class ReqShield<T>(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                log.error("[Req-Shield] failed to create the cache of key '{}'", key, e)
+                log.error("[Req-Shield] failed to create the cache of key '{}'", key.cache, e)
             }
         }
         return reqShieldData
@@ -363,7 +411,7 @@ class ReqShield<T>(
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun launchInScope(
-        key: String,
+        key: RequestKey,
         lockType: LockType,
         token: String?,
         context: CoroutineContext = EmptyCoroutineContext,
@@ -376,7 +424,7 @@ class ReqShield<T>(
             if (token != null) releaseQuietly(key, lockType, token, "after the scope failed to start its task")
             if (e !is Exception) throw e
             rethrowIfCallerCancelled(e)
-            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key, e)
+            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key.cache, e)
         }
     }
 
@@ -397,7 +445,7 @@ class ReqShield<T>(
      * write that ends with an exception (the scope was cancelled during the read, for example).
      */
     private suspend fun writeUnlessSuperseded(
-        key: String,
+        key: RequestKey,
         reqShieldData: ReqShieldData<T>,
         lockType: LockType,
         token: String?,
@@ -407,7 +455,7 @@ class ReqShield<T>(
         if (token != null) {
             val superseded =
                 try {
-                    isSuperseded(key, lockedAtNanos, seenCreatedAt)
+                    isSuperseded(key.cache, lockedAtNanos, seenCreatedAt)
                 } catch (e: Throwable) {
                     // The scope was cancelled during the read, or the read threw an Error. Without this release the
                     // lock stays until it expires.
@@ -415,7 +463,7 @@ class ReqShield<T>(
                     throw e
                 }
             if (superseded) {
-                log.debug("[Req-Shield] skipped the cache write of key '{}': its lock timed out and a newer entry exists", key)
+                log.debug("[Req-Shield] skipped the cache write of key '{}': its lock timed out and a newer entry exists", key.cache)
                 releaseQuietly(key, lockType, token, "after its late cache write was skipped")
                 return
             }
@@ -490,6 +538,8 @@ class ReqShield<T>(
     private suspend fun readUntilReleased(
         key: String,
         signals: ReleaseSignals<CompletableDeferred<Unit>>,
+        // The key of the holder's signal in [signals]
+        signalKey: String,
         budget: ReadBudget,
         // The signal that made the request wait, when the caller already looked it up
         firstSignal: CompletableDeferred<Unit>? = null,
@@ -503,7 +553,7 @@ class ReqShield<T>(
             budget.reads++
             // Looked up before the read: the holder completes the signal after its cache write, so a write that
             // this read misses still ends the wait below at once.
-            var signal = signals.find(key)
+            var signal = signals.find(signalKey)
             if (signal == null && lastSignal?.isCompleted == true) released = true
 
             try {
@@ -523,13 +573,13 @@ class ReqShield<T>(
 
             if (budget.reads < reqShieldConfig.maxAttemptGetCache) {
                 // A holder that got the lock a moment ago may have registered its signal only during the read
-                if (signal == null) signal = signals.find(key)
+                if (signal == null) signal = signals.find(signalKey)
                 var waitMillis = GET_CACHE_INTERVAL_MILLIS
                 if (signal == null) {
                     // Or just after it: look once more after a short pause, which is taken off the interval
                     delay(SIGNAL_REGISTRATION_GRACE_MILLIS)
                     waitMillis -= SIGNAL_REGISTRATION_GRACE_MILLIS
-                    signal = signals.find(key)
+                    signal = signals.find(signalKey)
                 }
                 if (signal != null) lastSignal = signal
                 released = waitForNextRead(signal, waitMillis)
@@ -614,14 +664,14 @@ class ReqShield<T>(
 
     private suspend fun executeSetCacheFunction(
         setFunction: suspend (String, ReqShieldData<T>, Long) -> Boolean,
-        key: String,
+        key: RequestKey,
         value: ReqShieldData<T>,
         lockType: LockType,
         token: String?,
     ) {
         try {
             currentCoroutineContext().ensureActive()
-            setFunction(key, value, value.timeToLiveMillis)
+            setFunction(key.cache, value, value.timeToLiveMillis)
         } catch (e: Exception) {
             rethrowIfCallerCancelled(e)
             throw ClientException(ErrorCode.SET_CACHE_ERROR, cause = e)
@@ -637,7 +687,7 @@ class ReqShield<T>(
 
     private suspend fun executeCallable(
         callable: suspend () -> T?,
-        key: String,
+        key: RequestKey,
         lockType: LockType?,
         token: String?,
     ): T? =
@@ -678,29 +728,29 @@ class ReqShield<T>(
      * waiters wait for the signal of that front lock.
      */
     private suspend fun releaseQuietly(
-        key: String,
+        key: RequestKey,
         lockType: LockType,
         token: String,
         situation: String,
     ) {
         try {
             withContext(NonCancellable) {
-                lockFor(lockType).unLock(key, lockType, token)
+                lockFor(lockType).unLock(lockKeyOf(key, lockType), lockType, token)
             }
         } catch (unlockError: Exception) {
-            log.error("[Req-Shield] failed to unlock key '{}' {}", key, situation, unlockError)
+            log.error("[Req-Shield] failed to unlock key '{}' {}", key.cache, situation, unlockError)
         } finally {
             if (lockType == LockType.UPDATE) {
-                refreshSignals.release(key, token)
+                refreshSignals.release(key.scoped, token)
             } else {
                 // A request that got a global lock holds the front lock of its JVM too, and registered its signal with it
                 val frontToken = frontTokens.remove(token)
-                if (frontToken != null) releaseFrontLock(key, frontToken) else creationSignals.release(key, token)
+                if (frontToken != null) releaseFrontLock(key, frontToken) else creationSignals.release(creationSignalKey(key), token)
             }
         }
     }
 
-    private fun frontKeyOf(key: String): String = GLOBAL_CREATION_FRONT_KEY_PREFIX + key
+    private fun frontKeyOf(key: RequestKey): String = GLOBAL_CREATION_FRONT_KEY_PREFIX + key.scoped
 
     /**
      * Gives the front lock back and then wakes the requests that wait for [frontToken], also when the caller is
@@ -708,7 +758,7 @@ class ReqShield<T>(
      * signal, and reads the cache at the poll interval until its reads are used up.
      */
     private suspend fun releaseFrontLock(
-        key: String,
+        key: RequestKey,
         frontToken: String,
     ) {
         try {
@@ -716,9 +766,9 @@ class ReqShield<T>(
                 creationFrontLock.unLock(frontKeyOf(key), LockType.CREATE, frontToken)
             }
         } catch (unlockError: Exception) {
-            log.error("[Req-Shield] failed to unlock the front lock of key '{}'", key, unlockError)
+            log.error("[Req-Shield] failed to unlock the front lock of key '{}'", key.cache, unlockError)
         } finally {
-            creationSignals.release(key, frontToken)
+            creationSignals.release(creationSignalKey(key), frontToken)
         }
     }
 

@@ -22,6 +22,7 @@ import com.linecorp.cse.reqshield.support.BaseReqShieldTest
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.LOCK_KEY_PREFIX
 import com.linecorp.cse.reqshield.support.exception.ClientException
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
+import com.linecorp.cse.reqshield.support.key.RequestKey
 import com.linecorp.cse.reqshield.support.model.Product
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import com.linecorp.cse.reqshield.support.utils.nowToEpochTime
@@ -1050,8 +1051,9 @@ class ReqShieldTest : BaseReqShieldTest {
         val mono =
             Mono.defer {
                 try {
+                    val requestKey = RequestKey.of(key, null)
                     @Suppress("UNCHECKED_CAST")
-                    method.invoke(reqShield, cacheSetter, key, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
+                    method.invoke(reqShield, cacheSetter, requestKey, reqShieldData, lockType, token, Context.empty()) as Mono<Unit>
                 } catch (e: InvocationTargetException) {
                     Mono.error(e.cause ?: e)
                 }
