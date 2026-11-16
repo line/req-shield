@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: publish-${{ inputs.target }}
-  # A release that is cancelled between the publication and the push would leave Maven Central without its tag.
+  # A release that is cancelled between the publication and the pushes would leave Maven Central without its tag.
   cancel-in-progress: ${{ inputs.target != 'release' }}
 
 permissions:
@@ -24,9 +24,6 @@ jobs:
   publish:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
-    permissions:
-      # A release pushes the version commit and the tag, and creates the GitHub release.
-      contents: write
     services:
       redis:
         image: redis:6.2.7-alpine
@@ -58,6 +55,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          # A release pushes the tag and the version commit and creates the GitHub release with the app token.
           # The app may bypass the pull request rule of the default branch.
           token: ${{ steps.app-token.outputs.token || github.token }}
 
@@ -82,20 +80,17 @@ jobs:
         if: inputs.target == 'release'
         run: sed -i 's/snapshotBuild=true/snapshotBuild=false/' gradle.properties
 
-      # The commit stays in this job until the publication succeeded, so a failed run leaves the repository as it was.
-      - name: Raise the minor version and commit it
+      # build.gradle.kts holds the version of the next release. A release publishes that version as it is.
+      - name: Read the version and stop if its tag exists
         id: version
         if: inputs.target == 'release'
         run: |
-          version="$(bash .github/scripts/bump-minor-version.sh build.gradle.kts)"
+          version="$(bash .github/scripts/read-version.sh build.gradle.kts)"
           tag="v$version"
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
             echo "::error::The tag $tag exists already, so version $version was released before."
             exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit --message "Upgrade project version to $version" -- build.gradle.kts
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -125,25 +120,39 @@ jobs:
           ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_SECRET_KEY }}
           ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_SECRET_PASSWORD }}
 
-      # The tag points at the version commit, which is the source of the published artifacts.
-      # --atomic pushes the commit and the tag together or not at all.
-      - name: Push the version commit and the tag
+      # The tag points at the commit of this run, which is the source of the published artifacts.
+      - name: Push the tag
         if: inputs.target == 'release'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           git tag "$TAG"
-          if ! git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/$TAG"; then
-            echo "::error::${TAG#v} is on Maven Central, but the version commit and the tag $TAG were not pushed. Set the version in build.gradle.kts and create the tag by hand."
+          if ! git push origin "refs/tags/$TAG"; then
+            echo "::error::${TAG#v} is on Maven Central, but the tag $TAG was not pushed. Create the tag on $GITHUB_SHA, create the release and raise the version in build.gradle.kts by hand."
             exit 1
           fi
 
       - name: Create the GitHub release with generated notes
         if: inputs.target == 'release'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+
+      # This is the last step, so the default branch holds the released version until the release is complete.
+      # The rebase keeps the push possible when the branch got other commits during this run.
+      # --autostash keeps the changes that earlier steps made to other files out of the way.
+      - name: Raise the minor version for the next release and push the commit
+        if: inputs.target == 'release'
+        run: |
+          next="$(bash .github/scripts/bump-minor-version.sh build.gradle.kts)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --message "Set the version of the next release to $next" -- build.gradle.kts
+          if ! { git pull --rebase --autostash origin "$GITHUB_REF_NAME" && git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"; }; then
+            echo "::error::The release is complete, but the version commit was not pushed. Set the version in build.gradle.kts to $next by hand."
+            exit 1
+          fi
 
       - name: Cleanup Gradle Cache
         if: always()

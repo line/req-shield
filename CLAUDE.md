@@ -58,12 +58,16 @@ The library is organized into several core modules:
 ```
 
 ### Releasing
+- `build.gradle.kts` holds the version of the next release. Do not raise it by hand before a release.
 - Start the `Publish to Maven Central` workflow (`.github/workflows/publish.yml`) by hand on `main`.
-- `dev` publishes the snapshot of the version in `build.gradle.kts`.
-- `release` raises the minor version in `build.gradle.kts` (`1.2.0` becomes `1.3.0`), commits that, publishes the new
-  version, pushes the commit with the tag `v1.3.0`, and creates the GitHub release with generated notes. Do not raise
-  the version by hand before a release. A patch or a major release still needs a manual version change.
-- `.github/scripts/bump-minor-version.sh` changes the version; `bump-minor-version.test.sh` tests it.
+- `dev` publishes the snapshot of the version in `build.gradle.kts` (`1.4.0-SNAPSHOT` for `1.4.0`).
+- `release` publishes the version in `build.gradle.kts` (`1.4.0`), pushes the tag `v1.4.0` on the released commit, and
+  creates the GitHub release with generated notes. Its last step raises the minor version (`1.5.0`) and pushes that
+  commit. For a patch or a major release, set the version by hand before the run.
+- `release` pushes with the token of a GitHub App (secrets `RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY`). The app
+  must be allowed to bypass the pull request rule of `main`.
+- `.github/scripts/read-version.sh` reads the version and `bump-minor-version.sh` raises it;
+  `bump-minor-version.test.sh` tests both.
 
 ### Running Examples
 ```bash

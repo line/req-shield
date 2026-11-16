@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests of bump-minor-version.sh. Each case uses its own temporary file.
+# Tests of bump-minor-version.sh and read-version.sh. Each case uses its own temporary file.
 set -euo pipefail
 
 script="$(dirname "$0")/bump-minor-version.sh"
+readScript="$(dirname "$0")/read-version.sh"
 workDir="$(mktemp -d)"
 trap 'rm -rf "$workDir"' EXIT
 failures=0
@@ -27,14 +28,41 @@ expect_bump() {
 }
 
 # Usage: expect_error <case name> <file content>
+# Both scripts must fail, and the file must stay as it was.
 expect_error() {
     local file="$workDir/$1.gradle.kts"
     printf '%s\n' "$2" >"$file"
     if bash "$script" "$file" >/dev/null 2>&1; then
-        fail "$1: the script must fail"
+        fail "$1: the bump script must fail"
+    fi
+    if bash "$readScript" "$file" >/dev/null 2>&1; then
+        fail "$1: the read script must fail"
     fi
     [ "$(cat "$file")" = "$2" ] || fail "$1: the file must not change"
 }
+
+# Usage: expect_read <case name> <file content> <expected version>
+expect_read() {
+    local file="$workDir/$1.gradle.kts"
+    printf '%s\n' "$2" >"$file"
+    local printed
+    if ! printed="$(bash "$readScript" "$file")"; then
+        fail "$1: the script failed"
+        return
+    fi
+    [ "$printed" = "$3" ] || fail "$1: printed '$printed', expected '$3'"
+    [ "$(cat "$file")" = "$2" ] || fail "$1: the file must not change"
+}
+
+expect_read "read" 'version = "1.4.0"' "1.4.0"
+expect_read "read-keeps-the-patch" 'version = "1.2.7"' "1.2.7"
+expect_read "read-ignores-other-versions" \
+    'version = "1.4.0"
+plugins {
+    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
+    version = "9.9.9"
+}' \
+    "1.4.0"
 
 expect_bump "minor" 'version = "1.2.0"' "1.3.0" 'version = "1.3.0"'
 expect_bump "patch-is-reset" 'version = "1.2.7"' "1.3.0" 'version = "1.3.0"'
@@ -62,7 +90,10 @@ expect_error "snapshot-suffix" 'version = "1.2.0-SNAPSHOT"'
 expect_error "two-parts" 'version = "1.2"'
 
 if bash "$script" "$workDir/missing.gradle.kts" >/dev/null 2>&1; then
-    fail "missing-file: the script must fail"
+    fail "missing-file: the bump script must fail"
+fi
+if bash "$readScript" "$workDir/missing.gradle.kts" >/dev/null 2>&1; then
+    fail "missing-file: the read script must fail"
 fi
 
 if [ "$failures" -ne 0 ]; then
