@@ -519,6 +519,62 @@ class ReqShieldCreationSignalTest {
         }
 
     @Test
+    fun aRequestShouldCallTheSupplierWhenTheCacheFailsDuringARefresh() =
+        runBlocking {
+            cache[key] = oldEntry()
+            val refreshStarted = CompletableDeferred<Unit>()
+            val finishRefresh = CompletableDeferred<Unit>()
+            // Each read with a number above this one fails, as with a cache that is down
+            val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
+            val shield =
+                shield(
+                    getCache = { cacheKey ->
+                        check(cacheReads.get() <= failReadsAfter.get()) { "the cache is down" }
+                        cache[cacheKey]
+                    },
+                )
+            try {
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        refreshStarted.complete(Unit)
+                        finishRefresh.await()
+                        Product("refreshed", "refreshed")
+                    },
+                    10_000,
+                )
+                withTimeout(2_000) { refreshStarted.await() }
+                cache.remove(key)
+                val readsBefore = cacheReads.get()
+                // The request reads the miss. Each read after that fails.
+                failReadsAfter.set(readsBefore + 1)
+                val supplierCalls = AtomicInteger()
+
+                val data =
+                    shield.getAndSetReqShieldData(
+                        key,
+                        {
+                            supplierCalls.incrementAndGet()
+                            product
+                        },
+                        10_000,
+                    )
+
+                assertEquals(product, data.value)
+                assertEquals(1, supplierCalls.get())
+                // The read on the miss and the three failed reads of the wait. No read under a creation lock follows.
+                assertEquals(1 + 3, cacheReads.get() - readsBefore)
+                assertNull(signal(), "the request took no creation lock")
+            } finally {
+                failReadsAfter.set(Int.MAX_VALUE)
+                finishRefresh.complete(Unit)
+            }
+            withTimeout(2_000) {
+                while (refreshSignal() != null) delay(1)
+            }
+        }
+
+    @Test
     fun aRequestShouldCreateTheEntryWhenARefreshOutlastsItsReads() =
         runBlocking {
             cache[key] = oldEntry()

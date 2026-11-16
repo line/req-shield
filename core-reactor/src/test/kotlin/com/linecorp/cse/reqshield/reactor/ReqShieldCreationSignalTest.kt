@@ -413,6 +413,43 @@ class ReqShieldCreationSignalTest {
     }
 
     @Test
+    fun aRequestShouldCallTheSupplierWhenTheCacheFailsDuringARefresh() {
+        val finishRefresh = CompletableFuture<Product?>()
+        val refreshCalls = AtomicInteger()
+        // Each read with a number above this one fails, as with a cache that is down
+        val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
+        val shield =
+            shield(
+                getCacheFunction = { cacheKey ->
+                    Mono.fromCallable {
+                        check(cacheReads.incrementAndGet() <= failReadsAfter.get()) { "the cache is down" }
+                        cache[cacheKey]
+                    }
+                },
+            )
+        try {
+            startRefresh(shield, blockedSupplier(finishRefresh, refreshCalls), refreshCalls)
+            cache.remove(key)
+            val readsBefore = cacheReads.get()
+            // The request reads the miss. Each read after that fails.
+            failReadsAfter.set(readsBefore + 1)
+            val waiterCalls = AtomicInteger()
+
+            val data = shield.getAndSetReqShieldData(key, countingSupplier(waiterCalls), 10_000).block(timeout)
+
+            assertEquals(product, data?.value)
+            assertEquals(1, waiterCalls.get())
+            // The read on the miss and the three failed reads of the wait. No read under a creation lock follows.
+            assertEquals(1 + 3, cacheReads.get() - readsBefore)
+            assertEquals(null, ReqShield.creationSignals.find(key), "the request took no creation lock")
+        } finally {
+            failReadsAfter.set(Int.MAX_VALUE)
+            finishRefresh.complete(Product("refreshed", "refreshed"))
+        }
+        await().atMost(Duration.ofSeconds(2)).until { ReqShield.refreshSignals.find(key) == null }
+    }
+
+    @Test
     fun aRequestShouldCreateTheEntryWhenARefreshOutlastsItsReads() {
         val finishRefresh = CompletableFuture<Product?>()
         val refreshCalls = AtomicInteger()

@@ -149,8 +149,12 @@ class ReqShield<T>(
             // The wait for the refresh has its own reads. If they were taken from the reads for the creation lock, a
             // refresh that outlasts them would leave none: each request that then loses the lock would call the
             // supplier at once, without a lock.
-            val waited = readUntilReleased(key, refreshSignals, ReadBudget(), refresh)
-            if (waited is Waited.Found) return waited.data
+            when (val waited = readUntilReleased(key, refreshSignals, ReadBudget(), refresh)) {
+                is Waited.Found -> return waited.data
+                // The creation path reads the cache again under its lock, and that read would fail the request
+                Waited.CacheUnavailable -> return callWithoutLock(callable, key, timeToLiveMillis)
+                Waited.Released, Waited.GaveUp -> Unit
+            }
         }
 
         while (true) {
@@ -183,12 +187,21 @@ class ReqShield<T>(
                 // The holder gave the lock back and wrote no entry (its supplier failed, for example), so this
                 // request tries to be the next holder. The requests that lose again wait for the new holder.
                 Waited.Released -> continue
-                // The other request never filled the cache: fall back to the supplier. No lock was acquired here,
-                // so there is nothing to release, and a supplier failure propagates as SUPPLIER_ERROR.
-                Waited.GaveUp -> return buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
+                // The other request never filled the cache: fall back to the supplier
+                Waited.GaveUp, Waited.CacheUnavailable -> return callWithoutLock(callable, key, timeToLiveMillis)
             }
         }
     }
+
+    /**
+     * Calls the supplier for a request that stopped waiting. The request holds no lock, so there is nothing to
+     * release, and it writes no entry. A supplier failure propagates as SUPPLIER_ERROR.
+     */
+    private suspend fun callWithoutLock(
+        callable: suspend () -> T?,
+        key: String,
+        timeToLiveMillis: Long,
+    ): ReqShieldData<T> = buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
 
     private suspend fun createReqShieldData(
         key: String,
@@ -317,8 +330,11 @@ class ReqShield<T>(
         /** The holder gave its lock back, and the read after that found no entry. */
         object Released : Waited<Nothing>
 
-        /** The reads are used up, or the cache looks unavailable. */
+        /** The reads are used up. The cache answered, but it has no entry. */
         object GaveUp : Waited<Nothing>
+
+        /** [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row, so no further read is worth a try. */
+        object CacheUnavailable : Waited<Nothing>
     }
 
     /**
@@ -333,9 +349,10 @@ class ReqShield<T>(
      * The reads run on the caller's coroutine, and each wait is a cancellation point: a cancelled caller stops at
      * once. The supplier is never called from the loop.
      *
-     * The wait gives up after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget] over all
-     * waits of the request, or earlier when [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row (the cache
-     * looks unavailable). A read that fails still counts, so the wait stays bounded. No wait follows the last read.
+     * The wait ends as [Waited.GaveUp] after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget]
+     * over all waits of the request. It ends earlier, as [Waited.CacheUnavailable], when
+     * [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row. A read that fails still counts, so the wait stays
+     * bounded. No wait follows the last read.
      */
     private suspend fun readUntilReleased(
         key: String,
@@ -365,7 +382,7 @@ class ReqShield<T>(
                 throw e
             } catch (e: ClientException) {
                 log.warn("[Req-Shield] failed to read the cache of key '{}' while waiting", key, e)
-                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.GaveUp
+                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.CacheUnavailable
             }
 
             if (released) return Waited.Released
