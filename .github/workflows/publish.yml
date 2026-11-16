@@ -47,9 +47,10 @@ jobs:
       - name: Create a token of the release app
         id: app-token
         if: inputs.target == 'release'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
+          # The action accepts the App ID or the Client ID of the app in this input.
+          client-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
       - name: Checkout code
