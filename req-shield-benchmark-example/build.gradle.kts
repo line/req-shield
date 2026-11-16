@@ -40,6 +40,8 @@ dependencies {
     jmh(rootProject.libs.kotlin.coroutine.reactive)
     // The Redis client of the scenario benchmarks with -p store=redis
     jmh(rootProject.libs.lettuce)
+    // Lettuce brings a Netty version with known vulnerabilities. The root build raises it for tests only.
+    jmh(platform(rootProject.libs.netty.bom))
     jmh(rootProject.libs.spring.context)
     jmh(rootProject.libs.aspectj)
     // Spring reads the parameter names of Kotlin methods for SpEL keys through kotlin-reflect
