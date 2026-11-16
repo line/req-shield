@@ -50,6 +50,9 @@ class ReqShieldCreationSignalTest {
     private val key = "creation-signal-${UUID.randomUUID()}"
     private val cache = ConcurrentHashMap<String, ReqShieldData<Product>>()
     private val cacheReads = AtomicInteger()
+
+    // Each read with a number above this one fails, as with a cache that is down
+    private val failReadsAfter = AtomicInteger(Int.MAX_VALUE)
     private val pool = Executors.newFixedThreadPool(4)
     private val product = Product("id", "name")
 
@@ -73,7 +76,7 @@ class ReqShieldCreationSignalTest {
                     true
                 },
                 getCacheFunction = { cacheKey ->
-                    cacheReads.incrementAndGet()
+                    check(cacheReads.incrementAndGet() <= failReadsAfter.get()) { "the cache is down" }
                     cache[cacheKey]
                 },
                 executor = executor,
@@ -415,6 +418,51 @@ class ReqShieldCreationSignalTest {
         assertTrue(waitAfterFailureMillis < 25, "the request ended $waitAfterFailureMillis ms after the failed refresh")
         assertEquals(1, waiterSupplierCalls.get())
         await().atMost(Duration.ofSeconds(2)).untilAsserted { assertEquals(product, cache[key]?.value) }
+        awaitNoRefreshSignal()
+    }
+
+    @Test
+    fun aRequestShouldCallTheSupplierWhenTheCacheFailsDuringARefresh() {
+        cache[key] = oldEntry()
+        val finishRefresh = CountDownLatch(1)
+        val refreshStarted = CountDownLatch(1)
+        val shield = shield()
+        try {
+            shield.getAndSetReqShieldData(
+                key,
+                {
+                    refreshStarted.countDown()
+                    check(finishRefresh.await(5, TimeUnit.SECONDS))
+                    Product("refreshed", "refreshed")
+                },
+                10_000,
+            )
+            assertTrue(refreshStarted.await(2, TimeUnit.SECONDS))
+            cache.remove(key)
+            val readsBefore = cacheReads.get()
+            // The request reads the miss. Each read after that fails.
+            failReadsAfter.set(readsBefore + 1)
+            val supplierCalls = AtomicInteger()
+
+            val data =
+                shield.getAndSetReqShieldData(
+                    key,
+                    {
+                        supplierCalls.incrementAndGet()
+                        product
+                    },
+                    10_000,
+                )
+
+            assertEquals(product, data.value)
+            assertEquals(1, supplierCalls.get())
+            // The read on the miss and the three failed reads of the wait. No read under a creation lock follows.
+            assertEquals(1 + 3, cacheReads.get() - readsBefore)
+            assertNull(created.creationSignals.find(key), "the request took no creation lock")
+        } finally {
+            failReadsAfter.set(Int.MAX_VALUE)
+            finishRefresh.countDown()
+        }
         awaitNoRefreshSignal()
     }
 

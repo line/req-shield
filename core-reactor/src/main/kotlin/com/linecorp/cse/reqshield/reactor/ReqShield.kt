@@ -47,7 +47,7 @@ private val log = LoggerFactory.getLogger(ReqShield::class.java)
 
 /**
  * Internal signal telling a waiting request to stop reading the cache because the cache
- * itself looks unavailable. Never leaves [ReqShield]: the wait always ends with it as given up.
+ * itself looks unavailable. Never leaves [ReqShield]: the wait ends with it, and the request calls the supplier.
  * Stack trace is disabled because it carries no diagnostic value.
  */
 private class GetCacheUnavailableException : RuntimeException(null, null, false, false)
@@ -247,10 +247,12 @@ class ReqShield<T>(
         // refresh that outlasts them would leave none: each request that then loses the lock would call the
         // supplier at once, without a lock.
         return readUntilReleased(key, refreshSignals, ReadBudget(), refresh).flatMap { waited ->
-            if (waited is Waited.Found) {
-                Mono.just(waited.data)
-            } else {
-                createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
+            when (waited) {
+                is Waited.Found -> Mono.just(waited.data)
+                // The creation path reads the cache again under its lock, and that read would fail the request.
+                // A failed read can emit on the client's event loop; keep the supplier call off that thread.
+                Waited.CacheUnavailable -> callWithoutLock(callable, timeToLiveMillis).subscribeOn(reqShieldConfig.scheduler)
+                Waited.Released, Waited.GaveUp -> createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
             }
         }
     }
@@ -541,7 +543,7 @@ class ReqShield<T>(
                 when (waited) {
                     is Waited.Found -> Mono.just(waited.data)
                     Waited.Released -> createOrWaitForHolder(key, callable, timeToLiveMillis, budget, callerContext)
-                    Waited.GaveUp -> callWithoutLock(callable, timeToLiveMillis)
+                    Waited.GaveUp, Waited.CacheUnavailable -> callWithoutLock(callable, timeToLiveMillis)
                 }
             }
             // A lock can emit on its client's event loop; keep the reads and the supplier call off that thread.
@@ -564,8 +566,11 @@ class ReqShield<T>(
         /** The holder gave its lock back, and the read after that found no entry. */
         object Released : Waited<Nothing>
 
-        /** The reads are used up, or the cache looks unavailable. */
+        /** The reads are used up. The cache answered, but it has no entry. */
         object GaveUp : Waited<Nothing>
+
+        /** [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row, so no further read is worth a try. */
+        object CacheUnavailable : Waited<Nothing>
     }
 
     /**
@@ -577,9 +582,10 @@ class ReqShield<T>(
      * [Waited.Released]. Without a signal - the holder runs in another JVM - the wait is the whole interval, which
      * makes this a poll at a fixed interval. The supplier is never called from the wait.
      *
-     * The wait gives up after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget] over all waits of
-     * the request, with no wait after the last read. It gives up earlier when [MAX_CONSECUTIVE_GET_CACHE_FAILURES]
-     * reads failed in a row (the cache looks unavailable). A read that fails still counts, so the wait stays bounded.
+     * The wait ends as [Waited.GaveUp] after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget]
+     * over all waits of the request, with no wait after the last read. It ends earlier, as
+     * [Waited.CacheUnavailable], when [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row. A read that fails
+     * still counts, so the wait stays bounded.
      */
     private fun readUntilReleased(
         key: String,
@@ -632,7 +638,7 @@ class ReqShield<T>(
                             .doOnNext { released.set(it) }
                             .thenReturn(index)
                     }
-            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.GaveUp) }
+            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.CacheUnavailable) }
             .defaultIfEmpty(Waited.GaveUp)
     }
 
@@ -641,7 +647,8 @@ class ReqShield<T>(
      * JVM, so the wait between two reads starts short and grows to the poll interval: see [representativePollMillis].
      * The reads count in [budget] like the reads of any wait, and the supplier is never called from the loop.
      *
-     * Emits [Waited.Found] with the entry, or [Waited.GaveUp] when the reads are used up or the cache looks unavailable.
+     * Emits [Waited.Found] with the entry, [Waited.GaveUp] when the reads are used up, or [Waited.CacheUnavailable]
+     * when the cache looks unavailable.
      */
     private fun pollAsRepresentative(
         key: String,
@@ -658,7 +665,7 @@ class ReqShield<T>(
                     // No wait after the last read
                     .takeWhile { budget.reads.get() < maxReads }
                     .concatMap { index -> waitForNextRead(null, representativePollMillis(index.toInt())).thenReturn(index) }
-            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.GaveUp) }
+            }.onErrorResume(GetCacheUnavailableException::class.java) { Mono.just(Waited.CacheUnavailable) }
             .defaultIfEmpty(Waited.GaveUp)
     }
 

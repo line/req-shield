@@ -180,8 +180,12 @@ class ReqShield<T>(
             // The wait for the refresh has its own reads. If they were taken from the reads for the creation lock, a
             // refresh that outlasts them would leave none: each request that then loses the lock would call the
             // supplier at once, without a lock.
-            val waited = readUntilReleased(key, refreshSignals, ReadBudget(), refresh)
-            if (waited is Waited.Found) return waited.data
+            when (val waited = readUntilReleased(key, refreshSignals, ReadBudget(), refresh)) {
+                is Waited.Found -> return waited.data
+                // The creation path reads the cache again under its lock, and that read would fail the request
+                Waited.CacheUnavailable -> return callWithoutLock(callable, key, timeToLiveMillis)
+                Waited.Released, Waited.GaveUp -> Unit
+            }
         }
 
         while (true) {
@@ -257,8 +261,7 @@ class ReqShield<T>(
                 // The holder gave the lock back and wrote no entry (its supplier failed, for example), so this
                 // request tries to be the next holder. The requests that lose again wait for the new holder.
                 Waited.Released -> continue
-                // No lock was acquired by this request, so there is nothing to release on failure
-                Waited.GaveUp -> return buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
+                Waited.GaveUp, Waited.CacheUnavailable -> return callWithoutLock(callable, key, timeToLiveMillis)
             }
         }
     }
@@ -280,6 +283,16 @@ class ReqShield<T>(
         lock: KeyLock,
         nanosBeforeAttempt: Long,
     ): Long = if (lock is KeyLocalLock) System.nanoTime() else nanosBeforeAttempt
+
+    /**
+     * Calls the supplier for a request that stopped waiting. The request holds no lock, so there is nothing to
+     * release, and it writes no entry.
+     */
+    private fun callWithoutLock(
+        callable: Callable<T?>,
+        key: String,
+        timeToLiveMillis: Long,
+    ): ReqShieldData<T> = buildReqShieldData(executeCallable(callable, key, null, null), timeToLiveMillis)
 
     private fun createReqShieldData(
         key: String,
@@ -388,8 +401,11 @@ class ReqShield<T>(
         /** The holder gave its lock back, and the read after that found no entry. */
         object Released : Waited<Nothing>
 
-        /** The reads are used up, or the cache looks unavailable. */
+        /** The reads are used up. The cache answered, but it has no entry. */
         object GaveUp : Waited<Nothing>
+
+        /** [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row, so no further read is worth a try. */
+        object CacheUnavailable : Waited<Nothing>
     }
 
     /**
@@ -405,9 +421,10 @@ class ReqShield<T>(
      * Keeping them here gives the wait a single termination condition and means a saturated executor
      * cannot stall it. The supplier is never called from the loop.
      *
-     * The wait gives up after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget] over all
-     * waits of the request, or earlier when [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row (the cache
-     * looks unavailable). A read that fails still counts, so the wait stays bounded.
+     * The wait ends as [Waited.GaveUp] after [ReqShieldConfiguration.maxAttemptGetCache] reads, counted in [budget]
+     * over all waits of the request. It ends earlier, as [Waited.CacheUnavailable], when
+     * [MAX_CONSECUTIVE_GET_CACHE_FAILURES] reads failed in a row. A read that fails still counts, so the wait stays
+     * bounded.
      */
     private fun readUntilReleased(
         key: String,
@@ -435,7 +452,7 @@ class ReqShield<T>(
                 budget.consecutiveFailures = 0
             } catch (e: Exception) {
                 log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
-                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.GaveUp
+                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.CacheUnavailable
             }
 
             if (released) return Waited.Released
@@ -609,8 +626,8 @@ class ReqShield<T>(
      * JVM, so the wait between two reads starts short and grows to the poll interval: see [representativePollMillis].
      * The reads count in [budget] like the reads of any wait, and the supplier is never called from the loop.
      *
-     * @return [Waited.Found] with the entry, or [Waited.GaveUp] when the reads are used up or the cache looks
-     * unavailable.
+     * @return [Waited.Found] with the entry, [Waited.GaveUp] when the reads are used up, or
+     * [Waited.CacheUnavailable] when the cache looks unavailable.
      */
     private fun pollAsRepresentative(
         key: String,
@@ -628,7 +645,7 @@ class ReqShield<T>(
                 budget.consecutiveFailures = 0
             } catch (e: Exception) {
                 log.warn("Cache read failed while waiting for the cache to be created for key '{}'", key, e)
-                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.GaveUp
+                if (++budget.consecutiveFailures >= MAX_CONSECUTIVE_GET_CACHE_FAILURES) return Waited.CacheUnavailable
             }
 
             if (budget.reads < reqShieldConfig.maxAttemptGetCache) {
