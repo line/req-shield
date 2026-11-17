@@ -180,6 +180,24 @@ subprojects {
 
     if (project.name.startsWith("req-shield-spring-boot3-")) {
         springBoot3ExampleManagedVersions.forEach { (property, version) -> extra[property] = version }
+
+        // The Spring Boot 3.5 Gradle plugin brings Jackson and HttpComponents versions with known vulnerabilities
+        // to the build classpath. The BOM properties above do not reach that classpath.
+        buildscript.configurations.configureEach {
+            resolutionStrategy.eachDependency {
+                val managedVersionProperty =
+                    when (requested.group) {
+                        // jackson-annotations has a version scheme of its own.
+                        "com.fasterxml.jackson.core" ->
+                            "jackson-bom.version".takeIf { requested.name != "jackson-annotations" }
+
+                        "org.apache.httpcomponents.client5" -> "httpclient5.version"
+                        "org.apache.httpcomponents.core5" -> "httpcore5.version"
+                        else -> null
+                    }
+                managedVersionProperty?.let { useVersion(springBoot3ExampleManagedVersions.getValue(it)) }
+            }
+        }
     }
 
     java {
