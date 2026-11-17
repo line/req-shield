@@ -18,7 +18,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
-version = "1.3.0"
+version = "1.4.0"
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
