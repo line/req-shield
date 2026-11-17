@@ -1,7 +1,8 @@
 [versions]
 kotlin = "2.4.21"
 # Kotlin stdlib/reflect that the library modules publish, matching their apiVersion/languageVersion (2.2, the
-# Kotlin of Spring Boot 4.0), so that consumers on older Kotlin compilers can still read the library's metadata.
+# Kotlin of Spring Boot 4.0), so that consumers on Kotlin 2.2 and 2.3 (older than the build's compiler) can read
+# the library's metadata.
 kotlinApi = "2.2.21"
 # Minimum supported versions (Spring Boot 4.0 line): the library compiles and tests against these.
 kotlinCoroutine = "1.10.2"

@@ -194,7 +194,7 @@ subprojects {
             }
             jvmTarget.set(JvmTarget.JVM_21)
             // Library modules are compiled by the K2 compiler but emit Kotlin 2.2 metadata and use only the
-            // 2.2 standard library API, so that consumers on older Kotlin compilers can still read them.
+            // 2.2 standard library API, so that consumers on Kotlin 2.2 and 2.3 (older than this compiler) can still read them.
             // Example applications are not published and use the compiler defaults.
             if (!project.name.endsWith("-example")) {
                 languageVersion.set(KotlinVersion.KOTLIN_2_2)

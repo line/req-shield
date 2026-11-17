@@ -156,9 +156,9 @@ Contains shared:
   `kotlinApi` (2.2.21) instead of the compiler's version (`kotlin.stdlib.default.dependency=false`). This keeps the
   published metadata and stdlib readable by consumers on Kotlin 2.2+, the default Kotlin of Spring Boot 4.0 (the
   supported minimum).
-  Raising either value raises the minimum Kotlin version of consumers. Kotlin 2.4 deprecated language version 2.0
-  and asked for 2.2; 2.2 compiles without that warning.
-- The Reactor modules (`reactorApiProjects` in the root build) compile with `-Xjspecify-annotations=warn`: Reactor
+  Raising either value raises the minimum Kotlin version of consumers. The Kotlin 2.4 compiler reports language
+  versions 2.0 and 2.1 as deprecated; 2.2 is the lowest version that compiles without that warning.
+- The modules that implement or call the Reactor API (`reactorApiProjects` in the root build) compile with `-Xjspecify-annotations=warn`: Reactor
   3.8 declares `Mono`'s type parameter non-null, and the Reactor API still uses `Mono<ReqShieldData<T>?>`.
 - Example applications are not published and use the compiler's stdlib.
 - The stdlib is an `api` dependency of the library modules, so it stays in the POM's compile scope for Java callers.

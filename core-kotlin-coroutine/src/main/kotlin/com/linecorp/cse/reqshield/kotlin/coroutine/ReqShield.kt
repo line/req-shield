@@ -425,17 +425,20 @@ class ReqShield<T>(
             val failure = unwrapDispatchException(e)
             if (failure !is Exception) throw failure
             rethrowIfCallerCancelled(failure)
-            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key.cache, failure)
+            // The wrapper names the dispatcher and the context; its cause chain still holds the failure
+            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key.cache, e)
         }
     }
 
     /**
      * Returns the exception that the dispatcher threw. kotlinx.coroutines wraps it in its internal DispatchException,
      * which is always an [Exception], so without this an [Error] or the caller's cancellation would be logged as a
-     * skipped task.
+     * skipped task. Each dispatcher layer adds a wrapper (`limitedParallelism` adds one), so all of them are removed.
      */
-    private fun unwrapDispatchException(e: Throwable): Throwable =
-        if (e.javaClass.name == DISPATCH_EXCEPTION_CLASS_NAME) e.cause ?: e else e
+    private tailrec fun unwrapDispatchException(e: Throwable): Throwable {
+        val cause = e.cause
+        return if (e.javaClass.name == DISPATCH_EXCEPTION_CLASS_NAME && cause != null) unwrapDispatchException(cause) else e
+    }
 
     /**
      * Writes [reqShieldData] and releases the lock, unless the lock timed out during the supplier call and another

@@ -227,7 +227,8 @@ open class ReqShieldAspect<T>(
     ): String {
         val method = keySource.method
         // Spring drops the trailing Continuation of a suspend function itself in MethodBasedEvaluationContext,
-        // so the raw arguments are passed on. The default key is built here, so the Continuation is dropped here. A keyGenerator bean still receives the raw arguments, Continuation included.
+        // so the raw arguments are passed on. The default key is built here, so the Continuation is dropped here.
+        // A keyGenerator bean still receives the raw arguments, Continuation included.
         val args = joinPoint.args
 
         val key =

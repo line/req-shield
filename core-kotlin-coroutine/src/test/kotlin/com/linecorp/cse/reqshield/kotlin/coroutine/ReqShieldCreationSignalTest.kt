@@ -1185,17 +1185,35 @@ class ReqShieldCreationSignalTest {
             assertEquals(old, cache[key])
         }
 
+    /** A dispatcher that throws what [failure] returns, so `launch` on it throws and its task never runs. */
+    private fun dispatcherThatThrows(failure: () -> Throwable): CoroutineDispatcher =
+        object : CoroutineDispatcher() {
+            override fun dispatch(
+                context: CoroutineContext,
+                block: Runnable,
+            ) = throw failure()
+        }
+
+    /**
+     * A scope on [dispatcher]. With [limited], the dispatcher sits behind `limitedParallelism`, and kotlinx.coroutines
+     * wraps an exception of the dispatcher twice instead of once.
+     */
+    private fun scopeOn(
+        dispatcher: CoroutineDispatcher,
+        limited: Boolean,
+    ) = CoroutineScope(SupervisorJob() + if (limited) dispatcher.limitedParallelism(2) else dispatcher)
+
     /** A scope whose dispatcher throws [error], so `launch` on it throws and its task never runs. */
-    private fun scopeWhoseDispatcherThrows(error: Throwable = IllegalStateException("the dispatcher is down")) =
-        CoroutineScope(
-            SupervisorJob() +
-                object : CoroutineDispatcher() {
-                    override fun dispatch(
-                        context: CoroutineContext,
-                        block: Runnable,
-                    ) = throw error
-                },
-        )
+    private fun scopeWhoseDispatcherThrows(
+        error: Throwable = IllegalStateException("the dispatcher is down"),
+        limited: Boolean = false,
+    ) = scopeOn(dispatcherThatThrows { error }, limited)
+
+    /** The lock of the background task: with an old entry in the cache the task is a refresh, else a cache write. */
+    private fun lockTypeOfTheTask(refresh: Boolean): LockType {
+        if (refresh) cache[key] = oldEntry()
+        return if (refresh) LockType.UPDATE else LockType.CREATE
+    }
 
     @Test
     fun theCallerShouldGetItsDataAndTheCreationLockShouldBeReleasedWhenTheScopeCannotStartTheCacheWrite() =
@@ -1239,54 +1257,91 @@ class ReqShieldCreationSignalTest {
             assertTrue(lock.isFree(LockType.UPDATE), "the refresh lock is still held")
         }
 
+    /** The dispatcher cancels the caller and then throws the caller's cancellation. */
+    private fun assertTheCallerGetsItsCancellationWhenTheScopeCannotStartItsTask(
+        refresh: Boolean,
+        limited: Boolean,
+    ) = runBlocking {
+        val lockType = lockTypeOfTheTask(refresh)
+        val lock = KeyLocalLock(60_000)
+        val caller = AtomicReference<Job>()
+        val returned = AtomicReference<ReqShieldData<Product>>()
+        val scope =
+            scopeOn(
+                dispatcherThatThrows {
+                    caller.get().cancel()
+                    CancellationException("the caller is cancelled")
+                },
+                limited,
+            )
+        val shield = shield(keyLock = lock, scope = scope)
+
+        val request =
+            callers.async {
+                caller.set(coroutineContext.job)
+                returned.set(shield.getAndSetReqShieldData(key, { product }, 10_000))
+            }
+
+        withTimeout(2_000) { request.join() }
+        assertTrue(request.isCancelled, "the caller was not cancelled")
+        // The cancellation goes on instead of the data
+        assertNull(returned.get(), "the cancelled caller got its data")
+        assertNull(signal())
+        assertNull(refreshSignal())
+        assertTrue(lock.isFree(lockType), "the $lockType lock is still held")
+    }
+
+    private fun assertTheCallerGetsTheErrorOfTheDispatcherAfterTheLockWasReleased(
+        refresh: Boolean,
+        limited: Boolean,
+    ) = runBlocking {
+        val lockType = lockTypeOfTheTask(refresh)
+        val lock = KeyLocalLock(60_000)
+        val shield =
+            shield(
+                keyLock = lock,
+                scope = scopeWhoseDispatcherThrows(NotImplementedError("the dispatcher throws an Error"), limited),
+            )
+
+        // An Error is not a failure to start the task, so it goes on unchanged
+        assertFailsWith<NotImplementedError> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+
+        assertNull(signal())
+        assertNull(refreshSignal())
+        assertTrue(lock.isFree(lockType), "the $lockType lock is still held")
+    }
+
     @Test
     fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileTheScopeCannotStartTheCacheWrite() =
-        runBlocking {
-            val lock = KeyLocalLock(60_000)
-            val caller = AtomicReference<Job>()
-            val returned = AtomicReference<ReqShieldData<Product>>()
-            // The dispatcher cancels the caller and then throws the caller's cancellation
-            val scope =
-                CoroutineScope(
-                    SupervisorJob() +
-                        object : CoroutineDispatcher() {
-                            override fun dispatch(
-                                context: CoroutineContext,
-                                block: Runnable,
-                            ) {
-                                caller.get().cancel()
-                                throw CancellationException("the caller is cancelled")
-                            }
-                        },
-                )
-            val shield = shield(keyLock = lock, scope = scope)
+        assertTheCallerGetsItsCancellationWhenTheScopeCannotStartItsTask(refresh = false, limited = false)
 
-            val request =
-                callers.async {
-                    caller.set(coroutineContext.job)
-                    returned.set(shield.getAndSetReqShieldData(key, { product }, 10_000))
-                }
+    @Test
+    fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileTheScopeCannotStartTheRefresh() =
+        assertTheCallerGetsItsCancellationWhenTheScopeCannotStartItsTask(refresh = true, limited = false)
 
-            withTimeout(2_000) { request.join() }
-            assertTrue(request.isCancelled, "the caller was not cancelled")
-            // The cancellation goes on instead of the data
-            assertNull(returned.get(), "the cancelled caller got its data")
-            assertNull(signal())
-            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
-        }
+    @Test
+    fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileALimitedScopeCannotStartTheCacheWrite() =
+        assertTheCallerGetsItsCancellationWhenTheScopeCannotStartItsTask(refresh = false, limited = true)
+
+    @Test
+    fun theCallerShouldGetItsCancellationWhenItIsCancelledWhileALimitedScopeCannotStartTheRefresh() =
+        assertTheCallerGetsItsCancellationWhenTheScopeCannotStartItsTask(refresh = true, limited = true)
 
     @Test
     fun theCallerShouldGetAnErrorOfTheDispatcherAfterTheCreationLockWasReleased() =
-        runBlocking {
-            val lock = KeyLocalLock(60_000)
-            val shield = shield(keyLock = lock, scope = scopeWhoseDispatcherThrows(NotImplementedError("the dispatcher throws an Error")))
+        assertTheCallerGetsTheErrorOfTheDispatcherAfterTheLockWasReleased(refresh = false, limited = false)
 
-            // An Error is not a failure to start the task, so it goes on unchanged
-            assertFailsWith<NotImplementedError> { shield.getAndSetReqShieldData(key, { product }, 10_000) }
+    @Test
+    fun theCallerShouldGetAnErrorOfTheDispatcherAfterTheRefreshLockWasReleased() =
+        assertTheCallerGetsTheErrorOfTheDispatcherAfterTheLockWasReleased(refresh = true, limited = false)
 
-            assertNull(signal())
-            assertTrue(lock.isFree(LockType.CREATE), "the creation lock is still held")
-        }
+    @Test
+    fun theCallerShouldGetAnErrorOfALimitedDispatcherAfterTheCreationLockWasReleased() =
+        assertTheCallerGetsTheErrorOfTheDispatcherAfterTheLockWasReleased(refresh = false, limited = true)
+
+    @Test
+    fun theCallerShouldGetAnErrorOfALimitedDispatcherAfterTheRefreshLockWasReleased() =
+        assertTheCallerGetsTheErrorOfTheDispatcherAfterTheLockWasReleased(refresh = true, limited = true)
 
     @Test
     fun theCreationLockShouldBeReleasedWhenTheSupplierThrowsAnError() =
