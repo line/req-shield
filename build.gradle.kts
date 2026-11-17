@@ -18,7 +18,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
-version = "1.4.0"
+version = "1.3.0"
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -188,12 +188,21 @@ subprojects {
                 val managedVersionProperty =
                     when (requested.group) {
                         // jackson-annotations has a version scheme of its own.
-                        "com.fasterxml.jackson.core" ->
+                        "com.fasterxml.jackson.core" -> {
                             "jackson-bom.version".takeIf { requested.name != "jackson-annotations" }
+                        }
 
-                        "org.apache.httpcomponents.client5" -> "httpclient5.version"
-                        "org.apache.httpcomponents.core5" -> "httpcore5.version"
-                        else -> null
+                        "org.apache.httpcomponents.client5" -> {
+                            "httpclient5.version"
+                        }
+
+                        "org.apache.httpcomponents.core5" -> {
+                            "httpcore5.version"
+                        }
+
+                        else -> {
+                            null
+                        }
                     }
                 managedVersionProperty?.let { useVersion(springBoot3ExampleManagedVersions.getValue(it)) }
             }
