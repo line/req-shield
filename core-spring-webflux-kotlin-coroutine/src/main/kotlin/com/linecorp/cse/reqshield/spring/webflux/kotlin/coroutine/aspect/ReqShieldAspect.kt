@@ -130,7 +130,7 @@ open class ReqShieldAspect<T>(
             // leaves the cache untouched, and a failing eviction is reported to the caller.
             val result =
                 joinPoint.proceedCoroutine().let { rtn ->
-                    // Spring 6.1+ adapts a suspend target to a cold Mono inside AOP.
+                    // Spring adapts a suspend target to a cold Mono inside AOP.
                     if (rtn is Mono<*>) {
                         rtn.awaitSingleOrNull()
                     } else {
@@ -226,9 +226,8 @@ open class ReqShieldAspect<T>(
         joinPoint: ProceedingJoinPoint,
     ): String {
         val method = keySource.method
-        // Spring 6.1+ (the supported minimum is 6.2) drops the trailing Continuation of a suspend function itself
-        // in MethodBasedEvaluationContext, so the raw arguments are passed on. The default key is built here, so the
-        // Continuation is dropped here. A keyGenerator bean still receives the raw arguments, Continuation included.
+        // Spring drops the trailing Continuation of a suspend function itself in MethodBasedEvaluationContext,
+        // so the raw arguments are passed on. The default key is built here, so the Continuation is dropped here. A keyGenerator bean still receives the raw arguments, Continuation included.
         val args = joinPoint.args
 
         val key =

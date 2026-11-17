@@ -71,9 +71,6 @@ The library is organized into several core modules:
 
 ### Running Examples
 ```bash
-./gradlew :req-shield-spring-boot3-example:bootRun                       # Spring Boot 3.5 (the supported minimum)
-./gradlew :req-shield-spring-boot3-webflux-example:bootRun
-./gradlew :req-shield-spring-boot3-webflux-kotlin-coroutine-example:bootRun
 ./gradlew :req-shield-spring-boot4-example:bootRun                       # Spring Boot 4.1
 ./gradlew :req-shield-spring-boot4-webflux-example:bootRun
 ./gradlew :req-shield-spring-boot4-webflux-kotlin-coroutine-example:bootRun
@@ -125,7 +122,7 @@ Contains shared:
 ## Testing Guidelines
 
 ### Test Infrastructure
-- Uses JUnit 5 platform
+- Uses JUnit Jupiter 6 on the JUnit Platform (the version of the Spring Boot 4.0 BOM; Spring Framework 7's `SpringExtension` fails on JUnit 5.9)
 - MockK for Kotlin mocking
 - Testcontainers for integration tests (Redis); set `TEST_REDIS_HOST`/`TEST_REDIS_PORT` to use an external Redis instead (CI does this)
 - Awaitility for asynchronous testing
@@ -150,25 +147,25 @@ Contains shared:
 ## Version Compatibility
 
 ### Java/Kotlin Compatibility
-- **All modules**: Java 17+; library consumers need Kotlin 1.9+
-- **Example applications**: `req-shield-spring-boot3-*` run on Spring Boot 3.5 (the supported minimum),
-  `req-shield-spring-boot4-*` run the same code on Spring Boot 4.1
+- **All modules**: Java 21+ (bytecode target 21); library consumers need Kotlin 2.2+
+- **Example applications**: `req-shield-spring-boot4-*` run on Spring Boot 4.1. Spring Boot 3 is not supported.
 
 ### Kotlin Toolchain
 - The build uses the Kotlin 2.4 compiler (K2), set by `kotlin` in `libs.versions.toml`.
-- Library modules compile with `languageVersion`/`apiVersion` 2.0 and publish `kotlin-stdlib`/`kotlin-reflect` at
-  `kotlinApi` (2.0.21) instead of the compiler's version (`kotlin.stdlib.default.dependency=false`). This keeps the
-  published metadata and stdlib readable by consumers on Kotlin 1.9+, the default Kotlin of Spring Boot 3.5. Kotlin
-  documents that 1.9 reads most 2.0 binaries; kotlinc 1.9.25 and 2.0.21 consumers were checked (1.8.22 also worked,
-  but no Kotlin guarantee covers it, so 1.8 is not supported).
-  Raising either value raises the minimum Kotlin version of consumers. Kotlin 2.4 already reports language version
-  2.0 as deprecated, so a later Kotlin upgrade may force a higher value and a higher consumer minimum.
+- Library modules compile with `languageVersion`/`apiVersion` 2.2 and publish `kotlin-stdlib`/`kotlin-reflect` at
+  `kotlinApi` (2.2.21) instead of the compiler's version (`kotlin.stdlib.default.dependency=false`). This keeps the
+  published metadata and stdlib readable by consumers on Kotlin 2.2+, the default Kotlin of Spring Boot 4.0 (the
+  supported minimum).
+  Raising either value raises the minimum Kotlin version of consumers. Kotlin 2.4 deprecated language version 2.0
+  and asked for 2.2; 2.2 compiles without that warning.
+- The Reactor modules (`reactorApiProjects` in the root build) compile with `-Xjspecify-annotations=warn`: Reactor
+  3.8 declares `Mono`'s type parameter non-null, and the Reactor API still uses `Mono<ReqShieldData<T>?>`.
 - Example applications are not published and use the compiler's stdlib.
 - The stdlib is an `api` dependency of the library modules, so it stays in the POM's compile scope for Java callers.
 
 ### Framework Support
-- Spring Boot 3.5+ (Spring Framework 6.2+)
-- Project Reactor 3.7+
-- Kotlin Coroutines 1.8+
-- The library compiles and runs its tests against these minimums. The boot3 examples run it on Spring Boot 3.5 and
-  the boot4 examples on Spring Boot 4.1; keep the two sets in sync when changing one.
+- Spring Boot 4.0+ (Spring Framework 7.0+). Spring Boot 3 is not supported.
+- Project Reactor 3.8+
+- Kotlin Coroutines 1.10+
+- The library compiles and runs its tests against these minimums (`spring`, `springBoot`, `reactor`,
+  `kotlinCoroutine` in `libs.versions.toml`). The boot4 examples run it on Spring Boot 4.1 (`springBootExample`).

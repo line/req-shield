@@ -17,7 +17,7 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
-    alias(libs.plugins.spring.boot4)
+    alias(libs.plugins.spring.boot)
     alias(libs.plugins.spring.dependency.management)
 }
 
@@ -44,11 +44,4 @@ dependencies {
     testImplementation(testFixtures(project(":support")))
     testImplementation(rootProject.libs.spring.boot.starter.test)
     testImplementation(rootProject.libs.reactor.test)
-}
-
-// Reactor 3.8 (Spring Boot 4) declares Mono's type parameter non-null with JSpecify annotations, which the Kotlin
-// compiler enforces as errors by default. The library API still uses nullable type arguments such as
-// Mono<ReqShieldData<T>?> (AsyncCache, core-reactor's ReqShield), so this example reports them as warnings.
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    compilerOptions.freeCompilerArgs.add("-Xjspecify-annotations=warn")
 }

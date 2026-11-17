@@ -422,11 +422,20 @@ class ReqShield<T>(
             reqShieldConfig.scope.launch(context, start = CoroutineStart.ATOMIC, block = task)
         } catch (e: Throwable) {
             if (token != null) releaseQuietly(key, lockType, token, "after the scope failed to start its task")
-            if (e !is Exception) throw e
-            rethrowIfCallerCancelled(e)
-            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key.cache, e)
+            val failure = unwrapDispatchException(e)
+            if (failure !is Exception) throw failure
+            rethrowIfCallerCancelled(failure)
+            log.warn("[Req-Shield] the scope could not start the background task of key '{}', so it is skipped", key.cache, failure)
         }
     }
+
+    /**
+     * Returns the exception that the dispatcher threw. kotlinx.coroutines wraps it in its internal DispatchException,
+     * which is always an [Exception], so without this an [Error] or the caller's cancellation would be logged as a
+     * skipped task.
+     */
+    private fun unwrapDispatchException(e: Throwable): Throwable =
+        if (e.javaClass.name == DISPATCH_EXCEPTION_CLASS_NAME) e.cause ?: e else e
 
     /**
      * Writes [reqShieldData] and releases the lock, unless the lock timed out during the supplier call and another
@@ -774,6 +783,9 @@ class ReqShield<T>(
 
     companion object {
         private val instanceSequence = AtomicLong()
+
+        // Internal to kotlinx.coroutines, so it is matched by name
+        private const val DISPATCH_EXCEPTION_CLASS_NAME = "kotlinx.coroutines.DispatchException"
 
         /**
          * For instances with a local lock. Shared like the local lock map: requests for one key collapse across

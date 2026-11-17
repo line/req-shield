@@ -67,7 +67,7 @@ abstract class AbstractRedisTest {
                 // Spring Boot 2.x style
                 properties["spring.redis.host"] = host
                 properties["spring.redis.port"] = port
-                // Spring Boot 3.x (Spring Data Redis) style
+                // Spring Boot 3.x+ (Spring Data Redis) style
                 properties["spring.data.redis.host"] = host
                 properties["spring.data.redis.port"] = port
 

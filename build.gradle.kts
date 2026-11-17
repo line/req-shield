@@ -160,17 +160,13 @@ allprojects {
     }
 }
 
-// Spring Boot 3.5 BOM properties that the req-shield-spring-boot3-* examples raise to patched releases of the same
-// lines. The Spring Boot 4 BOM already manages patched versions.
-val springBoot3ExampleManagedVersions =
-    mapOf(
-        "netty.version" to libs.versions.netty.get(),
-        "log4j2.version" to "2.26.1",
-        "commons-lang3.version" to "3.21.0",
-        "tomcat.version" to "10.1.61",
-        "jackson-bom.version" to "2.21.8",
-        "httpclient5.version" to "5.6.5",
-        "httpcore5.version" to "5.4.4",
+// Modules that implement or call the Reactor API of the library (see the compiler options below).
+val reactorApiProjects =
+    setOf(
+        "core-reactor",
+        "core-spring-webflux",
+        "req-shield-spring-boot4-webflux-example",
+        "req-shield-benchmark-example",
     )
 
 subprojects {
@@ -178,55 +174,31 @@ subprojects {
         plugin("org.jlleitschuh.gradle.ktlint")
     }
 
-    if (project.name.startsWith("req-shield-spring-boot3-")) {
-        springBoot3ExampleManagedVersions.forEach { (property, version) -> extra[property] = version }
-
-        // The Spring Boot 3.5 Gradle plugin brings Jackson and HttpComponents versions with known vulnerabilities
-        // to the build classpath. The BOM properties above do not reach that classpath.
-        buildscript.configurations.configureEach {
-            resolutionStrategy.eachDependency {
-                val managedVersionProperty =
-                    when (requested.group) {
-                        // jackson-annotations has a version scheme of its own.
-                        "com.fasterxml.jackson.core" -> {
-                            "jackson-bom.version".takeIf { requested.name != "jackson-annotations" }
-                        }
-
-                        "org.apache.httpcomponents.client5" -> {
-                            "httpclient5.version"
-                        }
-
-                        "org.apache.httpcomponents.core5" -> {
-                            "httpcore5.version"
-                        }
-
-                        else -> {
-                            null
-                        }
-                    }
-                managedVersionProperty?.let { useVersion(springBoot3ExampleManagedVersions.getValue(it)) }
-            }
-        }
-    }
-
     java {
         withJavadocJar()
         withSourcesJar()
 
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     tasks.withType<KotlinCompile>().configureEach {
         compilerOptions {
             freeCompilerArgs.add("-Xjsr305=strict")
-            jvmTarget.set(JvmTarget.JVM_17)
-            // Library modules are compiled by the K2 compiler but emit Kotlin 2.0 metadata and use only the
-            // 2.0 standard library API, so that consumers on older Kotlin compilers can still read them.
+            // Reactor 3.8 declares Mono's type parameter non-null with JSpecify annotations, which the Kotlin
+            // compiler enforces as errors by default. The Reactor API of the library still uses nullable type
+            // arguments such as Mono<ReqShieldData<T>?>, so the modules that implement or call it report them
+            // as warnings.
+            if (project.name in reactorApiProjects) {
+                freeCompilerArgs.add("-Xjspecify-annotations=warn")
+            }
+            jvmTarget.set(JvmTarget.JVM_21)
+            // Library modules are compiled by the K2 compiler but emit Kotlin 2.2 metadata and use only the
+            // 2.2 standard library API, so that consumers on older Kotlin compilers can still read them.
             // Example applications are not published and use the compiler defaults.
             if (!project.name.endsWith("-example")) {
-                languageVersion.set(KotlinVersion.KOTLIN_2_0)
-                apiVersion.set(KotlinVersion.KOTLIN_2_0)
+                languageVersion.set(KotlinVersion.KOTLIN_2_2)
+                apiVersion.set(KotlinVersion.KOTLIN_2_2)
             }
         }
     }
