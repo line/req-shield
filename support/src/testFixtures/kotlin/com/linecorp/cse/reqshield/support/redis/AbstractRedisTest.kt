@@ -64,10 +64,10 @@ abstract class AbstractRedisTest {
                 val host = redisHost
                 val port = redisPort
 
-                // Spring Boot 2.x style
+                // Read by the @Value fields of the ReqShieldAspectRedisIntegrationTest classes
                 properties["spring.redis.host"] = host
                 properties["spring.redis.port"] = port
-                // Spring Boot 3.x (Spring Data Redis) style
+                // Read by Spring Data Redis (Spring Boot 3 and later)
                 properties["spring.data.redis.host"] = host
                 properties["spring.data.redis.port"] = port
 

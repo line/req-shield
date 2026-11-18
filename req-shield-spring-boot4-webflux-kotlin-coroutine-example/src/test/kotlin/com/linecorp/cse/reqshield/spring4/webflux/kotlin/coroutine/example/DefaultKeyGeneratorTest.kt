@@ -35,7 +35,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * This Boot 4 test checks that distinct arguments produce distinct cache keys.
+ * This test checks that distinct arguments produce distinct cache keys.
  * The default key omits the trailing Continuation of a suspend function.
  */
 @SpringBootTest(

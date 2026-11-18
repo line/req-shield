@@ -11,8 +11,6 @@ concurrency:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 jobs:
   ktlint:
@@ -21,8 +19,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      - name: reviewdog / ktlint
-        uses: ScaCap/action-ktlint@v1
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          ktlint_version: 1.2.1
+          distribution: 'temurin'
+          java-version: 21
+      # The ktlint Gradle plugin of the build checks every module with the same rules as a local build.
+      # It needs no write permission, unlike a reviewdog reporter, which failed to post to the Checks API.
+      - name: ktlint
+        run: ./gradlew ktlintCheck

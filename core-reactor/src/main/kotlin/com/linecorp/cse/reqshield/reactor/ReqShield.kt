@@ -433,7 +433,7 @@ class ReqShield<T>(
             .defer { executeGetCacheFunction(reqShieldConfig.getCacheFunction, key.cache) }
             // A global lock can emit on its client's event loop; keep cache reads off that thread.
             .subscribeOn(reqShieldConfig.scheduler)
-            .flatMap { Mono.justOrEmpty(it) }
+            .flatMap { Mono.justOrEmpty<ReqShieldData<T>>(it) }
             .switchIfEmpty(
                 Mono.defer {
                     // A cancel that already released the lock leaves nothing to create.
@@ -571,7 +571,7 @@ class ReqShield<T>(
         executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
             // The supplier can emit on its client's event loop; keep cache reads off that thread.
             .subscribeOn(reqShieldConfig.scheduler)
-            .flatMap { Mono.justOrEmpty(it) }
+            .flatMap { Mono.justOrEmpty<ReqShieldData<T>>(it) }
             .map { cachedData -> cachedData.createdAt != seenCreatedAt }
             .defaultIfEmpty(false)
             .onErrorResume { e ->
@@ -781,7 +781,7 @@ class ReqShield<T>(
     ): Mono<ReqShieldData<T>> =
         executeGetCacheFunction(reqShieldConfig.getCacheFunction, key)
             .doOnSuccess { consecutiveGetCacheFailures.set(0) }
-            .flatMap { reqShieldData -> Mono.justOrEmpty(reqShieldData) }
+            .flatMap { reqShieldData -> Mono.justOrEmpty<ReqShieldData<T>>(reqShieldData) }
             .onErrorResume { e ->
                 val failures = consecutiveGetCacheFailures.incrementAndGet()
                 log.warn(

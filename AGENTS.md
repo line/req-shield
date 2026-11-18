@@ -9,7 +9,7 @@
 - `./gradlew build` compiles all modules, runs unit tests, and assembles artifacts; pass `--parallel` for faster local feedback.
 - `./gradlew test` executes Kotlin/JVM unit tests across every enabled module.
 - `./gradlew ktlintCheck` enforces the project's formatting contract before you open a PR.
-- Use `./gradlew :req-shield-spring-boot3-example:bootRun` (or another sample module) to manually exercise integration paths.
+- Use `./gradlew :req-shield-spring-boot4-example:bootRun` (or another sample module) to manually exercise integration paths.
 
 ## Coding Style & Naming Conventions
 - Kotlin sources use 4-space indentation, `UpperCamelCase` for types, and `lowerCamelCase` for functions and properties.
@@ -18,7 +18,7 @@
 - Prefer early-return patterns and meaningful exception messages; align with the `ErrorCode` enums already defined.
 
 ## Testing Guidelines
-- Write tests with JUnit 5 (`org.junit.jupiter`) and place them under `src/test/kotlin` mirroring the `src/main` package.
+- Write tests with JUnit Jupiter 6 (`org.junit.jupiter`) and place them under `src/test/kotlin` mirroring the `src/main` package.
 - Use descriptive method names such as `shouldCollapseConcurrentRequests()` and cover both success and failure paths.
 - When adding integration behaviour, extend the corresponding example module and run `./gradlew test` before submission.
 

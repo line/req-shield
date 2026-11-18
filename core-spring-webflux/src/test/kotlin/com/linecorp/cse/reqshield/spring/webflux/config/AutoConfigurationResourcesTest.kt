@@ -28,7 +28,7 @@ class AutoConfigurationResourcesTest {
     private val expectedClassName = LibAutoConfiguration::class.java.name
 
     @Test
-    fun `Boot 3 AutoConfiguration imports names the module's LibAutoConfiguration`() {
+    fun `AutoConfiguration imports names the module's LibAutoConfiguration`() {
         val names = readClasspathResourceLines("META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports")
 
         assertTrue(
