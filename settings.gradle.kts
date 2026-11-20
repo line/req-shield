@@ -29,6 +29,14 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "0.5.0"
 }
 
+// Spring Boot's Gradle plugin brings commons-lang3 3.16.0 through commons-compress.
+// Constrain the build classpath before project plugins resolve, without changing application dependencies.
+gradle.beforeProject {
+    buildscript.dependencies.constraints.add("classpath", "org.apache.commons:commons-lang3:3.18.0") {
+        because("Fix uncontrolled recursion in ClassUtils.getClass (Dependabot #294)")
+    }
+}
+
 rootProject.name = "req-shield"
 include("core")
 include("core-reactor")
