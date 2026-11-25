@@ -93,9 +93,10 @@ allprojects {
         finalizedBy(tasks.jacocoTestReport)
     }
 
-    tasks.withType<JacocoReport> {
+    tasks.named<JacocoReport>("jacocoTestReport") {
         reports {
             xml.required.set(true)
+            html.required.set(true)
         }
     }
 
@@ -260,5 +261,45 @@ nexusPublishing {
             nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
             snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
         }
+    }
+}
+
+tasks.register<JacocoReport>("jacocoAggregateReport") {
+    dependsOn(subprojects.map { it.tasks.named("test") })
+
+    additionalSourceDirs.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().allSource.srcDirs
+            },
+        ),
+    )
+    sourceDirectories.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().allSource.srcDirs
+            },
+        ),
+    )
+    classDirectories.setFrom(
+        files(
+            subprojects.map {
+                it.sourceSets.main.get().output
+            },
+        ),
+    )
+    executionData.setFrom(
+        files(
+            subprojects.map {
+                it.buildDir.resolve("jacoco/test.exec")
+            },
+        ),
+    )
+
+    reports {
+        xml.required.set(true)
+        xml.outputLocation.set(file("$buildDir/reports/jacoco/test/jacocoTestReport.xml"))
+        html.required.set(true)
+        html.outputLocation.set(file("$buildDir/reports/jacoco/test/html"))
     }
 }
