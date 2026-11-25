@@ -27,23 +27,48 @@ import com.linecorp.cse.reqshield.support.model.ReqShieldData
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
+import reactor.util.context.ContextView
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Mono<Boolean>,
     val getCacheFunction: (String) -> Mono<ReqShieldData<T>?>,
-    val globalLockFunction: ((String, Long) -> Mono<Boolean>)? = null,
-    val globalUnLockFunction: ((String) -> Mono<Boolean>)? = null,
+    /**
+     * Acquires the distributed lock. Called with (lockKey, token, ttlMillis) and must emit
+     * true only when this caller acquired the lock.
+     *
+     * The token identifies the owner, so the lock must be stored together with it -
+     * `SET key token NX PX ttl` is the recommended implementation.
+     */
+    val globalLockFunction: ((String, String, Long) -> Mono<Boolean>)? = null,
+    /**
+     * Releases the distributed lock. Called with (lockKey, token).
+     *
+     * It must release the lock only when the stored value still equals the token
+     * (compare-and-delete, e.g. a Lua script doing `get` + `del`), otherwise a caller whose
+     * lock already expired could release the lock of the next owner.
+     */
+    val globalUnLockFunction: ((String, String) -> Mono<Boolean>)? = null,
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val scheduler: Scheduler = Schedulers.boundedElastic(),
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
-    val keyLock: KeyLock =
-        if (isLocalLock) {
-            KeyLocalLock(lockTimeoutMillis)
-        } else {
-            KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
-        },
+    val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache functions or the lock functions choose
+     * their store from the Reactor `Context` of the caller (one store for each tenant, for example): give the
+     * same text for requests that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It gets the `Context` of the caller and runs at most once for a request, not at all for a request that finds
+     * a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`, and a request that got an old entry skips the refresh.
+     */
+    val storeScopeFunction: ((ContextView) -> String)? = null,
 ) {
     init {
         if (!isLocalLock) {
@@ -55,4 +80,40 @@ data class ReqShieldConfiguration<T>(
             }
         }
     }
+}
+
+/**
+ * Builds the [KeyLock] used when the caller does not pass one.
+ *
+ * A default parameter expression is evaluated before the init block, so the global lock functions
+ * must be validated here as well to report a missing one as an [IllegalArgumentException].
+ */
+private fun defaultKeyLock(
+    isLocalLock: Boolean,
+    globalLockFunction: ((String, String, Long) -> Mono<Boolean>)?,
+    globalUnLockFunction: ((String, String) -> Mono<Boolean>)?,
+    lockTimeoutMillis: Long,
+): KeyLock =
+    if (isLocalLock) {
+        KeyLocalLock(lockTimeoutMillis)
+    } else {
+        KeyGlobalLock(
+            requireNotNull(globalLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_LOCK_FUNCTION.message },
+            requireNotNull(globalUnLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_UNLOCK_FUNCTION.message },
+            lockTimeoutMillis,
+        )
+    }
+
+enum class ReqShieldWorkMode {
+    /** Requests are collapsed with the configured lock when an entry is created and when it is refreshed. */
+    CREATE_AND_UPDATE_CACHE,
+
+    /**
+     * The configured lock is used when an entry is created. A refresh takes a local lock of this JVM instead, so one
+     * instance runs one refresh of a key at a time and a global lock gets no call for a refresh.
+     */
+    ONLY_CREATE_CACHE,
+
+    /** The configured lock is used when an entry is refreshed. On a cache miss each request calls the supplier. */
+    ONLY_UPDATE_CACHE,
 }

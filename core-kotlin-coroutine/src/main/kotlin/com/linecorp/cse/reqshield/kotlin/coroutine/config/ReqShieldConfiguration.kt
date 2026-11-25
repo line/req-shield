@@ -24,22 +24,60 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIM
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import org.slf4j.LoggerFactory
+import kotlin.coroutines.CoroutineContext
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: suspend (String, ReqShieldData<T>, Long) -> Boolean,
     val getCacheFunction: suspend (String) -> ReqShieldData<T>?,
-    val globalLockFunction: (suspend (String, Long) -> Boolean)? = null,
-    val globalUnLockFunction: (suspend (String) -> Boolean)? = null,
+    /**
+     * Acquires the global lock. Invoked with (lockKey, token, ttlMillis) and must return true only
+     * when this caller is the one that acquired the lock.
+     *
+     * Recommended Redis implementation: `SET lockKey token NX PX ttlMillis`.
+     */
+    val globalLockFunction: (suspend (String, String, Long) -> Boolean)? = null,
+    /**
+     * Releases the global lock. Invoked with (lockKey, token) and must release the lock only when
+     * the stored value is still equal to the given token (compare-and-delete), so an owner whose
+     * lock already expired cannot release the lock of the next owner.
+     *
+     * Recommended Redis implementation: a Lua script that compares `GET lockKey` with the token and
+     * deletes the key only on a match.
+     */
+    val globalUnLockFunction: (suspend (String, String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
-    val keyLock: KeyLock =
-        if (isLocalLock) {
-            KeyLocalLock(lockTimeoutMillis)
-        } else {
-            KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
-        },
+    val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    /**
+     * Scope that runs every fire-and-forget cache write.
+     *
+     * The default is a process-wide shared scope, so creating a configuration never leaks a Job.
+     * Callers that need lifecycle control (e.g. draining pending writes on shutdown) should pass
+     * their own scope and cancel it themselves.
+     */
+    val scope: CoroutineScope = defaultScope,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache functions or the lock functions choose
+     * their store from the coroutine context of the caller. An example is one store for each tenant. Give the same
+     * text for requests that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It gets the coroutine context of the caller and runs at most once for a request. It does not run for a request
+     * that finds a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`. A request that got an old entry then skips the refresh and logs a warning.
+     */
+    val storeScopeFunction: ((CoroutineContext) -> String)? = null,
 ) {
     init {
         if (!isLocalLock) {
@@ -51,4 +89,59 @@ data class ReqShieldConfiguration<T>(
             }
         }
     }
+
+    companion object {
+        private val log = LoggerFactory.getLogger(ReqShieldConfiguration::class.java)
+
+        /**
+         * Shared scope for background cache writes, created on first use.
+         *
+         * SupervisorJob keeps one failed write from cancelling the others, and the exception handler
+         * is the last-resort backstop for anything the write path did not already log.
+         */
+        private val defaultScope: CoroutineScope by lazy {
+            CoroutineScope(
+                SupervisorJob() + Dispatchers.IO +
+                    CoroutineExceptionHandler { _, e ->
+                        log.error("[Req-Shield] background task failed", e)
+                    },
+            )
+        }
+    }
+}
+
+/**
+ * Builds the [KeyLock] used when the caller does not pass one.
+ *
+ * A default parameter expression is evaluated before the init block, so the global lock functions
+ * must be validated here as well to report a missing one as an [IllegalArgumentException].
+ */
+private fun defaultKeyLock(
+    isLocalLock: Boolean,
+    globalLockFunction: (suspend (String, String, Long) -> Boolean)?,
+    globalUnLockFunction: (suspend (String, String) -> Boolean)?,
+    lockTimeoutMillis: Long,
+): KeyLock =
+    if (isLocalLock) {
+        KeyLocalLock(lockTimeoutMillis)
+    } else {
+        KeyGlobalLock(
+            requireNotNull(globalLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_LOCK_FUNCTION.message },
+            requireNotNull(globalUnLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_UNLOCK_FUNCTION.message },
+            lockTimeoutMillis,
+        )
+    }
+
+enum class ReqShieldWorkMode {
+    /** Requests are collapsed with the configured lock when an entry is created and when it is refreshed. */
+    CREATE_AND_UPDATE_CACHE,
+
+    /**
+     * The configured lock is used when an entry is created. A refresh takes a local lock of this JVM instead, so one
+     * instance runs one refresh of a key at a time and a global lock gets no call for a refresh.
+     */
+    ONLY_CREATE_CACHE,
+
+    /** The configured lock is used when an entry is refreshed. On a cache miss each request calls the supplier. */
+    ONLY_UPDATE_CACHE,
 }

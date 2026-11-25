@@ -18,97 +18,154 @@ package com.linecorp.cse.reqshield.spring.webflux.aspect
 
 import com.linecorp.cse.reqshield.reactor.ReqShield
 import com.linecorp.cse.reqshield.reactor.config.ReqShieldConfiguration
+import com.linecorp.cse.reqshield.spring.webflux.annotation.NullHandling
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict
 import com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable
 import com.linecorp.cse.reqshield.spring.webflux.cache.AsyncCache
+import com.linecorp.cse.reqshield.spring.webflux.cache.GlobalLockSupport
+import com.linecorp.cse.reqshield.spring.webflux.cache.StoreScopeSupport
+import com.linecorp.cse.reqshield.support.utils.cacheKeyOfArguments
+import com.linecorp.cse.reqshield.support.utils.cacheKeyOfValue
+import com.linecorp.cse.reqshield.support.utils.requireOwnToString
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.reflect.MethodSignature
-import org.springframework.cache.interceptor.SimpleKeyGenerator
+import org.springframework.aop.support.AopUtils
+import org.springframework.beans.factory.BeanFactory
+import org.springframework.beans.factory.BeanFactoryAware
+import org.springframework.cache.interceptor.KeyGenerator
+import org.springframework.context.expression.MethodBasedEvaluationContext
+import org.springframework.core.DefaultParameterNameDiscoverer
+import org.springframework.core.MethodClassKey
 import org.springframework.core.annotation.AnnotationUtils
-import org.springframework.stereotype.Component
+import org.springframework.core.convert.TypeDescriptor
+import org.springframework.expression.EvaluationContext
+import org.springframework.expression.Expression
+import org.springframework.expression.spel.standard.SpelExpressionParser
 import org.springframework.util.StringUtils
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Scheduler
+import reactor.core.scheduler.Schedulers
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
 @Aspect
-@Component
-class ReqShieldAspect<T>(
+open class ReqShieldAspect<T>(
     private val asyncCache: AsyncCache<T>,
-) {
-    private val keyGenerator = SimpleKeyGenerator()
-    internal val reqShieldMap = ConcurrentHashMap<String, ReqShield<T>>()
+) : BeanFactoryAware {
+    private lateinit var beanFactory: BeanFactory
+
+    /**
+     * Runs the asynchronous cache writes and the cache polling of every ReqShield this aspect creates: the
+     * application's bean named `reqShieldScheduler` when there is one, otherwise Reactor's process-wide
+     * [Schedulers.boundedElastic], which is shared and therefore never disposed here.
+     *
+     * The library registers no bean of its own, so an application bean of that name replaces the default instead of
+     * clashing with it. Resolved in [setBeanFactory], at startup, so that a bean of that name which is not a
+     * `Scheduler` fails the context refresh instead of being ignored.
+     */
+    private lateinit var scheduler: Scheduler
+
+    private val spelParser = SpelExpressionParser()
+    private val parameterNameDiscoverer = DefaultParameterNameDiscoverer()
+
+    /** Global locking is only available when the cache implementation opts in to it. */
+    private val lockSupport = asyncCache as? GlobalLockSupport
+
+    /** A cache that chooses its store from the Reactor Context names that store, so requests of two stores do not wait for each other. */
+    private val storeScopeSupport = asyncCache as? StoreScopeSupport
+
+    /** What a call of one intercepted method needs that does not depend on its arguments. */
+    private val cacheableMethods = ConcurrentHashMap<MethodClassKey, CacheableMethod<T>>()
+    private val evictMethods = ConcurrentHashMap<MethodClassKey, KeySource>()
+
+    /** A ReqShield is configured by the annotation alone, so one instance per annotated method is enough. */
+    internal val reqShieldMap = ConcurrentHashMap<Method, ReqShield<T>>()
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheable)")
     fun aroundTargetCacheable(joinPoint: ProceedingJoinPoint): Mono<Any?> {
-        val annotation = getCacheableAnnotation(joinPoint)
-        val reqShield = getOrCreateReqShield(joinPoint)
-        val cacheKey = getCacheableCacheKey(joinPoint)
+        val cacheable = getCacheableMethod(joinPoint)
+        val cacheKey = buildCacheKey(cacheable.keySource, joinPoint)
 
-        return reqShield
-            .getAndSetReqShieldData(
-                cacheKey,
-                {
-                    joinPoint.proceed() as Mono<T?>
-                },
-                annotation.timeToLiveMillis,
-            ).mapNotNull { it.value }
+        // Mono.map rejects a null result, so the null decision is taken on the wrapper instead of on the value.
+        val reqShieldDataMono =
+            cacheable.reqShield
+                .getAndSetReqShieldData(
+                    cacheKey,
+                    {
+                        joinPoint.proceed() as Mono<T?>
+                    },
+                    cacheable.timeToLiveMillis,
+                )
+
+        return when (cacheable.nullHandling) {
+            NullHandling.EMIT_EMPTY ->
+                reqShieldDataMono.flatMap { Mono.justOrEmpty(it.value) }
+            NullHandling.ERROR ->
+                reqShieldDataMono.flatMap { reqShieldData ->
+                    val value = reqShieldData.value
+                    if (value == null) {
+                        Mono.error(IllegalStateException("ReqShieldCacheable returned null for key=$cacheKey"))
+                    } else {
+                        Mono.just(value)
+                    }
+                }
+        }
     }
 
     @Around("@annotation(com.linecorp.cse.reqshield.spring.webflux.annotation.ReqShieldCacheEvict)")
     fun aroundReqShieldCacheEvict(joinPoint: ProceedingJoinPoint): Mono<Any?> {
-        val cacheKey = getCacheEvictCacheKey(joinPoint)
+        val cacheKey = buildCacheKey(getEvictMethod(joinPoint), joinPoint)
 
+        // Same default as Spring's @CacheEvict: a method that fails leaves the cache untouched.
+        // An empty completion (for example Mono<Void>) is a success too, so it evicts as well.
         return Mono
-            .defer {
-                asyncCache.evict(cacheKey)
-            }.flatMap {
-                joinPoint.proceed() as Mono<out Any?>
-            }
+            .defer { joinPoint.proceed() as Mono<Any?> }
+            // A Mono never emits null, so the non-null assertion below can never fail.
+            .flatMap { result -> asyncCache.evict(cacheKey).thenReturn(result!!) }
+            .switchIfEmpty(Mono.defer { asyncCache.evict(cacheKey).then(Mono.empty()) })
     }
 
-    fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
-        AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheEvict::class.java)
-            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
+    private fun getCacheableMethod(joinPoint: ProceedingJoinPoint): CacheableMethod<T> =
+        cacheableMethods.getOrResolve(joinPoint) {
+            val method = getTargetMethod(joinPoint)
+            val annotation = cacheableAnnotationOf(method)
+            val keySource = createKeySource(method, annotation.cacheName, annotation.key, annotation.keyGenerator)
+            val reqShield = reqShieldMap.computeIfAbsent(method) { createReqShield(method, annotation) }
 
-    internal fun getCacheEvictCacheKey(joinPoint: ProceedingJoinPoint): String {
-        val annotation = getCacheEvictAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.cacheName, annotation.key, joinPoint)
-    }
+            CacheableMethod(keySource, reqShield, annotation.timeToLiveMillis, annotation.nullHandling)
+        }
 
-    internal fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method = (joinPoint.signature as MethodSignature).method
+    private fun getEvictMethod(joinPoint: ProceedingJoinPoint): KeySource =
+        evictMethods.getOrResolve(joinPoint) {
+            val method = getTargetMethod(joinPoint)
+            val annotation = evictAnnotationOf(method)
 
-    internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
-        AnnotationUtils.getAnnotation(getTargetMethod(joinPoint), ReqShieldCacheable::class.java)
-            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
+            createKeySource(method, annotation.cacheName, annotation.key, annotation.keyGenerator)
+        }
 
-    internal fun getCacheableCacheKey(joinPoint: ProceedingJoinPoint): String {
-        val annotation = getCacheableAnnotation(joinPoint)
-        return getCacheKeyOrDefault(annotation.cacheName, annotation.key, joinPoint)
-    }
-
-    private fun getCacheKeyOrDefault(
-        annotationCacheName: String,
-        annotationCacheKey: String,
+    /**
+     * Resolves the entry of the intercepted method once. A JDK dynamic proxy reports the interface method, and one
+     * interface can have several implementations with other annotations, so the target class is part of the key.
+     */
+    private inline fun <V : Any> ConcurrentHashMap<MethodClassKey, V>.getOrResolve(
         joinPoint: ProceedingJoinPoint,
-    ): String {
-        return annotationCacheKey.ifBlank {
-            run {
-                val params = StringUtils.arrayToDelimitedString(joinPoint.args, "_")
-                return "$annotationCacheName-[$annotationCacheKey$params]"
-            }
-        }
+        crossinline resolve: () -> V,
+    ): V {
+        val key = MethodClassKey((joinPoint.signature as MethodSignature).method, joinPoint.target?.javaClass)
+
+        return this[key] ?: computeIfAbsent(key) { resolve() }
     }
 
-    private fun getOrCreateReqShield(joinPoint: ProceedingJoinPoint): ReqShield<T> =
-        reqShieldMap.computeIfAbsent(generateReqShieldKey(joinPoint)) {
-            createReqShield(joinPoint)
+    private fun createReqShield(
+        method: Method,
+        annotation: ReqShieldCacheable,
+    ): ReqShield<T> {
+        require(annotation.isLocalLock || lockSupport != null) {
+            "isLocalLock = false on ${method.declaringClass.name}.${method.name} " +
+                "requires the AsyncCache bean to implement GlobalLockSupport"
         }
-
-    private fun createReqShield(joinPoint: ProceedingJoinPoint): ReqShield<T> {
-        val annotation = getCacheableAnnotation(joinPoint)
 
         val reqShieldConfiguration =
             ReqShieldConfiguration(
@@ -118,21 +175,190 @@ class ReqShieldAspect<T>(
                 getCacheFunction = { key ->
                     asyncCache.get(key)
                 },
-                globalLockFunction = { key, timeToLiveMillis ->
-                    asyncCache.globalLock(key, timeToLiveMillis)
-                },
-                globalUnLockFunction = { key ->
-                    asyncCache.globalUnLock(key)
-                },
+                globalLockFunction =
+                    lockSupport?.let { support ->
+                        { lockKey, token, timeToLiveMillis -> support.globalLock(lockKey, token, timeToLiveMillis) }
+                    },
+                globalUnLockFunction =
+                    lockSupport?.let { support ->
+                        { lockKey, token -> support.globalUnLock(lockKey, token) }
+                    },
                 isLocalLock = annotation.isLocalLock,
                 lockTimeoutMillis = annotation.lockTimeoutMillis,
+                scheduler = scheduler,
                 decisionForUpdate = annotation.decisionForUpdate,
                 maxAttemptGetCache = annotation.maxAttemptGetCache,
+                reqShieldWorkMode = annotation.reqShieldWorkMode,
+                storeScopeFunction = storeScopeSupport?.let { support -> { context -> support.storeScope(context) } },
             )
 
         return ReqShield(reqShieldConfiguration)
     }
 
-    private fun generateReqShieldKey(joinPoint: ProceedingJoinPoint): String =
-        "${getCacheableAnnotation(joinPoint).cacheName}-${getCacheableAnnotation(joinPoint).key}"
+    /**
+     * A JDK dynamic proxy reports the interface method, which carries none of the annotations, so the
+     * implementation method is resolved from the target class instead.
+     */
+    internal open fun getTargetMethod(joinPoint: ProceedingJoinPoint): Method =
+        AopUtils.getMostSpecificMethod((joinPoint.signature as MethodSignature).method, joinPoint.target?.javaClass)
+
+    internal fun getCacheableAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheable =
+        cacheableAnnotationOf(getTargetMethod(joinPoint))
+
+    internal fun getCacheEvictAnnotation(joinPoint: ProceedingJoinPoint): ReqShieldCacheEvict =
+        evictAnnotationOf(getTargetMethod(joinPoint))
+
+    private fun cacheableAnnotationOf(method: Method): ReqShieldCacheable =
+        AnnotationUtils.getAnnotation(method, ReqShieldCacheable::class.java)
+            ?: throw IllegalArgumentException("ReqShieldCacheable annotation is required")
+
+    private fun evictAnnotationOf(method: Method): ReqShieldCacheEvict =
+        AnnotationUtils.getAnnotation(method, ReqShieldCacheEvict::class.java)
+            ?: throw IllegalArgumentException("ReqShieldCacheEvict annotation is required")
+
+    internal fun getCacheableCacheKey(joinPoint: ProceedingJoinPoint): String =
+        buildCacheKey(getCacheableMethod(joinPoint).keySource, joinPoint)
+
+    internal fun getCacheEvictCacheKey(joinPoint: ProceedingJoinPoint): String = buildCacheKey(getEvictMethod(joinPoint), joinPoint)
+
+    /** Checks the key attributes and parses or looks up what they name, once per intercepted method. */
+    private fun createKeySource(
+        method: Method,
+        cacheName: String,
+        annotationCacheKey: String,
+        annotationCacheKeyGenerator: String,
+    ): KeySource {
+        validateCacheKey(annotationCacheKey, annotationCacheKeyGenerator)
+
+        return KeySource(
+            method = method,
+            cacheName = cacheName,
+            expression = if (StringUtils.hasText(annotationCacheKey)) spelParser.parseExpression(annotationCacheKey) else null,
+            keyGenerator =
+                if (StringUtils.hasText(annotationCacheKeyGenerator)) {
+                    beanFactory.getBean(annotationCacheKeyGenerator, KeyGenerator::class.java)
+                } else {
+                    null
+                },
+        )
+    }
+
+    /**
+     * Namespaces the resolved key with the cache name so that entries (and the locks derived from
+     * them) of different caches cannot collide. Eviction follows the same rule so that it matches.
+     */
+    private fun buildCacheKey(
+        keySource: KeySource,
+        joinPoint: ProceedingJoinPoint,
+    ): String {
+        val method = keySource.method
+        val args = joinPoint.args
+
+        val key =
+            if (keySource.expression != null) {
+                evaluateKeyExpression(keySource.expression, createEvaluationContext(joinPoint, method, args))
+            } else if (keySource.keyGenerator != null) {
+                generateKey(keySource.keyGenerator, joinPoint, method, args)
+            } else {
+                cacheKeyOfArguments(args)
+            }
+
+        require(!key.isNullOrBlank()) {
+            "Null/blank key for @ReqShieldCacheable method=${method.declaringClass.name}.${method.name} " +
+                "args=${args.joinToString(prefix = "[", postfix = "]") {
+                    it?.let {
+                            arg ->
+                        "${arg::class.simpleName}@${arg.hashCode().toString(16)}"
+                    } ?: "null"
+                }}"
+        }
+
+        return "${keySource.cacheName}::$key"
+    }
+
+    /** Only a SpEL key reads a context, so the default key and a key generator never build one. */
+    internal fun createEvaluationContext(
+        joinPoint: ProceedingJoinPoint,
+        method: Method,
+        args: Array<Any?>,
+    ): EvaluationContext = MethodBasedEvaluationContext(joinPoint.target, method, args, parameterNameDiscoverer)
+
+    private fun validateCacheKey(
+        cacheKey: String,
+        cacheKeyGenerator: String,
+    ) {
+        if (cacheKey.isNotBlank() && cacheKeyGenerator.isNotBlank()) {
+            throw IllegalArgumentException(
+                "The key and keyGenerator attributes are mutually exclusive: key='$cacheKey', keyGenerator='$cacheKeyGenerator'",
+            )
+        }
+    }
+
+    /**
+     * Evaluates the SpEL key. A text is used as is, and an array, a collection or a map is written by content. Any
+     * other result becomes text the way Spring converts it (an enum by its name), or by its `toString()` when Spring
+     * has no converter for it. An object whose class does not override `toString()` is rejected first: its text would
+     * be the class name and the hash code.
+     */
+    private fun evaluateKeyExpression(
+        expression: Expression,
+        context: EvaluationContext,
+    ): String? {
+        val value = expression.getValue(context) ?: return null
+        if (value is String) return value
+        // Spring would join the elements with a bare comma, so an element that holds one would shift into the next
+        if (value.javaClass.isArray || value is Collection<*> || value is Map<*, *>) return cacheKeyOfValue(value)
+        requireOwnToString(value)
+
+        val valueType = TypeDescriptor.forObject(value)
+        val textType = TypeDescriptor.valueOf(String::class.java)
+        // Spring has no converter to String for a class without a String constructor or factory, a data class
+        // for example. Such a value is its own toString(), which the check above has just required.
+        if (!context.typeConverter.canConvert(valueType, textType)) return value.toString()
+
+        return context.typeConverter.convertValue(value, valueType, textType) as String?
+    }
+
+    /** The named [KeyGenerator] bean decides the key; its result must describe itself, like any other key object. */
+    private fun generateKey(
+        keyGenerator: KeyGenerator,
+        joinPoint: ProceedingJoinPoint,
+        method: Method,
+        args: Array<Any?>,
+    ): String =
+        keyGenerator
+            .generate(joinPoint.target, method, *args)
+            .also { requireOwnToString(it) }
+            .toString()
+
+    override fun setBeanFactory(beanFactory: BeanFactory) {
+        this.beanFactory = beanFactory
+        scheduler =
+            if (beanFactory.containsBean(SCHEDULER_BEAN_NAME)) {
+                // Throws BeanNotOfRequiredTypeException for a bean of another type
+                beanFactory.getBean(SCHEDULER_BEAN_NAME, Scheduler::class.java)
+            } else {
+                Schedulers.boundedElastic()
+            }
+    }
+
+    /** What a key needs that does not depend on the arguments: at most one of [expression] and [keyGenerator] is set. */
+    private class KeySource(
+        val method: Method,
+        val cacheName: String,
+        val expression: Expression?,
+        val keyGenerator: KeyGenerator?,
+    )
+
+    private class CacheableMethod<T>(
+        val keySource: KeySource,
+        val reqShield: ReqShield<T>,
+        val timeToLiveMillis: Long,
+        val nullHandling: NullHandling,
+    )
+
+    companion object {
+        /** Name of the optional application bean that replaces the shared boundedElastic scheduler. */
+        internal const val SCHEDULER_BEAN_NAME = "reqShieldScheduler"
+    }
 }

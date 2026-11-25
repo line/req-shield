@@ -16,15 +16,33 @@
 
 package com.linecorp.cse.reqshield
 
+/**
+ * Lock used to collapse concurrent requests for the same cache key.
+ *
+ * Ownership is represented by an opaque token: only the holder that acquired the lock can
+ * release it, so a holder whose lock already expired and was taken over by someone else
+ * cannot release the new owner's lock.
+ */
 interface KeyLock {
+    /**
+     * Acquires the lock for [key] + [lockType].
+     *
+     * @return an opaque ownership token, or null when another holder owns the lock.
+     */
     fun tryLock(
         key: String,
         lockType: LockType,
-    ): Boolean
+    ): String?
 
+    /**
+     * Releases the lock for [key] + [lockType] only if [token] matches the current owner.
+     *
+     * @return false when the lock is not held or the token does not match the current owner.
+     */
     fun unLock(
         key: String,
         lockType: LockType,
+        token: String,
     ): Boolean
 }
 

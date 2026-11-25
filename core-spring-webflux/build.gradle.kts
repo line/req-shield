@@ -31,12 +31,7 @@ dependencies {
     testImplementation(rootProject.libs.reactor)
     testImplementation(rootProject.libs.reactor.test)
     testImplementation(rootProject.libs.spring.context)
+    testImplementation(rootProject.libs.spring.test)
     testImplementation(rootProject.libs.aspectj)
-}
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        freeCompilerArgs = listOf("-Xjsr305=strict")
-        jvmTarget = JavaVersion.VERSION_1_8.toString()
-    }
+    testImplementation(rootProject.libs.lettuce)
 }

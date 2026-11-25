@@ -30,10 +30,3 @@ dependencies {
     testImplementation(rootProject.libs.spring.context)
     testImplementation(rootProject.libs.aspectj)
 }
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        freeCompilerArgs = listOf("-Xjsr305=strict")
-        jvmTarget = JavaVersion.VERSION_1_8.toString()
-    }
-}

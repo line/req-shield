@@ -3,6 +3,8 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
 !**/src/test/**/build/
+.codex
+.gradle-user-home
 
 ### IntelliJ IDEA ###
 .idea
@@ -38,3 +40,5 @@ bin/
 ### Mac OS ###
 .DS_Store
 /.idea/
+
+.cross-memory.toml

@@ -67,10 +67,10 @@ Please report features you would like to see added to github issues.
 ## Developer Guide
 
 ### Development languages
-* Kotlin 1.6.0 or later
+* Kotlin (the build uses the Kotlin 2.4 compiler; see `libs.versions.toml`)
 
 ### Build Requirements
-* JDK 8 or later
+* JDK 21 or later
 
 ### How To Build
 * We use Gradle to build Req-Shield. The following command will compile Req-Shield.
@@ -129,8 +129,8 @@ Please report features you would like to see added to github issues.
 * Use ktlint to check the code style.
   > ./gradlew ktlintCheck
 
-### Use JUnit 5 instead of JUnit 4 for testing
-* Use JUnit 5 for testing.
+### Use JUnit Jupiter instead of JUnit 4 for testing
+* Use JUnit Jupiter (JUnit 6) for testing.
 
 ### How to write pull request description
 * Motivation

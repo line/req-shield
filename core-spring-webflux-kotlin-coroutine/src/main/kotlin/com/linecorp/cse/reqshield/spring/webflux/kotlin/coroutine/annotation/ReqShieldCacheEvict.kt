@@ -24,7 +24,5 @@ import java.lang.annotation.Inherited
 annotation class ReqShieldCacheEvict(
     val cacheName: String,
     val key: String = "",
-    val isLocalLock: Boolean = true,
-    val lockTimeoutMillis: Long = 3000,
-    val condition: String = "",
+    val keyGenerator: String = "",
 )

@@ -19,6 +19,8 @@ package com.linecorp.cse.reqshield.support
 interface BaseReqShieldTest {
     fun testSetMethodCacheNotExistsAndLocalLockAcquired()
 
+    fun testSetMethodCacheNotExistsAndOnlyUpdateCache()
+
     fun testSetMethodCacheNotExistsAndGlobalLockAcquired()
 
     fun testSetMethodCacheNotExistsAndGlobalLockAcquiredAndDoesNotExistGlobalLockFunction()
@@ -42,6 +44,8 @@ interface BaseReqShieldTest {
     fun testSetMethodCacheExistsButNotTargetedForUpdate()
 
     fun testSetMethodCacheExistsAndTheUpdateTarget()
+
+    fun testSetMethodCacheExistsAndTheUpdateTargetOnlyCreateCache()
 
     fun testSetMethodCacheExistsAndTheUpdateTargetAndCallableReturnNull()
 

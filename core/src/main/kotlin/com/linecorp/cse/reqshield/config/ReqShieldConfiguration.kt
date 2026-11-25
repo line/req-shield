@@ -24,29 +24,66 @@ import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIM
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import com.linecorp.cse.reqshield.support.exception.code.ErrorCode
 import com.linecorp.cse.reqshield.support.model.ReqShieldData
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
+import com.linecorp.cse.reqshield.support.utils.newBackgroundExecutor
+import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
 
 data class ReqShieldConfiguration<T>(
     val setCacheFunction: (String, ReqShieldData<T>, Long) -> Boolean,
     val getCacheFunction: (String) -> ReqShieldData<T>?,
-    val globalLockFunction: ((String, Long) -> Boolean)? = null,
-    val globalUnLockFunction: ((String) -> Boolean)? = null,
+    /**
+     * (lockKey, token, ttlMillis) -> acquired. Required when [isLocalLock] is false.
+     * The implementation must acquire only when the key is absent and must let the lock expire
+     * on its own, e.g. `SET key token NX PX ttl`.
+     */
+    val globalLockFunction: ((String, String, Long) -> Boolean)? = null,
+    /**
+     * (lockKey, token) -> released. Required when [isLocalLock] is false.
+     * The implementation must be a compare-and-delete: delete the key only while its value still
+     * equals the token, so an expired holder cannot release the lock of the next holder.
+     */
+    val globalUnLockFunction: ((String, String) -> Boolean)? = null,
     val isLocalLock: Boolean = true,
     val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
-    val executor: ScheduledExecutorService =
-        Executors.newScheduledThreadPool(
-            Runtime.getRuntime().availableProcessors() * 10,
-        ),
+    /**
+     * Executor used for the asynchronous cache writes. Only [Executor.execute] is called, so any
+     * pool works, and the library never shuts the pool down - a caller-supplied one stays the
+     * caller's to manage. A task the pool rejects (bounded queue full, or pool shut down) only
+     * skips that cache write or refresh; the request still gets its data and the lock is released.
+     * Defaults to a single pool shared by every configuration instance.
+     */
+    val executor: Executor = sharedExecutor,
     val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
-    val keyLock: KeyLock =
-        if (isLocalLock) {
-            KeyLocalLock(lockTimeoutMillis)
-        } else {
-            KeyGlobalLock(globalLockFunction!!, globalUnLockFunction!!, lockTimeoutMillis)
-        },
+    val keyLock: KeyLock = defaultKeyLock(isLocalLock, globalLockFunction, globalUnLockFunction, lockTimeoutMillis),
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
+    /**
+     * Names the cache and the lock store of a request. Set it when the cache or lock functions choose their store
+     * from the calling thread, for example from a `ThreadLocal` with the tenant. Give the same text for requests
+     * that use the same store, and another text for another store.
+     *
+     * Inside the JVM, a request waits for a creation or a refresh that another request of this instance runs for
+     * the same key. Without this function such a request also waits for a request that uses another store, which
+     * can never give it an entry.
+     *
+     * It runs on the caller's thread, so it can read a `ThreadLocal`. It runs at most once for a request, not at all
+     * for a request that finds a fresh entry. It must not block. If it throws, a request without an entry fails with
+     * `ClientException(STORE_SCOPE_ERROR)`. If it throws for a request that got an old entry, that request skips the
+     * refresh and logs a warning.
+     *
+     * The cache writes, the cache read before a late write, and some lock releases run on [executor]. A store that
+     * is chosen from a `ThreadLocal` needs an executor that copies that `ThreadLocal` into its tasks.
+     */
+    val storeScopeFunction: (() -> String)? = null,
 ) {
+    companion object {
+        /**
+         * Shared by every configuration instance: one ReqShield per cache key must not mean one
+         * thread pool per cache key. Threads are daemons so the pool never blocks JVM shutdown.
+         */
+        private val sharedExecutor: ExecutorService by lazy { newBackgroundExecutor("req-shield-executor-") }
+    }
+
     init {
         if (!isLocalLock) {
             requireNotNull(globalLockFunction) {
@@ -57,4 +94,40 @@ data class ReqShieldConfiguration<T>(
             }
         }
     }
+}
+
+/**
+ * Builds the [KeyLock] used when the caller does not pass one.
+ *
+ * A default parameter expression is evaluated before the init block, so the global lock functions
+ * must be validated here as well to report a missing one as an [IllegalArgumentException].
+ */
+private fun defaultKeyLock(
+    isLocalLock: Boolean,
+    globalLockFunction: ((String, String, Long) -> Boolean)?,
+    globalUnLockFunction: ((String, String) -> Boolean)?,
+    lockTimeoutMillis: Long,
+): KeyLock =
+    if (isLocalLock) {
+        KeyLocalLock(lockTimeoutMillis)
+    } else {
+        KeyGlobalLock(
+            requireNotNull(globalLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_LOCK_FUNCTION.message },
+            requireNotNull(globalUnLockFunction) { ErrorCode.DOES_NOT_EXIST_GLOBAL_UNLOCK_FUNCTION.message },
+            lockTimeoutMillis,
+        )
+    }
+
+enum class ReqShieldWorkMode {
+    /** Requests are collapsed with the configured lock when an entry is created and when it is refreshed. */
+    CREATE_AND_UPDATE_CACHE,
+
+    /**
+     * The configured lock is used when an entry is created. A refresh takes a local lock of this JVM instead, so one
+     * instance runs one refresh of a key at a time and a global lock gets no call for a refresh.
+     */
+    ONLY_CREATE_CACHE,
+
+    /** The configured lock is used when an entry is refreshed. On a cache miss each request calls the supplier. */
+    ONLY_UPDATE_CACHE,
 }

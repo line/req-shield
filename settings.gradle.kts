@@ -29,20 +29,26 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "0.5.0"
 }
 
+// Spring Boot's Gradle plugin brings commons-lang3 3.16.0 through commons-compress.
+// Constrain the build classpath before project plugins resolve, without changing application dependencies.
+gradle.beforeProject {
+    buildscript.dependencies.constraints.add("classpath", "org.apache.commons:commons-lang3:3.18.0") {
+        because("Fix uncontrolled recursion in ClassUtils.getClass (Dependabot #294)")
+    }
+}
+
 rootProject.name = "req-shield"
 include("core")
 include("core-reactor")
 include("core-kotlin-coroutine")
 include("core-spring")
-include("req-shield-spring-example")
-include("req-shield-spring-boot3-example")
 include("core-spring-webflux")
-include("req-shield-spring-webflux-example")
-include("req-shield-spring-boot3-webflux-example")
 include("core-spring-webflux-kotlin-coroutine")
-include("req-shield-spring-webflux-kotlin-coroutine-example")
-include("req-shield-spring-boot3-webflux-kotlin-coroutine-example")
+include("req-shield-spring-boot4-example")
+include("req-shield-spring-boot4-webflux-example")
+include("req-shield-spring-boot4-webflux-kotlin-coroutine-example")
 include("support")
+include("req-shield-benchmark-example")
 
 dependencyResolutionManagement {
     versionCatalogs {

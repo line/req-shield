@@ -16,18 +16,24 @@
 
 package com.linecorp.cse.reqshield.spring.annotation
 
+import com.linecorp.cse.reqshield.config.ReqShieldWorkMode
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_DECISION_FOR_UPDATE
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_LOCK_TIMEOUT_MILLIS
+import com.linecorp.cse.reqshield.support.constant.ConfigValues.DEFAULT_TIME_TO_LIVE_MILLIS
 import com.linecorp.cse.reqshield.support.constant.ConfigValues.MAX_ATTEMPT_GET_CACHE
 import java.lang.annotation.Inherited
 
-@Target(AnnotationTarget.FUNCTION)
+@Target(AnnotationTarget.FUNCTION, AnnotationTarget.ANNOTATION_CLASS)
 @Retention(AnnotationRetention.RUNTIME)
 @Inherited
 annotation class ReqShieldCacheable(
     val cacheName: String,
     val key: String = "",
+    val keyGenerator: String = "",
     val isLocalLock: Boolean = true,
-    val lockTimeoutMillis: Long = 30000,
-    val decisionForUpdate: Int = 90,
+    val lockTimeoutMillis: Long = DEFAULT_LOCK_TIMEOUT_MILLIS,
+    val decisionForUpdate: Int = DEFAULT_DECISION_FOR_UPDATE,
     val maxAttemptGetCache: Int = MAX_ATTEMPT_GET_CACHE,
-    val timeToLiveMillis: Long = 10 * 60 * 1000,
+    val timeToLiveMillis: Long = DEFAULT_TIME_TO_LIVE_MILLIS,
+    val reqShieldWorkMode: ReqShieldWorkMode = ReqShieldWorkMode.CREATE_AND_UPDATE_CACHE,
 )

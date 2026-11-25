@@ -14,7 +14,11 @@
  *  under the License.
  */
 
-version = "1.0.0"
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+version = "1.4.0"
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -24,18 +28,24 @@ plugins {
     application
     `maven-publish`
     `java-library`
+    signing
+    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
 }
+
+val baseVersion = version.toString()
+val snapshotBuild = providers.gradleProperty("snapshotBuild").getOrElse("true").toBoolean()
 
 allprojects {
 
     group = "com.linecorp.cse.reqshield"
-    version = "1.0.0"
+    version = "$baseVersion${if (snapshotBuild) "-SNAPSHOT" else ""}"
 
     apply {
         plugin("java-test-fixtures")
         plugin("maven-publish")
         plugin("java-library")
         plugin("jacoco")
+        plugin("signing")
     }
 
     repositories {
@@ -43,9 +53,35 @@ allprojects {
     }
 
     dependencies {
-        implementation(rootProject.libs.kotlin.reflect)
-        implementation(rootProject.libs.slf4j)
-        testImplementation(rootProject.libs.logback)
+        if (project.name.endsWith("-example")) {
+            // Example applications are not published; they run on the runtime of the compiler that builds them.
+            implementation(
+                kotlin(
+                    "stdlib",
+                    rootProject.libs.versions.kotlin
+                        .get(),
+                ),
+            )
+            implementation(
+                kotlin(
+                    "reflect",
+                    rootProject.libs.versions.kotlin
+                        .get(),
+                ),
+            )
+        } else {
+            // `api` keeps the stdlib in the published POM's compile scope (as the Kotlin plugin's default did),
+            // because the public API exposes Kotlin types such as function types to Java callers.
+            "api"(rootProject.libs.kotlin)
+            // The test-fixtures source set does not inherit `api`, so it needs the stdlib too.
+            "testFixturesApi"(rootProject.libs.kotlin)
+            implementation(rootProject.libs.kotlin.reflect)
+            // Example applications get slf4j and logback from their Spring Boot starters instead.
+            implementation(rootProject.libs.slf4j)
+            testImplementation(rootProject.libs.logback)
+            // Lettuce, the Redis client of the tests, brings a Netty version with known vulnerabilities.
+            testImplementation(platform(rootProject.libs.netty.bom))
+        }
 
         testImplementation(rootProject.libs.kotlin.test)
         testImplementation(rootProject.libs.mockk)
@@ -64,67 +100,114 @@ allprojects {
         }
     }
 
+    // Enforce the minimum line coverage documented in CLAUDE.md for library modules.
+    // Example applications (req-shield-*-example) are demos and are not held to the threshold.
+    if (project != rootProject && !project.name.endsWith("-example")) {
+        tasks.withType<JacocoCoverageVerification> {
+            dependsOn(tasks.test)
+            violationRules {
+                rule {
+                    limit {
+                        counter = "LINE"
+                        value = "COVEREDRATIO"
+                        minimum = "0.80".toBigDecimal()
+                    }
+                }
+            }
+        }
+        tasks.named("check") {
+            dependsOn(tasks.withType<JacocoCoverageVerification>())
+        }
+    }
+
     jacoco {
         toolVersion = "0.8.12"
     }
+
+    // Tool classpaths (ktlint, and the Kotlin plugin's internal Bouncy Castle) are resolved per project.
+    // Registered after evaluation so that these rules run after Spring's dependency management rule.
+    afterEvaluate {
+        configurations.matching { it.name.startsWith("ktlint") }.configureEach {
+            resolutionStrategy.eachDependency {
+                when (requested.group) {
+                    // Spring Boot's dependency management (example modules) aligns every org.jetbrains.kotlin
+                    // artifact to the project's Kotlin version, including the compiler that ktlint embeds,
+                    // and ktlint fails with that compiler. Keep the versions ktlint asks for.
+                    "org.jetbrains.kotlin" -> {
+                        useVersion(requested.version!!)
+                    }
+
+                    // ktlint 1.0.1 brings logback 1.3.5, which has known vulnerabilities.
+                    "ch.qos.logback" -> {
+                        useVersion(
+                            rootProject.libs.versions.logback
+                                .get(),
+                        )
+                    }
+                }
+            }
+        }
+        configurations.matching { it.name == "kotlinBouncyCastleConfiguration" }.configureEach {
+            resolutionStrategy.eachDependency {
+                // The Kotlin Gradle plugin 2.4.21 brings bcprov 1.84, which has known vulnerabilities.
+                if (requested.group == "org.bouncycastle") {
+                    useVersion(
+                        rootProject.libs.versions.bouncycastle
+                            .get(),
+                    )
+                }
+            }
+        }
+    }
 }
 
-val springBoot3ProjectNames =
-    listOf(
-        "req-shield-spring-boot3-example",
-        "req-shield-spring-boot3-webflux-example",
-        "req-shield-spring-boot3-webflux-kotlin-coroutine-example",
+// Modules that implement or call the Reactor API of the library (see the compiler options below).
+val reactorApiProjects =
+    setOf(
+        "core-reactor",
+        "core-spring-webflux",
+        "req-shield-spring-boot4-webflux-example",
+        "req-shield-benchmark-example",
     )
 
 subprojects {
     apply {
         plugin("org.jlleitschuh.gradle.ktlint")
     }
+
     java {
-        sourceCompatibility =
-            when (project.name) {
-                in springBoot3ProjectNames -> JavaVersion.VERSION_17
-                else -> JavaVersion.VERSION_1_8
+        withJavadocJar()
+        withSourcesJar()
+
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    tasks.withType<KotlinCompile>().configureEach {
+        compilerOptions {
+            freeCompilerArgs.add("-Xjsr305=strict")
+            // Reactor 3.8 declares Mono's type parameter non-null with JSpecify annotations, which the Kotlin
+            // compiler enforces as errors by default. The Reactor API of the library still uses nullable type
+            // arguments such as Mono<ReqShieldData<T>?>, so the modules that implement or call it report them
+            // as warnings.
+            if (project.name in reactorApiProjects) {
+                freeCompilerArgs.add("-Xjspecify-annotations=warn")
             }
-        targetCompatibility =
-            when (project.name) {
-                in springBoot3ProjectNames -> JavaVersion.VERSION_17
-                else -> JavaVersion.VERSION_1_8
+            jvmTarget.set(JvmTarget.JVM_21)
+            // Library modules are compiled by the K2 compiler but emit Kotlin 2.2 metadata and use only the
+            // 2.2 standard library API, so that consumers on Kotlin 2.2 and 2.3 (older than this compiler) can still read them.
+            // Example applications are not published and use the compiler defaults.
+            if (!project.name.endsWith("-example")) {
+                languageVersion.set(KotlinVersion.KOTLIN_2_2)
+                apiVersion.set(KotlinVersion.KOTLIN_2_2)
             }
+        }
     }
 
     afterEvaluate {
-        fun getProfile() = properties["PROFILE"] ?: System.getenv()["PROFILE"] ?: "local"
-
-        fun getVersion() = project.version.toString()
-
-        fun getSemanticPostfix() =
-            when (getProfile()) {
-                "real" -> ""
-                else -> "-SNAPSHOT"
-            }
-
-        version = "${getVersion()}${getSemanticPostfix()}"
+        if (project.name.endsWith("-example")) return@afterEvaluate
 
         publishing {
-            repositories {
-                maven {
-                    fun getUrl(): String =
-                        if (getProfile() == "real") {
-                            "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
-                        } else {
-                            "https://oss.sonatype.org/content/repositories/snapshots/"
-                        }
-
-                    url = uri(getUrl())
-
-                    credentials {
-                        username = System.getenv()["NEXUS_USER"]
-                        password = System.getenv()["NEXUS_PASS"]
-                    }
-                }
-            }
-
             publications {
                 register("mavenJava", MavenPublication::class) {
 
@@ -135,6 +218,14 @@ subprojects {
                         description.set("LINE Req-Shield")
                         url.set("https://github.com/line/req-shield.git")
 
+                        developers {
+                            developer {
+                                name.set("LINE Corporation")
+                                organization.set("LY Corporation")
+                                organizationUrl.set("https://www.lycorp.co.jp/en/")
+                            }
+                        }
+
                         licenses {
                             license {
                                 name.set("The Apache License, Version 2.0")
@@ -143,13 +234,32 @@ subprojects {
                         }
 
                         scm {
-                            url.set("scm:git@github.com:line/req-shield.git")
-                            connection.set("scm:git@github.com:line/req-shield.git")
-                            developerConnection.set("scm:git@github.com:line/req-shield.git")
+                            url.set("https://github.com/line/req-shield")
+                            connection.set("scm:git:https://github.com/line/req-shield.git")
+                            developerConnection.set("scm:git:ssh://git@github.com/line/req-shield.git")
                         }
                     }
                 }
             }
+        }
+
+        val signingKeyId = providers.gradleProperty("signingKeyId").orNull
+        val signingKey = providers.gradleProperty("signingKey").orNull
+        val signingPassword = providers.gradleProperty("signingPassword").orNull
+        if (signingKey != null) {
+            signing {
+                useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+                sign(publishing.publications["mavenJava"])
+            }
+        }
+    }
+}
+
+nexusPublishing {
+    repositories {
+        sonatype {
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
         }
     }
 }

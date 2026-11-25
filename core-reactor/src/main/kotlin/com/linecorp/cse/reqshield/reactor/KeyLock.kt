@@ -19,14 +19,27 @@ package com.linecorp.cse.reqshield.reactor
 import reactor.core.publisher.Mono
 
 interface KeyLock {
+    /**
+     * Tries to acquire the lock for [key] and [lockType].
+     *
+     * Emits an opaque ownership token when the lock was acquired, and completes EMPTY
+     * when another holder currently owns the lock.
+     */
     fun tryLock(
         key: String,
         lockType: LockType,
-    ): Mono<Boolean>
+    ): Mono<String>
 
+    /**
+     * Releases the lock for [key] and [lockType] only if [token] matches the current owner.
+     *
+     * Emits false when the lock is not held or the token does not match, so an expired lock
+     * that was already handed to another holder can never be released by a stale owner.
+     */
     fun unLock(
         key: String,
         lockType: LockType,
+        token: String,
     ): Mono<Boolean>
 }
 
