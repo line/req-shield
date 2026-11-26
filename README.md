@@ -2,6 +2,8 @@ Visit [the github wiki](https://github.com/line/req-shield/wiki/What-is-Req-Shie
 
 # Req-Shield
 
+[![codecov](https://codecov.io/github/line/req-shield/graph/badge.svg)](https://codecov.io/github/line/req-shield)
+
 A lib that regulates the cache-based requests an application receives in terms of request-collapsing.
 
 ## Requirements
